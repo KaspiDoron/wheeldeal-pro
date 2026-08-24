@@ -4,16 +4,19 @@
 //
 // The Keys tab already had a roll call - "is each service answering". This
 // card answers the other question, the one that decides whether the next
-// hundred users land safely: WHICH CEILING ARE WE CLOSEST TO. Four readings,
+// hundred users land safely: WHICH CEILING ARE WE CLOSEST TO. The readings,
 // each with a threshold attached, because every one of these numbers already
 // existed somewhere on some panel with nothing to compare it to, and a number
 // you have to know the ceiling by heart to read is a number nobody reads.
 //
 // The order is SCALING.md's order, worst-first-by-consequence:
 //   1. WhatsApp host occupancy - the only ceiling whose failure is a BAN.
-//   2. Queue drain heartbeat - nothing sends unless something pings.
-//   3. Database round trip - the PostgREST pool queues before it errors.
-//   4. The three event kinds PRODUCTION-READINESS.md says should page someone.
+//   2. Invited testers vs fleet capacity - the invite decision, pre-computed.
+//      A tester past the fleet's capacity signs in fine and then cannot link
+//      WhatsApp, so this compares INVITES (pessimistic) rather than pairings.
+//   3. Queue drain heartbeat - nothing sends unless something pings.
+//   4. Database round trip - the PostgREST pool queues before it errors.
+//   5. The three event kinds PRODUCTION-READINESS.md says should page someone.
 //
 // The digest button is the deliberate NON-answer to error tracking: no Sentry,
 // no new dependency, no new bill - the counts that already exist, mailed to

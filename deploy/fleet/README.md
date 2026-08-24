@@ -8,32 +8,57 @@ file).
 
 ## Why more than one host at all
 
-Three separate reasons, and only the first is about capacity.
+Four separate reasons, and only the first is about capacity.
 
 1. **Capacity.** Render `starter` is 512 MB - below Evolution's own stated
    production floor of 2 vCPU / 2 GB - and `render.yaml` itself says that holds
-   roughly 30-50 live sockets. `maxPerHost` is 25 and now genuinely REFUSES at
-   the cap rather than overfilling, so one host means a beta capped at 25
-   linked numbers.
+   roughly 30-50 live sockets. `maxPerHost` is 25 and genuinely REFUSES at the
+   cap rather than overfilling, so **one host means a beta capped at 25 linked
+   numbers**. 100 testers need **4 hosts** of capacity; 8 lanes gives 200 and
+   leaves room to lose one.
 2. **Geography.** IP-vs-number geo mismatch is a separately scored WhatsApp
    signal. Our whole fleet was one box in Oregon carrying numbers whose shops
    are in south-east Asia.
 3. **Blast radius.** One burned IP range must not take the whole beta down.
-   Four hosts on four providers is four ASNs.
+4. **Provider risk.** See the next paragraph - it is the thing this table gets
+   wrong if you read it as a shopping list.
+
+> **A HOST buys capacity. A PROVIDER buys blast radius.** Six VMs inside one
+> Oracle tenancy are six hosts and **one** failure domain: one suspended
+> tenancy takes all six, and one flagged ASN taints all six. Cap any single
+> provider at half the fleet. That constraint, not the free-tier limits, is
+> what shapes the recommended arrangement below.
 
 Migrating off Render also **saves $13/mo** ($7 web + $6 Postgres).
 
-## The lanes
+## The lanes (verified Aug 2026 against primary sources)
 
-| Lane | Host | Cost | Notes |
-|---|---|---|---|
-| A | Oracle Cloud Always Free | $0 forever | 2 OCPU / 12 GB ARM, 200 GB. **The home region is permanent** - create this account LAST, once the majority tester country is known. |
-| B | Azure free tier | $0 for 12 months | B1s / B2pts v2, 750 h/mo. Many regions including SE Asia; covers the whole beta window. |
-| C | Northflank Sandbox | $0 | 2 services, 1 vCPU / 1 GB, no sleep. Docker-native. 1 GB is one small lane. |
-| D | Render (existing) | $13/mo | Keep only until A and B are proven, then retire it. |
+| # | Lane | Free? | Shape | What to know before you commit |
+|---|---|---|---|---|
+| 1-4 | **Oracle Always Free, ARM A1** | forever | 2 OCPU / 12 GB **total**, splittable into up to **4** instances | Halved from 4 OCPU / 24 GB on **15 Jun 2026**, and over-limit instances were terminated from **18 Aug 2026**. **The home region is chosen at signup and can NEVER be changed** - create this account LAST. |
+| 5-6 | **Oracle Always Free, AMD** | forever | 2 x `VM.Standard.E2.1.Micro`, 1/8 OCPU + 1 GB each | Untouched by the June cut. 1 GB comfortably holds 25 sockets. Same tenancy as 1-4, so same failure domain. |
+| 7 | **Google Cloud Always Free** | forever | 1 x `e2-micro`, 1 GB, 30 GB disk | **us-west1 / us-central1 / us-east1 ONLY** - a geo mismatch for Asian numbers, so give it numbers whose shops are in the Americas or leave its prefix field empty. Same GCP account as Cloud Run. |
+| 8 | **Northflank free** | forever | 2 services + 1 DB + 2 crons, **no sleep** | Docker-native and genuinely always-on. Positioned by Northflank as a **sandbox**, not production - read their current terms before leaning on it. No card, no region decision: **start here.** |
+| 9 | **Azure free** | **12 months** | B1s, 750 h/mo | **Expires**, and the expiry date is the day a cohort loses its host. Many regions including SE Asia. Card required for verification. |
+| 10 | **AWS** | **6-12 months** | credits (post-Jul-2025 accounts) | Expires. Legacy accounts keep the old 12-month tier. Last resort. |
+| - | **Render** (current) | **$13/mo** | 512 MB starter + Postgres | Keep until two free lanes are proven, then retire it and save the $13. |
+| x | **Koyeb** | **CLOSED** | - | Free Starter shut to NEW signups after the Feb 2026 Mistral acquisition. Listed so nobody re-researches it. |
+| x | **Fly.io** | **DEAD** | - | Free tier removed in 2024; only legacy Hobby orgs keep 3 machines. |
 
-Fly.io's free tier is dead (2024) and Koyeb closed theirs to new users in early
-2026 - both are listed here so nobody re-researches them.
+**Recommended shape for 100 testers - 8 lanes, 200 capacity, 5 providers:**
+2 x Oracle ARM (1 OCPU / 6 GB each) + 2 x Oracle AMD + 1 x GCP e2-micro +
+1 x Northflank + 1 x Azure B1s + Render until it is retired. That holds Oracle
+to 4 of the 8, so no single tenancy is more than half the fleet.
+
+**Build them in this order**, which is not the table's order:
+
+1. **Northflank** - no card, no region decision, no expiry. Proves the compose
+   file on someone else's infrastructure before any commitment.
+2. **GCP e2-micro** - the account already exists (Cloud Run runs there).
+3. **Azure B1s** - region-matched, and **write its expiry date down**.
+4. **Oracle, LAST.** Its home region is permanent, so it is the one decision
+   that cannot be walked back. Make it once the majority tester country is
+   known, then take all 4-6 instances in one go.
 
 ## Standing one up
 
@@ -63,6 +88,14 @@ Fly.io's free tier is dead (2024) and Koyeb closed theirs to new users in early
    capacity in the right region says so instead of looking uniformly green.
 
 `.env` is gitignored by the repo root rule. Never commit a key.
+
+## Retiring Render
+
+Once two free lanes are carrying real numbers, remove Render's
+`EVOLUTION_HOSTS` line, let its cohort re-link onto the fleet, then delete the
+services. That also deletes the duplicate `wd-queue-drain` cron and the broken
+Blueprint (see `render.yaml`'s header) - three problems closed by one action,
+and $13/mo back.
 
 ## Monitoring (also $0)
 

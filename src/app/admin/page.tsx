@@ -3117,12 +3117,15 @@ function FaqManager() {
   );
 }
 
-// Private-beta invite manager (owner only). Paste the 25 tester emails with a
+// Private-beta invite manager (owner only). Paste the tester emails with a
 // plan each; the app blocks everyone else at login. Stored in Supabase config,
-// applied instantly with no redeploy.
+// applied instantly with no redeploy. The ceiling is served by the route
+// (BETA_ALLOWLIST_MAX) rather than written here - the two used to be separate
+// literals, so raising one left the panel confidently quoting the other.
 function BetaManager() {
   const [text, setText] = useState("");
   const [counts, setCounts] = useState<{ total: number; free: number; pro: number; ultra: number } | null>(null);
+  const [max, setMax] = useState<number | null>(null);
   const [lock, setLock] = useState(true);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -3133,6 +3136,7 @@ function BetaManager() {
     const d = await (await fetch("/api/admin/beta")).json();
     setLock(Boolean(d.lockEnabled));
     setCounts(d.counts ?? null);
+    setMax(typeof d.max === "number" ? d.max : null);
     setText(
       (d.entries ?? [])
         .map(
@@ -3189,7 +3193,11 @@ function BetaManager() {
         })
       ).json();
       if (d.entries) {
-        setMsg(`Saved - ${d.entries.length} account(s) can log in (incl. you).`);
+        setMsg(
+          d.note
+            ? d.note
+            : `Saved - ${d.entries.length} account(s) can log in (incl. you).`
+        );
         await load();
       } else setMsg(d.error ?? "Could not save.");
     } finally {
@@ -3213,7 +3221,10 @@ function BetaManager() {
         Only these accounts (plus you) can log in - everyone else is blocked at the
         door. One per line: <span className="font-mono">email, plan</span> where plan
         is free / pro / ultra - append <span className="font-mono">, test</span> to
-        make someone a TEST USER. Up to 25 testers. Applies instantly, no redeploy.
+        make someone a TEST USER. Up to {max ?? "-"} testers
+        {counts ? ` (${counts.total} on the list now)` : ""}. Applies instantly, no
+        redeploy. Being invited is not a linked WhatsApp socket - Evolution host
+        capacity is enforced separately at link time.
       </p>
       {/* Global Test Mode switch: test users ride Ultra free + sandbox billing */}
       <div className="mb-2 flex items-center justify-between rounded-xl bg-card2 p-2.5">

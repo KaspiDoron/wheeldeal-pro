@@ -271,14 +271,25 @@ Implications: testers must treat WhatsApp hunts as real outreach to real
 businesses. The banner copy now says exactly that. Kill switch + per-user
 daily limits are the cost guard in both modes.
 
-**Tester capacity**: the beta allowlist caps at 25 invited testers + owner
-(enforced on save; the env-var fallback list is uncapped). WhatsApp capacity
-is bounded separately by `EVOLUTION_MAX_PER_HOST` (default **25** linked
-numbers per Evolution host) - so 25 testers exactly fill one host; more than
-that needs `EVOLUTION_HOSTS` pool entries (~1 host per 25 users). At the cap
-the app REFUSES a new link rather than overfilling, on a single-host
-deployment as well as a pooled one, and says "at capacity" rather than
-blaming the configuration. `deploy/fleet/` is the $0 way to add hosts.
+**Tester capacity - TWO independent ceilings, and they are not the same one.**
+
+1. **The invite list**: `BETA_ALLOWLIST_MAX` in `src/lib/allowlist.ts`,
+   currently **100** testers + owner, enforced on save (the env-var fallback
+   list is uncapped). An over-long paste now REPORTS what it could not store
+   instead of silently truncating, which is how the previous ceiling of 25 lost
+   the tail of a list without telling anyone.
+2. **The fleet**: `EVOLUTION_MAX_PER_HOST` (default **25** linked numbers per
+   Evolution host) x the number of `EVOLUTION_HOSTS` entries. At the cap the
+   app REFUSES a new link rather than overfilling - on a single-host deployment
+   as well as a pooled one - and says "at capacity" rather than blaming the
+   configuration.
+
+**Being invited is not a socket.** A tester past the fleet ceiling signs in
+perfectly happily and then cannot link WhatsApp, which is the confusing half of
+that failure. Admin -> Ops -> choke points now renders *"Invited testers vs
+fleet capacity"* so the invite decision is a number on a screen rather than
+arithmetic: 100 testers need **4 hosts** at the default per-host cap.
+`deploy/fleet/README.md` is the $0 way to add them.
 
 ## Execution resilience (the "batch stopped after one send" fix)
 
