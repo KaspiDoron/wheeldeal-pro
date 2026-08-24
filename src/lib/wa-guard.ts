@@ -40,7 +40,12 @@ import {
   boundHold,
   recipientLocalHour,
 } from "./wa/business-hours";
-import { jitteredHold, HARD_MIN_GAP_SEC, RECIPIENT_LOCK_SEC } from "./wa/pacing";
+import {
+  jitteredHold,
+  pauseRecheckAt,
+  HARD_MIN_GAP_SEC,
+  RECIPIENT_LOCK_SEC,
+} from "./wa/pacing";
 import { clampRestampToWave } from "./wa/waves";
 // THE APPEND-ONLY RISK LEDGER (Tier 3). Every hook below is best-effort and
 // `noteRisk` cannot throw, so telemetry can never be the reason a send fails.
@@ -2674,24 +2679,16 @@ export async function guardOutbound(rawOpts: {
 
   if (rep.paused_until && Date.parse(rep.paused_until) > now) {
     if (opts.auto) {
-      const pauseLeftMs = Date.parse(rep.paused_until) - now;
-      const banRecovery = pauseLeftMs > 4 * 3600_000;
       // A BAN-RECOVERY PAUSE STILL BINDS REPLIES - but it re-checks, it does
-      // not sleep for four hours.
-      //
-      // The pause is account-level and the recovery schedule IS the treatment,
-      // so nothing goes out either way. What changed is the WAKE-UP: a reply
-      // stamped for the original 4h wall sat parked long after the risk engine
-      // had cleared the pause early, and reciprocal traffic is precisely the
-      // lane whose silence hurts the number (a collapsing reply ratio is the
-      // signal that gets accounts restricted in the first place). Cold intros
-      // keep the full horizon: those are the vector under treatment.
-      const replyRecheck = Math.min(45, Math.max(20, Math.round(pauseLeftMs / 60_000 / 8)));
-      const until = !isNewContact
-        ? banRecovery
-          ? jitteredHold(now, replyRecheck, 10)
-          : jitteredHold(now, 10, 5)
-        : rep.paused_until;
+      // not sleep for four hours. The lane split lives in `pauseRecheckAt`
+      // (wa/pacing) as a pure function, because as an inline ternary here the
+      // only thing that could test it was a regex - and inverting the
+      // condition passed the whole suite.
+      const until = pauseRecheckAt({
+        nowMs: now,
+        pausedUntilIso: rep.paused_until,
+        isNewContact,
+      });
       return await queue(until, "number paused (ban-risk recovery)");
     }
     return { allow: false, reason: "This number is paused for safety recovery.", text };

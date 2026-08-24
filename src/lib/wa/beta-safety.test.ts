@@ -20,11 +20,12 @@ describe("A2: the host cap actually refuses", () => {
     // `healthy`. An occupant consumes no new slot, so they get their own host
     // back; a genuinely NEW user - no stored host - is still refused, which is
     // the whole point of the cap.
-    const at = evo.indexOf("if (!underCap.length) {");
-    expect(at).toBeGreaterThan(-1);
-    const branch = evo.slice(at, at + 1200);
-    expect(branch).toMatch(/const home = stored \? hosts\.find\(\(h\) => h\.url === stored\) : undefined;/);
-    expect(branch).toMatch(/return home \?\? null;/);
+    // The behaviour is asserted by running it (see wa/capacity-refusal.test.ts
+    // and wa/host-placement); what stays here is the wiring claim - that
+    // evolution.ts delegates rather than keeping a second copy of the rule,
+    // which is how the "place them anyway" fallback survived in the first place.
+    expect(evo).toMatch(/placeHost<Host>\(\{/);
+    expect(evo).not.toMatch(/underCap\.length \? underCap : pickFrom/);
   });
 
   it("the default cap is the conservative 25, not 40", () => {

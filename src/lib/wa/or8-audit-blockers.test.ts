@@ -115,25 +115,41 @@ describe("F1.2 the dead-link refusal sits where every caller passes", () => {
 });
 
 describe("F1.3 the cap refuses applicants, not occupants", () => {
-  const evo = readCode("src/lib/evolution.ts");
+  // Was three regexes over evolution.ts. The decision moved into
+  // `wa/host-placement` (owner report 10) precisely because the shape of a
+  // branch is not something a regex can evaluate - this exact defect shipped
+  // past a green suite. Same three claims, executed.
+  const H = (url: string) => ({ url, dialPrefixes: [] as string[] });
 
-  it("a stored user gets their own host back instead of null", () => {
-    const at = evo.indexOf("if (!underCap.length) {");
-    expect(at).toBeGreaterThan(-1);
-    const branch = evo.slice(at, at + 1200);
-    expect(branch).toMatch(/const home = stored \? hosts\.find\(\(h\) => h\.url === stored\) : undefined;/);
-    expect(branch).toMatch(/return home \?\? null;/);
+  it("EXECUTED: a stored user gets their own host back instead of null", async () => {
+    const { placeHost } = await import("./host-placement");
+    const hosts = [H("https://a"), H("https://b")];
+    expect(
+      placeHost({
+        hosts,
+        stored: "https://b",
+        counts: { "https://a": 25, "https://b": 25 },
+        cap: 25,
+        healthy: [hosts[0]],
+      })
+    ).toEqual(hosts[1]);
   });
 
-  it("a genuinely new user is still refused - the cap still caps", () => {
-    // `home` is undefined without a stored host, so the branch still returns null.
-    const at = evo.indexOf("if (!underCap.length) {");
-    const branch = evo.slice(at, at + 1200);
-    expect(branch).toMatch(/\?\? null;/);
+  it("EXECUTED: a genuinely new user is still refused - the cap still caps", async () => {
+    const { placeHost } = await import("./host-placement");
+    const hosts = [H("https://a"), H("https://b")];
+    expect(
+      placeHost({ hosts, counts: { "https://a": 25, "https://b": 25 }, cap: 25, healthy: hosts })
+    ).toBeNull();
   });
 
-  it("the single-host branch keeps its own exemption", () => {
-    expect(evo).toMatch(/if \(stored === hosts\[0\]\.url\) return hosts\[0\];/);
+  it("EXECUTED: the single-host branch keeps its own exemption", async () => {
+    const { placeHost } = await import("./host-placement");
+    const only = [H("https://a")];
+    expect(
+      placeHost({ hosts: only, stored: "https://a", counts: { "https://a": 40 }, cap: 25 })
+    ).toEqual(only[0]);
+    expect(placeHost({ hosts: only, counts: { "https://a": 40 }, cap: 25 })).toBeNull();
   });
 });
 

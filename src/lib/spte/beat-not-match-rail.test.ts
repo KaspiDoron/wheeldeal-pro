@@ -144,3 +144,91 @@ describe("the rejection re-composes into something SENDABLE", () => {
     expect(r.finalText).toBeTruthy();
   });
 });
+
+// ---------------------------------------------------------------------------
+// CITE-THE-RIVAL - EXECUTED (owner report 10, test integrity).
+//
+// The rail shipped in OR8 with every assertion about it written as a regex
+// over rails.ts, and the one behavioural signal it had was lost in the
+// beat-not-match rewrite above, which now only checks WHICH rule fires. I
+// verified the gap the honest way: wrapping the rail in `if (false && ...)`,
+// so it can never run at all, passed the entire 5,700-test suite.
+//
+// This is the owner's headline product requirement - "another shop offered
+// 200, can you do 180?" - and it was, once again, guaranteed by nothing.
+// ---------------------------------------------------------------------------
+describe("cite-the-rival actually rejects a bargain that names no rival", () => {
+  it("EXECUTED: a vague ask with a cheaper rival on the board is REJECTED", () => {
+    // The exact live message: it has a question mark, so send-worthiness let
+    // it through, and the strongest card in the hand was never played.
+    const r = runPostRails(ctx(), draft("bargain", "Any chance of a better daily rate?"));
+    expect(r.ok).toBe(false);
+    expect(r.rejected?.rule).toBe("cite-the-rival");
+  });
+
+  it("EXECUTED: naming the rival's number passes - it is a cite, not a format", () => {
+    const r = runPostRails(
+      ctx(),
+      draft("bargain", "Another shop quoted me 200 a day - could you do 185 for the 3 days?", 185)
+    );
+    expect(r.ok).toBe(true);
+    expect(r.finalText).toContain("200");
+  });
+
+  it("EXECUTED: NO cheaper rival means no obligation - the rail stands down", () => {
+    // 300 on the table, the only rival is dearer. There is nothing to cite,
+    // and a rail that fired here would reject perfectly good bargaining.
+    const noCheaper = ctx({
+      session: {
+        rivals: [{ vendorId: "b", shop: "Other", pricePerDay: 400, currency: "THB" }],
+        currency: "THB",
+        rfq: { durationDays: 3, engineSizeCc: 125, vehicleClass: "scooter" },
+      },
+    } as Partial<TurnContext>);
+    const r = runPostRails(noCheaper, draft("bargain", "Any chance of a better daily rate?"));
+    expect(r.rejected?.rule ?? null).not.toBe("cite-the-rival");
+  });
+
+  it("EXECUTED: ANY real rival counts, not only the cheapest one", () => {
+    // A board holding 250 and 200: citing the 250 is perfectly good leverage,
+    // and demanding the cheapest specifically would reject it.
+    const twoRivals = ctx({
+      session: {
+        rivals: [
+          { vendorId: "b", shop: "Other", pricePerDay: 200, currency: "THB" },
+          { vendorId: "c", shop: "Third", pricePerDay: 250, currency: "THB" },
+        ],
+        currency: "THB",
+        rfq: { durationDays: 3, engineSizeCc: 125, vehicleClass: "scooter" },
+      },
+    } as Partial<TurnContext>);
+    const r = runPostRails(
+      twoRivals,
+      draft("bargain", "Another shop quoted me 250 - can you do 240 for the 3 days?", 240)
+    );
+    expect(r.rejected?.rule ?? null).not.toBe("cite-the-rival");
+  });
+
+  it("EXECUTED: the rail reads LOCAL numerals - it never rejects a correct Thai cite", () => {
+    // This app folds ten digit scripts precisely because shops and the
+    // localizer render prices in local script. A rail that could not read them
+    // would reject the very message it exists to require - a downgrade, not a
+    // guarantee. (OR8.1 F4 found this exact class in `citedRival`.)
+    const r = runPostRails(
+      ctx(),
+      draft("bargain", "ร้านอื่นเสนอ ๒๐๐ บาท/วัน ขอ ๑๙๐ ได้ไหมสำหรับ ๓ วัน", 190)
+    );
+    expect(r.rejected?.rule ?? null).not.toBe("cite-the-rival");
+  });
+
+  it("EXECUTED: the rejection re-composes into a message that DOES cite the rival", () => {
+    // The rail's stated guarantee: its failure mode is the message the owner
+    // asked for. A rejection that produced silence, or a rival-free template,
+    // would trade one failure for another.
+    const c = ctx();
+    const fb = fallbackArtifact(c);
+    const r = runPostRails(c, fb);
+    expect(r.ok).toBe(true);
+    expect(r.finalText, "the fallback must name the rival price").toContain("200");
+  });
+});

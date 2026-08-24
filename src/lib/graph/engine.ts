@@ -58,19 +58,8 @@ import {
 } from "./state";
 import { validateMediaCoherence } from "./coherence";
 import { enforceEmojiTone, ensureGloballyUnique } from "./uniqueness";
+import { sessionTableRows } from "./session-table";
 
-/**
- * How many session rows the rival board carries into a turn. It bounds the
- * PROMPT - a hunt can hold forty shops and the model does not need forty.
- */
-const SESSION_TABLE_CAP = 10;
-/**
- * ...of which this many are reserved for the DEAREST shops. `planSiblingRebargain`
- * fans out to at most `MAX_FANOUT` (4) shops per price drop, dearest first, so
- * reserving exactly that many costs the prompt four rows and is the difference
- * between the swarm having targets and having none.
- */
-const REBARGAIN_TAIL = 4;
 import { getPolicyOverlay, DEFAULT_OVERLAY, type PolicyOverlay } from "../ops/overlay";
 import type {
   DeliverResult,
@@ -1823,38 +1812,12 @@ export function liveGraphIO(send: LiveSend): GraphIO {
       // never heard about the 200" failure, and it got quietly more likely the
       // bigger the hunt got.
       //
-      // Ranked cheapest-first, with priced rows ahead of priceless ones and
-      // THIS shop kept regardless (the caller needs its own row to compute
-      // quoteOnTable, and dropping it would break the comparison itself).
-      const ranked = [...rows.values()].sort((a, b) => {
-        if (a.isThisShop !== b.isThisShop) return a.isThisShop ? -1 : 1;
-        const ap = typeof a.pricePerDay === "number" && a.pricePerDay > 0;
-        const bp = typeof b.pricePerDay === "number" && b.pricePerDay > 0;
-        if (ap !== bp) return ap ? -1 : 1;
-        if (ap && bp) return (a.pricePerDay as number) - (b.pricePerDay as number);
-        return 0;
-      });
-      // ...AND KEEP BOTH ENDS, because two callers want opposite ones.
-      //
-      // Sorting cheapest-first fixed the leverage card and broke the sibling
-      // re-bargain in the same stroke. `planSiblingRebargain` reads THIS list
-      // and immediately sorts it DEAREST-first (rebargain.ts:111) - the shops
-      // with the most room to move are the ones worth re-approaching when a
-      // cheaper quote lands. So on any hunt over ten shops, the slice was
-      // handing the swarm precisely the rows it had just thrown away, and the
-      // re-bargain silently had nothing to aim at. One truncation cannot serve
-      // a "cheapest wins" reader and a "dearest wins" reader.
-      //
-      // The cap still bounds the prompt. It is now spent from both ends: the
-      // cheapest fill it, minus a reserved tail of MAX_FANOUT for the dearest -
-      // exactly as many as the re-bargain can ever fan out to. Order stays
-      // cheapest-first, so every existing reader (validRivals, quoteOnTable,
-      // the prompt's rival block) is unchanged.
-      if (ranked.length <= SESSION_TABLE_CAP) return ranked;
-      const head = ranked.slice(0, SESSION_TABLE_CAP - REBARGAIN_TAIL);
-      const tail = ranked.slice(-REBARGAIN_TAIL);
-      const seen = new Set(head.map((r) => r.vendorId));
-      return [...head, ...tail.filter((r) => !seen.has(r.vendorId))];
+      // The ranking and the two-ended truncation now live in `./session-table`
+      // as pure functions, and the reason is a test-integrity one: the test
+      // that guards this behaviour used to re-implement the comparator inside
+      // the test file, so it passed no matter what this closure did. It runs
+      // the real function now.
+      return sessionTableRows([...rows.values()]);
     },
     async insertWakeup(row: WakeupRow) {
       // Stamp the owning user so purges match EXACTLY (user_email=eq.) instead

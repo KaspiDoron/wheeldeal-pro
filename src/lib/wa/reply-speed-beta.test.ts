@@ -30,26 +30,43 @@ describe("the reply lane stops paying the cold lane's fine", () => {
 describe("a paused number still sends nothing, but replies re-check", () => {
   const guard = read("src/lib/wa-guard.ts");
 
-  it("a ban-recovery pause no longer parks a reply against a 4h wall", () => {
-    expect(guard).toMatch(/jitteredHold\(now, replyRecheck, 10\)/);
-    expect(guard).toMatch(/Math\.min\(45, Math\.max\(20,/);
+  // These three ran a COPY of the formula, or a regex over the source. The
+  // decision moved into `pauseRecheckAt` (wa/pacing) precisely so they can run
+  // the real one - a private re-implementation passes whatever the guard does.
+  const NOW = Date.parse("2026-08-24T10:00:00.000Z");
+  const mins = (iso: string) => (Date.parse(iso) - NOW) / 60_000;
+  const at = (hoursLeft: number, isNewContact: boolean, pauseRecheckAt: typeof import("./pacing").pauseRecheckAt) =>
+    pauseRecheckAt({
+      nowMs: NOW,
+      pausedUntilIso: new Date(NOW + hoursLeft * 3600_000).toISOString(),
+      isNewContact,
+      rand: () => 0, // no spread, so the base interval is what is asserted
+    });
+
+  it("EXECUTED: a ban-recovery pause no longer parks a reply against a 4h wall", async () => {
+    const { pauseRecheckAt } = await import("./pacing");
+    // A 24h recovery used to stamp the reply for the full 24h.
+    expect(mins(at(24, false, pauseRecheckAt))).toBeLessThan(60);
   });
 
-  it("EXECUTED: the re-check is bounded 20-45 min for any pause length", () => {
-    const recheck = (leftMs: number) =>
-      Math.min(45, Math.max(20, Math.round(leftMs / 60_000 / 8)));
-    expect(recheck(24 * 3600_000)).toBe(45); // a full ban-recovery day
-    expect(recheck(4 * 3600_000)).toBe(30);
-    expect(recheck(60 * 60_000)).toBe(20); // never dips below the floor
+  it("EXECUTED: the re-check is bounded 20-45 min for any pause length", async () => {
+    const { pauseRecheckAt } = await import("./pacing");
+    expect(mins(at(24, false, pauseRecheckAt))).toBe(45); // a full ban-recovery day
+    expect(mins(at(8, false, pauseRecheckAt))).toBe(45); // 8h/8 = 60min, capped at 45
     for (const h of [4.5, 8, 12, 24, 48]) {
-      const v = recheck(h * 3600_000);
+      const v = mins(at(h, false, pauseRecheckAt));
       expect(v).toBeGreaterThanOrEqual(20);
       expect(v).toBeLessThanOrEqual(45);
     }
+    // A short RISK pause takes the other branch: 10min, not the 20 floor.
+    expect(mins(at(1, false, pauseRecheckAt))).toBe(10);
   });
 
-  it("cold introductions keep the FULL horizon - that is the lane under treatment", () => {
-    expect(guard).toMatch(/: rep\.paused_until;/);
+  it("EXECUTED: cold introductions keep the FULL horizon - the lane under treatment", async () => {
+    const { pauseRecheckAt } = await import("./pacing");
+    for (const h of [1, 4, 24]) {
+      expect(mins(at(h, true, pauseRecheckAt))).toBe(h * 60);
+    }
   });
 });
 

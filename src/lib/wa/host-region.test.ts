@@ -138,20 +138,60 @@ describe("the fleet actually routes on it", () => {
     expect(evo).toMatch(/key: key\.trim\(\), dialPrefixes: \[\]/);
   });
 
-  it("placement ranks by region, and the cap still refuses first", () => {
-    // Anchored on the refusal BRANCH rather than the old one-line `return
-    // null;` - owner report 8.1 gave that branch a body (an already-placed user
-    // is handed back their own host instead of being evicted from the send
-    // path). What this test guards, that ranking happens after the cap and
-    // still carries load + the hostPref tiebreak, is unchanged.
-    const at = evo.indexOf("if (!underCap.length) {");
-    expect(at).toBeGreaterThan(-1);
-    const body = evo.slice(at, at + 2400);
-    expect(body).toMatch(/rankHostsForNumber\(/);
-    // Load and the existing hostPref tiebreak are still passed through - the
-    // ranking ADDS a term, it does not replace the spreading.
-    expect(body).toMatch(/counts\[h\.url\] \?\? 0/);
-    expect(body).toMatch(/hostPref\(email, h\.url\)/);
+  it("EXECUTED: placement ranks by region, and the cap still refuses first", async () => {
+    // Was a regex over the refusal branch. The decision lives in
+    // `wa/host-placement` now (owner report 10) so the ordering can be run
+    // rather than described. Same claim: the cap is applied BEFORE the ranking,
+    // and the ranking still carries load, so geo ADDS a term rather than
+    // replacing the spreading.
+    const { placeHost } = await import("./host-placement");
+    const hosts = [
+      { url: "https://us", dialPrefixes: [] as string[] },
+      { url: "https://sg", dialPrefixes: ["66"] },
+    ];
+    // Cap first: the geo-correct host is full, so it is not a candidate at all.
+    expect(
+      placeHost({
+        hosts,
+        counts: { "https://us": 0, "https://sg": 25 },
+        cap: 25,
+        healthy: hosts,
+        digits: "66812345678",
+      })
+    ).toEqual(hosts[0]);
+    // Under the cap, geo wins over a lighter load.
+    expect(
+      placeHost({
+        hosts,
+        counts: { "https://us": 0, "https://sg": 24 },
+        cap: 25,
+        healthy: hosts,
+        digits: "66812345678",
+      })
+    ).toEqual(hosts[1]);
+  });
+
+  it("EXECUTED: load still breaks ties among equally-matched hosts", async () => {
+    const { placeHost } = await import("./host-placement");
+    const hosts = [
+      { url: "https://sg1", dialPrefixes: ["66"] },
+      { url: "https://sg2", dialPrefixes: ["66"] },
+    ];
+    expect(
+      placeHost({
+        hosts,
+        counts: { "https://sg1": 12, "https://sg2": 3 },
+        cap: 25,
+        healthy: hosts,
+        digits: "66812345678",
+      })
+    ).toEqual(hosts[1]);
+  });
+
+  it("the resolver still hands placement the number and the pref tiebreak", () => {
+    // The wiring, which is the one part a grep is the right tool for.
+    expect(evo).toMatch(/digits,/);
+    expect(evo).toMatch(/pref: \(h\) => hostPref\(email, h\.url\),/);
   });
 
   it("the number reaches placement from the one caller that has it", () => {
