@@ -761,9 +761,14 @@ document.
 2. **There is no error tracking.** Nothing in this codebase talks to Sentry or
    any equivalent. The three event kinds that `PRODUCTION-READINESS.md` says
    should page someone - `wa-send-dropped`, `wa-ban-risk`,
-   `wa-send-expired`, `host-geo-mismatch`, `media-fetch-failed` - are written
-   faithfully to the database and read by
-   **nobody** unless a human opens the admin panel. Wave 7 puts their 24-hour
+   `wa-send-expired`, `host-geo-mismatch`, `media-fetch-failed`,
+   `wa-rep-bump-degraded` - are written faithfully to the database and read by
+   **nobody** unless a human opens the admin panel.
+   (`wa-rep-bump-degraded` is the newest and the quietest: the atomic safety
+   counters refused a write for a reason other than "the migration has not been
+   run", so they silently fell back to the racy path and will UNDER-count. The
+   risk gauge then reads *healthier* than the truth on exactly the numbers
+   closest to a ban. Nothing else surfaces it, because the app keeps working.) Wave 7 puts their 24-hour
    counts and the age of the most recent one on the choke-point card, with an
    "email me this digest" button that uses your existing email provider. That
    is a **pull**, not a **page**. It is deliberately not a new dependency and a

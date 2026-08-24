@@ -124,6 +124,24 @@ export async function runWithAiBudget<T>(who: string, fn: () => Promise<T>): Pro
     limit: gate.limit,
   };
 
+  // THE DEGRADATION WAS INVISIBLE, WHICH IS THE HALF THAT MATTERS AT SCALE.
+  //
+  // Past the ceiling every model call in this turn falls to the deterministic
+  // composer. That is the right behaviour - a working template negotiation
+  // beats a frozen one - but until now NOTHING recorded that it happened. The
+  // tester's experience is "the agent got stupid halfway through the hunt" and
+  // the owner's experience is a dashboard that looks entirely healthy.
+  //
+  // The arithmetic says this is reachable by ONE tester in ONE day: a shop
+  // reply burns 2-6 model calls (extraction, gloss, safety, the engine pass,
+  // localization, the judge), so a 20-shop hunt at three rounds is 120-360
+  // calls plus the openers - i.e. the upper half of a single enthusiastic
+  // hunt already crosses 300. The cap is per-USER, so it is not a fleet
+  // ceiling that 100 testers share; the free providers' own daily RPD is that,
+  // and it is roughly an order of magnitude tighter. Raising this number would
+  // move the wall, not remove it - so it stays, and it becomes VISIBLE.
+  if (!gate.allowed) noteAiBudgetExhausted(email, gate.limit);
+
   try {
     return await storage.run(scope, fn);
   } finally {
@@ -134,4 +152,29 @@ export async function runWithAiBudget<T>(who: string, fn: () => Promise<T>): Pro
       await recordApi("ai", scope.spent, email).catch(() => {});
     }
   }
+}
+
+// One event per user per day: the condition persists for the rest of the day
+// by definition, so an un-throttled trace would write one row per model call
+// for hours.
+const aiExhaustedNotedOn = new Map<string, string>();
+
+function noteAiBudgetExhausted(email: string, limit: number): void {
+  const day = new Date().toISOString().slice(0, 10);
+  if (aiExhaustedNotedOn.get(email) === day) return;
+  aiExhaustedNotedOn.set(email, day);
+  void (async () => {
+    try {
+      const { sbInsert } = await import("./runtime-config");
+      await sbInsert("agent_events", [
+        {
+          kind: "ai-budget-exhausted",
+          user_email: email,
+          detail: `${email} hit LIMIT_AI_PER_DAY (${limit}) - every model call for the rest of today falls back to the deterministic composer. The negotiation keeps working; it stops being smart.`,
+        },
+      ]);
+    } catch {
+      /* best-effort: telemetry must never fail a negotiation turn */
+    }
+  })();
 }

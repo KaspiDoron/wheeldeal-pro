@@ -737,6 +737,25 @@ export type RepBumps = Partial<
   >
 >;
 
+// The atomic counter path degraded, and NOT for the expected missing-function
+// reason. Throttled hard: this sits on the send path, and an event per send
+// would bury the signal it exists to raise.
+const REP_BUMP_DEGRADED_THROTTLE_MS = 15 * 60_000;
+const repBumpDegradedAt = new Map<string, number>();
+
+function noteRepBumpDegraded(senderKey: string): void {
+  const last = repBumpDegradedAt.get(senderKey) ?? 0;
+  const now = Date.now();
+  if (now - last < REP_BUMP_DEGRADED_THROTTLE_MS) return;
+  repBumpDegradedAt.set(senderKey, now);
+  void sbInsert("agent_events", [
+    {
+      kind: "wa-rep-bump-degraded",
+      detail: `${senderKey}: wa_rep_bump exists but refused the write - the safety counters fell back to the racy absolute path and will UNDERCOUNT under concurrency. Check the Supabase logs for the function's error (a non-integer value in p_set aborts the whole statement).`,
+    },
+  ]).catch(() => {});
+}
+
 /**
  * @param bumps  Counter DELTAS, applied in the database.
  *
@@ -815,6 +834,21 @@ async function saveReputation(
     // behaving exactly as it did - racy, but never silently dropping the
     // count. Any other failure falls through too: one lost increment beats a
     // write that does not happen at all.
+    //
+    // ...BUT THE TWO ARE NOT THE SAME NEWS, and until now nothing told them
+    // apart - `sbRpc` returned a `missing` discriminator that its only caller
+    // ignored. `missing` (404) is an expected, self-healing state that ends the
+    // moment the owner runs the migration. Anything else means the atomic
+    // function EXISTS and REFUSED, and OR8.1 already found one of those: a
+    // fractional `trust_score` aborting the statement in Postgres, which
+    // dropped M3 back to the racy read-modify-write permanently with no symptom
+    // anywhere. The counters simply drifted low, biasing the risk gauge toward
+    // "healthy" on exactly the numbers closest to a ban.
+    //
+    // Behaviour is unchanged - the write still falls through - but a non-404
+    // refusal now leaves a throttled trace, so a silently degraded safety
+    // counter becomes something the owner can see.
+    if (!res.missing) noteRepBumpDegraded(senderKey);
     const absolute: Record<string, unknown> = { ...update };
     for (const [k, d] of Object.entries(bumps)) {
       absolute[k] = (Number((await getReputation(senderKey))[k as keyof Reputation]) || 0) + Number(d);

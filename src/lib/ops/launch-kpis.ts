@@ -24,6 +24,15 @@ export interface LaunchKpis {
   sends: { introDay: number | null; replyDay: number | null };
   /** AI providers whose per-minute budget is spent right now (spillover depth). */
   aiSpillover: { spent: string[]; count: number };
+  /**
+   * Testers who exhausted their DAILY model budget in the last 24h.
+   *
+   * Different question from spillover, and the one that shows up as a product
+   * complaint: past `LIMIT_AI_PER_DAY` a tester's turns fall to the
+   * deterministic composer for the rest of the day, so their agent stops being
+   * smart mid-hunt while every service stays green. Null = unreadable.
+   */
+  aiExhausted: { users24h: number | null };
   /** Evolution host occupancy + the datacenter-cluster warning, if any. */
   hosts: {
     sessions: number | null;
@@ -50,7 +59,8 @@ async function count24h(table: string, tsColumn: string, extra = ""): Promise<nu
 export async function launchKpis(): Promise<LaunchKpis> {
   const degraded: string[] = [];
 
-  const [latencyRead, introDay, replyDay, transport, waMsgs, events] = await Promise.all([
+  const [latencyRead, introDay, replyDay, transport, waMsgs, events, aiExhausted] =
+    await Promise.all([
     sbSelectStrict<{ detail: string | null }>(
       "agent_events",
       `select=detail&kind=eq.reply-latency&created_at=gte.${encodeURIComponent(
@@ -62,12 +72,14 @@ export async function launchKpis(): Promise<LaunchKpis> {
     transportSummary().catch(() => null),
     count24h("whatsapp_messages", "received_at"),
     count24h("agent_events", "created_at"),
+    count24h("agent_events", "created_at", "&kind=eq.ai-budget-exhausted"),
   ]);
 
   if ("error" in latencyRead) degraded.push("reply-latency");
   if (introDay === null || replyDay === null) degraded.push("send-counts");
   if (!transport) degraded.push("transport");
   if (waMsgs === null || events === null) degraded.push("db-growth");
+  if (aiExhausted === null) degraded.push("ai-budget");
 
   const latencyRows = "error" in latencyRead ? [] : latencyRead.rows;
   const reply = replyLatencyStats(latencyRows.map((r) => r.detail));
@@ -77,6 +89,7 @@ export async function launchKpis(): Promise<LaunchKpis> {
     reply: { p50Sec: reply.p50Sec, p95Sec: reply.p95Sec, samples: reply.samples },
     sends: { introDay, replyDay },
     aiSpillover: { spent, count: spent.length },
+    aiExhausted: { users24h: aiExhausted },
     hosts: {
       sessions: transport?.sessions ?? null,
       ...(transport?.clusterWarning ? { clusterWarning: transport.clusterWarning } : {}),

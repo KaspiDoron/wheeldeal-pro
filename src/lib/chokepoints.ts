@@ -237,7 +237,13 @@ export function dbLatency(ms: number | null): LatencyReading {
 
 /** The kinds PRODUCTION-READINESS.md says should page someone, and the one that is a daily digest. */
 export const PAGING_KINDS = ["wa-send-dropped", "wa-ban-risk"] as const;
-export const DIGEST_KINDS = ["media-fetch-failed"] as const;
+// `wa-rep-bump-degraded`: the atomic safety counters refused a write for a
+// reason that is NOT "the migration has not been run". The system keeps
+// working on the racy fallback, so nothing else would ever surface it - and
+// the failure it hides makes the risk gauge read HEALTHY while under-counting
+// the numbers closest to a ban. Digest, not page: it is not urgent, but it
+// must never again be invisible.
+export const DIGEST_KINDS = ["media-fetch-failed", "wa-rep-bump-degraded"] as const;
 export const WATCHED_KINDS = [...PAGING_KINDS, ...DIGEST_KINDS] as const;
 export type WatchedKind = (typeof WATCHED_KINDS)[number];
 
