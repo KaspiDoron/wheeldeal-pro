@@ -35,25 +35,72 @@ describe("every >2min hold a reply could hit is now lane-proportional", () => {
     );
   });
 
-  it("2. a paused number sends NOTHING - but a reply re-checks instead of sleeping", () => {
-    // A 240min risk pause used to hold a composed reply for its full length;
-    // replies re-check in 10-15min. Owner report 8 extends the same reasoning
-    // to a BAN-RECOVERY pause: it still binds every send (the recovery
-    // schedule is the treatment), but a reply stamped for the original 4h wall
-    // sat parked long after the risk engine had cleared the pause early - and
-    // a collapsing reply ratio is itself the signal that gets numbers
-    // restricted. Cold intros keep the full horizon; they are the vector under
-    // treatment.
-    expect(guard).toMatch(/const banRecovery = pauseLeftMs > 4 \* 3600_000/);
-    // Cold intros: the untouched full-horizon hold.
-    expect(guard).toMatch(/: rep\.paused_until;/);
-    // Replies: bounded re-check on BOTH pause kinds, never the raw wall.
-    expect(guard).toMatch(/jitteredHold\(now, replyRecheck, 10\)/);
-    expect(guard).toMatch(/jitteredHold\(now, 10, 5\)/);
-    // ...and that re-check is genuinely bounded, not a disguised 4h.
-    expect(guard).toMatch(
-      /Math\.min\(45, Math\.max\(20, Math\.round\(pauseLeftMs \/ 60_000 \/ 8\)\)\)/
-    );
+  describe("2. a paused number sends NOTHING - but a reply re-checks instead of sleeping", () => {
+    // THIS BLOCK WAS ALL REGEX, AND THAT WAS NOT AN ACCIDENT OF STYLE - it was
+    // the only instrument available while the decision was an inline ternary
+    // inside `guardOutbound`, which needs Supabase, WhatsApp and a policy store
+    // to reach. I checked the audit's claim the honest way: inverting the
+    // condition, so cold intros re-check and REPLIES sleep for four hours,
+    // passed all 5,700 tests. A pin that survives its own inversion is not a
+    // pin. The decision is `pauseRecheckAt` in wa/pacing now, and these run it.
+    const NOW = Date.parse("2026-08-24T10:00:00.000Z");
+    const mid = () => 0.5; // deterministic jitter
+
+    it("EXECUTED: a COLD INTRO keeps the full horizon - it is the lane under treatment", async () => {
+      const { pauseRecheckAt } = await import("./pacing");
+      const pausedUntilIso = new Date(NOW + 4 * 3600_000).toISOString();
+      expect(
+        pauseRecheckAt({ nowMs: NOW, pausedUntilIso, isNewContact: true, rand: mid })
+      ).toBe(pausedUntilIso);
+    });
+
+    it("EXECUTED: a REPLY under a risk pause re-checks in 10-15min, not 4 hours", async () => {
+      const { pauseRecheckAt } = await import("./pacing");
+      const pausedUntilIso = new Date(NOW + 240 * 60_000).toISOString(); // the 240min risk pause
+      const at = Date.parse(
+        pauseRecheckAt({ nowMs: NOW, pausedUntilIso, isNewContact: false, rand: mid })
+      );
+      const mins = (at - NOW) / 60_000;
+      expect(mins).toBeGreaterThanOrEqual(10);
+      expect(mins).toBeLessThanOrEqual(15);
+    });
+
+    it("EXECUTED: a REPLY under a BAN-RECOVERY pause re-checks too, and the wait is bounded", async () => {
+      const { pauseRecheckAt } = await import("./pacing");
+      // 24h recovery: the documented worst case. The re-check must never be a
+      // disguised sleep-through - it is capped at 45min plus spread.
+      const pausedUntilIso = new Date(NOW + 24 * 3600_000).toISOString();
+      const mins =
+        (Date.parse(
+          pauseRecheckAt({ nowMs: NOW, pausedUntilIso, isNewContact: false, rand: mid })
+        ) -
+          NOW) /
+        60_000;
+      expect(mins).toBeGreaterThanOrEqual(20); // never a tight retry storm either
+      expect(mins).toBeLessThanOrEqual(55); // 45 cap + 10 spread
+    });
+
+    it("EXECUTED: THE INVERSION IS CAUGHT - the two lanes can never swap", async () => {
+      // The assertion whose absence let an inverted ternary pass everything:
+      // whatever the numbers are, a reply must wake up STRICTLY SOONER than a
+      // cold intro under the same pause.
+      const { pauseRecheckAt } = await import("./pacing");
+      for (const hours of [1, 4, 8, 24]) {
+        const pausedUntilIso = new Date(NOW + hours * 3600_000).toISOString();
+        const reply = Date.parse(
+          pauseRecheckAt({ nowMs: NOW, pausedUntilIso, isNewContact: false, rand: mid })
+        );
+        const cold = Date.parse(
+          pauseRecheckAt({ nowMs: NOW, pausedUntilIso, isNewContact: true, rand: mid })
+        );
+        expect(reply, `${hours}h pause: the reply lane must wake first`).toBeLessThan(cold);
+      }
+    });
+
+    it("the guard calls the shared decision instead of re-inlining it", () => {
+      expect(guard).toMatch(/const until = pauseRecheckAt\(\{/);
+      expect(guard).not.toMatch(/const banRecovery = pauseLeftMs > 4 \* 3600_000/);
+    });
   });
 
   it("3. all five fail-closed sync-retry sites share ONE lane-aware hold", () => {

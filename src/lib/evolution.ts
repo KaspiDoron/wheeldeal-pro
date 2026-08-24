@@ -24,7 +24,8 @@ import { isLinkedFromStatus } from "./wa/linked-status";
 import { routableOrigin } from "./request-origin";
 import { digitsOnly } from "./phone";
 import { boundedSet } from "./bounded-map";
-import { parseDialPrefixes, rankHostsForNumber, affinityFor, AFFINITY_MISMATCH } from "./wa/host-region";
+import { parseDialPrefixes, affinityFor, AFFINITY_MISMATCH } from "./wa/host-region";
+import { placeHost } from "./wa/host-placement";
 import { readOrientationFromBase64 } from "./media/orientation";
 import type { InboundImage } from "./media/orientation";
 
@@ -889,83 +890,32 @@ async function resolveHost(email: string, phoneHint?: string | null): Promise<Ho
   );
   const stored = rows[0]?.host_url;
 
-  // ONE HOST IS NOT AN EXEMPTION FROM THE CAP - IT IS THE CASE THE CAP IS FOR.
+  // THE PLACEMENT DECISION ITSELF LIVES IN `wa/host-placement`, as a pure
+  // function. It has produced three separate defects - the single-host cap
+  // escape, the "place them anyway" fallback, and the missing occupant
+  // exemption on the multi-host branch - and every test written about it was a
+  // regex over this file, so none of them could have caught any of the three.
+  // The IO stays here; the shape of the decision is now executable.
   //
-  // This used to be `if (hosts.length === 1) return hosts[0];`, placed above
-  // everything, so the capacity refusal added in owner report 8 wave A never
-  // ran on a single-host deployment. That is precisely the deployment the
-  // refusal was written for: one Render box, 50 testers, every socket on 512 MB.
-  // The cap existed, the code that enforced it existed, and the one arrangement
-  // that could reach the failure skipped both.
-  //
-  // The health probe is still skipped here - with no second host there is
-  // nothing to fail over TO, and connectInstance probes this host directly a
-  // few lines later (the B1 honesty gate). Only the CAP is no longer skipped.
-  if (hosts.length === 1) {
-    if (stored === hosts[0].url) return hosts[0];
-    const only = await hostUserCounts();
-    return (only[hosts[0].url] ?? 0) < (await maxPerHost()) ? hosts[0] : null;
+  // The health probe is skipped entirely with one host: there is nothing to
+  // fail over TO, and connectInstance probes this host directly a few lines
+  // later (the B1 honesty gate).
+  let healthy: Host[] | undefined;
+  if (hosts.length > 1) {
+    const health = await Promise.all(hosts.map(async (h) => ({ h, ok: await hostHealthy(h) })));
+    healthy = health.filter((x) => x.ok).map((x) => x.h);
   }
-
-  // Probe all hosts at once.
-  const health = await Promise.all(
-    hosts.map(async (h) => ({ h, ok: await hostHealthy(h) }))
-  );
-  const healthy = health.filter((x) => x.ok).map((x) => x.h);
-
-  // Keep the user on their existing host while it is healthy.
-  if (stored) {
-    const h = healthy.find((x) => x.url === stored);
-    if (h) return h;
-  }
-
-  // Place a new/relocating user on the least-loaded healthy host under the cap.
   const counts = await hostUserCounts();
-  const cap = await maxPerHost();
-  const pickFrom = healthy.length ? healthy : hosts;
-  const underCap = pickFrom.filter((h) => (counts[h.url] ?? 0) < cap);
-  // A CAP THAT PLACES THE USER ANYWAY IS NOT A CAP.
-  //
-  // This used to read `underCap.length ? underCap : pickFrom` - so once every
-  // host was full it silently put the next user on the fullest box regardless,
-  // which is exactly the moment the cap existed to prevent. With one host and
-  // 50 testers it meant all 50 sockets on a 512 MB container.
-  //
-  // Returning null makes `connectInstance` tell the truth ("we are at
-  // capacity") instead of overfilling a box until it OOMs and takes every
-  // linked number down with it. The owner adds a host or raises the cap - both
-  // deliberate acts, neither of which risks somebody's WhatsApp account.
-  if (!underCap.length) {
-    // AN OCCUPANT IS NOT AN APPLICANT. The single-host branch above exempts a
-    // user who is already placed; this branch did not, and the asymmetry is a
-    // real eviction: a stored user is kept above only while their host passes
-    // the health probe, so one transient probe failure on a fleet at cap sends
-    // a LINKED user down here and returns null - on the SEND path, because
-    // every send calls resolveHost. Their queued messages then fail as
-    // "reconnecting" for as long as the fleet stays full.
-    //
-    // The cap exists to stop a box being given MORE sockets than it can hold.
-    // Someone already on it consumes no new slot and creates no new device
-    // registration, so refusing them protects nothing and costs them their
-    // hunt. Hand back their own host and let the health probe above decide
-    // whether it is usable.
-    const home = stored ? hosts.find((h) => h.url === stored) : undefined;
-    return home ?? null;
-  }
-  // GEO FIRST, THEN LOAD. rankHostsForNumber puts hosts that claim this
-  // number's calling code ahead of region-neutral ones and both ahead of hosts
-  // that claim somewhere else, then falls through to exactly the least-loaded
-  // ordering this used to do alone. With no declared regions anywhere (every
-  // deployment before this change) all hosts are neutral and the ranking IS the
-  // old one, term for term.
   const digits = digitsOnly(phoneHint ?? "") || (await linkedNumberFor(email));
-  const pool = rankHostsForNumber(
-    underCap,
+  const chosen = placeHost<Host>({
+    hosts,
+    stored,
+    counts,
+    cap: await maxPerHost(),
+    healthy,
     digits,
-    (h) => counts[h.url] ?? 0,
-    (h) => hostPref(email, h.url)
-  );
-  const chosen = pool[0] ?? null;
+    pref: (h) => hostPref(email, h.url),
+  });
   // A MISMATCHED PLACEMENT IS A DECISION, SO IT LEAVES A RECORD. It is the
   // right call - a scored signal beats a user who cannot link at all - but it
   // is invisible from the host panel, which would otherwise show a fleet that

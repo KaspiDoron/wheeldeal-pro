@@ -56,26 +56,28 @@ describe("H1 the stagger and the drain agree about a new number", () => {
 describe("H2 one truncation cannot serve two opposite readers", () => {
   const engine = readCode("src/lib/graph/engine.ts");
 
-  it("the session table keeps its dearest rows, not only its cheapest", () => {
-    // planSiblingRebargain reads this list and sorts it DEAREST-first: the
-    // shops with the most room to move are the ones worth re-approaching when a
-    // cheaper quote lands. Sorting cheapest-first fixed the leverage card and
-    // handed the swarm precisely the rows it had just discarded.
-    expect(engine).toMatch(/const head = ranked\.slice\(0, SESSION_TABLE_CAP - REBARGAIN_TAIL\);/);
-    expect(engine).toMatch(/const tail = ranked\.slice\(-REBARGAIN_TAIL\);/);
-    // Deduped, or a board of exactly 10 would repeat rows.
-    expect(engine).toMatch(/tail\.filter\(\(r\) => !seen\.has\(r\.vendorId\)\)/);
-    // The reserved tail is sized to what the swarm can actually use.
-    expect(engine).toMatch(/const REBARGAIN_TAIL = 4;/);
-    expect(MAX_FANOUT).toBe(4);
-  });
+  // REWRITTEN FOR TEST INTEGRITY (owner report 10). Both cases below used to
+  // rebuild the comparator and the two-ended slice inside this file, so they
+  // asserted against a private copy and would have passed even if the engine
+  // had gone back to slicing an unsorted Map. The ranking now lives in
+  // `graph/session-table` as pure functions and these run the real ones.
 
-  it("EXECUTED: a 14-shop board still gives the re-bargain real targets", () => {
-    // Model the shape: this shop at 300, thirteen rivals from 100 to 400. The
-    // cheapest-first slice(0,10) would keep 100-190 and drop everything dearer,
-    // so the dearest-first re-bargain got nothing above the new low.
+  it("EXECUTED: a 14-shop board still gives the re-bargain real targets", async () => {
+    const { sessionTableRows, rankSessionRows, SESSION_TABLE_CAP } = await import(
+      "../graph/session-table"
+    );
+    // The shape: this shop at 300, thirteen rivals from 100 to 400. A plain
+    // cheapest-first slice(0,10) keeps 100-190 and drops everything dearer, so
+    // the dearest-first re-bargain had nothing above the new low to aim at.
     const rows = [
-      { vendorId: "self", vendorName: "This", toNumber: "1", pricePerDay: 300, currency: "THB", isThisShop: true },
+      {
+        vendorId: "self",
+        vendorName: "This",
+        toNumber: "1",
+        pricePerDay: 300,
+        currency: "THB",
+        isThisShop: true,
+      },
       ...Array.from({ length: 13 }, (_, i) => ({
         vendorId: `v${i}`,
         vendorName: `Shop ${i}`,
@@ -85,14 +87,7 @@ describe("H2 one truncation cannot serve two opposite readers", () => {
         isThisShop: false,
       })),
     ];
-    const ranked = [...rows].sort((a, b) => {
-      if (a.isThisShop !== b.isThisShop) return a.isThisShop ? -1 : 1;
-      return a.pricePerDay - b.pricePerDay;
-    });
-    const CAP = 10, TAIL = 4;
-    const head = ranked.slice(0, CAP - TAIL);
-    const seen = new Set(head.map((r) => r.vendorId));
-    const kept = [...head, ...ranked.slice(-TAIL).filter((r) => !seen.has(r.vendorId))];
+    const kept = sessionTableRows(rows);
 
     // A new low of 120 lands. The swarm should re-approach the dear shops.
     const targets = planSiblingRebargain({
@@ -105,8 +100,9 @@ describe("H2 one truncation cannot serve two opposite readers", () => {
     // ...and they are the DEAR ones, which is the whole point.
     expect(Math.max(...targets.map((t) => t.pricePerDay ?? 0))).toBeGreaterThanOrEqual(350);
 
-    // The old behaviour, for contrast: cheapest-first truncation alone.
-    const oldKept = ranked.slice(0, CAP);
+    // The old behaviour, for contrast: cheapest-first truncation with no
+    // reserved tail. Uses the REAL ranking, so only the truncation differs.
+    const oldKept = rankSessionRows(rows).slice(0, SESSION_TABLE_CAP);
     const oldTargets = planSiblingRebargain({
       rows: oldKept,
       excludeVendorId: "self",
@@ -119,7 +115,30 @@ describe("H2 one truncation cannot serve two opposite readers", () => {
     ).toBeLessThan(350);
   });
 
-  it("a board at or under the cap is returned whole, as before", () => {
-    expect(engine).toMatch(/if \(ranked\.length <= SESSION_TABLE_CAP\) return ranked;/);
+  it("EXECUTED: the reserved tail is sized to what the swarm can actually use", async () => {
+    const { REBARGAIN_TAIL } = await import("../graph/session-table");
+    // Reserving fewer rows than the fan-out would leave the swarm short of
+    // targets; reserving more would spend prompt budget nothing reads.
+    expect(REBARGAIN_TAIL).toBe(MAX_FANOUT);
+  });
+
+  it("EXECUTED: a board at or under the cap is returned whole, as before", async () => {
+    const { sessionTableRows, SESSION_TABLE_CAP } = await import("../graph/session-table");
+    const rows = Array.from({ length: SESSION_TABLE_CAP }, (_, i) => ({
+      vendorId: `v${i}`,
+      vendorName: `v${i}`,
+      pricePerDay: 400 - i * 10, // deliberately DESCENDING on the way in
+    }));
+    const kept = sessionTableRows(rows);
+    expect(kept).toHaveLength(SESSION_TABLE_CAP);
+    // Whole, and ranked - not merely handed back untouched.
+    expect(kept.map((r) => r.pricePerDay)).toEqual(
+      [...rows.map((r) => r.pricePerDay)].sort((a, b) => a - b)
+    );
+  });
+
+  it("the engine delegates instead of keeping a second copy of the rule", () => {
+    expect(engine).toMatch(/return sessionTableRows\(\[\.\.\.rows\.values\(\)\]\);/);
+    expect(engine).not.toMatch(/const head = ranked\.slice/);
   });
 });

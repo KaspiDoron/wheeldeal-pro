@@ -47,6 +47,48 @@ export function jitteredHold(
   return new Date(nowMs + (baseMinutes + rand() * spreadMinutes) * 60_000).toISOString();
 }
 
+/**
+ * WHEN A PAUSED NUMBER'S MESSAGE SHOULD LOOK AGAIN.
+ *
+ * Nothing goes out while `paused_until` stands - that part is not a choice,
+ * the pause is account-level and the recovery schedule IS the treatment. This
+ * decides only the WAKE-UP, and the two lanes want opposite answers:
+ *
+ *  - COLD INTRODUCTIONS are the vector under treatment. They keep the full
+ *    horizon and wake when the pause actually ends.
+ *  - REPLIES are reciprocal traffic, the safe side of the ban axis, and a
+ *    collapsing reply ratio is itself the signal that gets numbers restricted.
+ *    A reply stamped for the original 4h wall sat parked long after the risk
+ *    engine had cleared the pause early, so replies re-check on a bounded
+ *    schedule instead of sleeping through it.
+ *
+ * EXTRACTED FROM `guardOutbound` DELIBERATELY. It was an inline ternary inside
+ * a function that needs Supabase, WhatsApp and a policy store to reach, so the
+ * only test on it was a regex over the source - and a regex cannot notice that
+ * the condition is inverted. Inverting it (cold intros re-checking, replies
+ * sleeping four hours) passed the entire 5,700-test suite. It is a pure
+ * function now, and the lanes are asserted by running it.
+ */
+export function pauseRecheckAt(opts: {
+  nowMs: number;
+  pausedUntilIso: string;
+  isNewContact: boolean;
+  rand?: () => number;
+}): string {
+  const { nowMs, pausedUntilIso, isNewContact } = opts;
+  const rand = opts.rand ?? Math.random;
+  if (isNewContact) return pausedUntilIso; // the lane under treatment: full horizon
+  const pauseLeftMs = Date.parse(pausedUntilIso) - nowMs;
+  // A pause longer than four hours is a BAN RECOVERY, not a risk pause. Both
+  // re-check; the recovery's interval scales with what is left, bounded so it
+  // can never become a disguised four-hour sleep.
+  const banRecovery = pauseLeftMs > 4 * 3600_000;
+  const replyRecheck = Math.min(45, Math.max(20, Math.round(pauseLeftMs / 60_000 / 8)));
+  return banRecovery
+    ? jitteredHold(nowMs, replyRecheck, 10, rand)
+    : jitteredHold(nowMs, 10, 5, rand);
+}
+
 // `staggerOffsets` lived here: a 45-75s cumulative trickle, exported, tested,
 // re-exported from @wheeldeal/core - and called by nothing. `batchStagger`
 // below is what both dispatch paths actually use, and it schedules to a
