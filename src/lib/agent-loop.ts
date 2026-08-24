@@ -14,7 +14,7 @@
 //     humanized content variance.
 
 import "server-only";
-import { sbInsert, sbSelect, sbUpdate } from "./runtime-config";
+import { sbInsert, sbSelect, sbSelectStrict, sbSelectDark, sbUpdate } from "./runtime-config";
 import { finishBeforeResponse } from "./after";
 import { isMediaPlaceholder as isMediaPlaceholderText } from "./wa/coalesce";
 import { extractOffer, composeBargain, runSafety, currencyForRegion, money } from "./agents";
@@ -366,16 +366,47 @@ export async function processVendorReply(opts: {
     ]);
     if (claimed.length === 0) {
       const keys = replyKey === opts.waMessageId ? [replyKey] : [replyKey, opts.waMessageId];
-      const existing = await sbSelect<{
+      const filter = `wa_message_id=in.(${keys.map((k) => `"${k}"`).join(",")})&limit=1`;
+      // ZERO ROWS BACK FROM THE INSERT DOES NOT MEAN "SOMEBODY ELSE HAS IT".
+      // `sbInsertReturning` returns [] for a duplicate key AND for a missing
+      // table AND for a network error AND for demo mode, so the follow-up read
+      // is what actually decides. It therefore has to distinguish "no claim
+      // row" from "I could not read", which `.catch(() => [])` could not:
+      // both arrived as an empty array and both fell through to the election.
+      //
+      // That mattered, because the election is only a dedupe among frames that
+      // ENTER it. The frame that won the insert proceeds without ever
+      // competing, so a losing frame that reaches `wa_send_claims` wins it
+      // UNCONTESTED and answers the same shop a second time. The reachable
+      // case is not exotic: `settled_at` is an additive column, and on a
+      // deployment where `supabase/schema.sql` has not been re-run this select
+      // fails on EVERY duplicate frame - which is exactly the shape the audit
+      // reported and I could not confirm until reading the insert's contract.
+      const read = await sbSelectStrict<{
         wa_message_id: string;
         created_at?: string | null;
         settled_at?: string | null;
-      }>(
-        "wa_processed",
-        `select=wa_message_id,created_at,settled_at&wa_message_id=in.(${keys
-          .map((k) => `"${k}"`)
-          .join(",")})&limit=1`
-      ).catch(() => []);
+      }>("wa_processed", `select=wa_message_id,created_at,settled_at&${filter}`);
+      let existing: { wa_message_id: string; created_at?: string | null; settled_at?: string | null }[] = [];
+      if ("error" in read) {
+        // The lease column could not be read. Ask the NARROWER question that a
+        // pre-migration schema can still answer: is there a claim row at all?
+        const bare = await sbSelectDark<{ wa_message_id: string }>(
+          "wa_processed",
+          `select=wa_message_id&${filter}`
+        );
+        // `null` = truth unknown; a row = a claim demonstrably exists and
+        // cannot be judged. Either way, STAND DOWN. The holder answers, or the
+        // recovery sweep retakes the message later against a real lease. A
+        // duplicate bargain to a shop is the one outcome we cannot take back,
+        // and a late reply is recoverable where a double reply is not.
+        if (bare === null || bare.length > 0) return;
+        // `[]` = no claim row (table absent, or the row is genuinely gone), so
+        // the insert failed for some other reason and the election below is
+        // the right dedupe.
+      } else {
+        existing = read.rows;
+      }
       if (existing.length > 0) {
         // ...UNLESS THE HOLDER IS GONE. A claim is a lease: a turn that fails
         // hands it back, so only an instance killed mid-turn leaves one

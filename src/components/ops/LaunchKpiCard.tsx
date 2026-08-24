@@ -22,6 +22,7 @@ interface LaunchKpiResponse {
   reply: { p50Sec: number | null; p95Sec: number | null; samples: number };
   sends: { introDay: number | null; replyDay: number | null };
   aiSpillover: { spent: string[]; count: number };
+  aiExhausted: { users24h: number | null };
   hosts: { sessions: number | null; clusterWarning?: { host: string; count: number }; note: string };
   dbGrowth: { whatsappMessages: number | null; agentEvents: number | null };
   degraded: string[];
@@ -54,6 +55,12 @@ const LAUNCH_HELP = {
     label: "AI rungs spent",
     what: "How many AI providers have exhausted their per-minute budget right now. The chain skips them before the 429.",
     drift: "Persistently above zero means the paid backbone needs raising, not the free tiers.",
+  },
+  aiExhausted: {
+    label: "AI budget out",
+    what: "Testers who used up their DAILY model budget in the last 24h. Past it their turns fall back to the deterministic composer - the negotiation keeps working, it stops being smart.",
+    drift:
+      "Above zero means somebody's agent went quiet-clever mid-hunt while every service tile stayed green. One 20-shop hunt at three rounds can reach the ceiling on its own.",
   },
   sessions: {
     label: "linked numbers",
@@ -155,6 +162,17 @@ export function LaunchKpiCard() {
                 value={d.aiSpillover.count}
                 sub={d.aiSpillover.spent.join(", ") || undefined}
                 tone={d.aiSpillover.count > 0 ? "text-warn" : "text-strong"}
+              />
+              <StatTile
+                help={LAUNCH_HELP}
+                helpId="aiExhausted"
+                emoji="🪫"
+                value={d.aiExhausted.users24h}
+                tone={
+                  d.aiExhausted.users24h !== null && d.aiExhausted.users24h > 0
+                    ? "text-warn"
+                    : "text-strong"
+                }
               />
               <StatTile
                 help={LAUNCH_HELP}

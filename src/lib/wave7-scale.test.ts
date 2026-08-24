@@ -128,42 +128,52 @@ describe("choke point: database round trip", () => {
 describe("choke point: the events that should page someone", () => {
   const now = Date.parse("2026-08-15T12:00:00Z");
 
-  it("silence across all three is the only green", async () => {
-    const { pagerDigest } = await import("./chokepoints");
+  it("silence across EVERY watched kind is the only green", async () => {
+    // Built from WATCHED_KINDS rather than a hand-written list of three. The
+    // hand-written version broke the moment a fourth kind was added - not
+    // because the behaviour changed, but because an unlisted kind correctly
+    // reads as UNREADABLE rather than as silence. Deriving the fixture keeps
+    // the invariant ("all quiet is the only green") and drops the staleness.
+    const { pagerDigest, WATCHED_KINDS } = await import("./chokepoints");
     const d = pagerDigest(
-      [
-        { kind: "wa-send-dropped", count: 0, newestAt: null },
-        { kind: "wa-ban-risk", count: 0, newestAt: null },
-        { kind: "media-fetch-failed", count: 0, newestAt: null },
-      ],
+      WATCHED_KINDS.map((kind) => ({ kind, count: 0, newestAt: null })),
       now
     );
     expect(d.state).toBe("ok");
     expect(d.headline).toMatch(/No dropped sends/);
   });
 
-  it("a paging kind firing is an ALARM and a digest kind firing is only a WARN", async () => {
-    const { pagerDigest } = await import("./chokepoints");
-    const paging = pagerDigest(
-      [
-        { kind: "wa-send-dropped", count: 3, newestAt: new Date(now - 120_000).toISOString() },
-        { kind: "wa-ban-risk", count: 0, newestAt: null },
-        { kind: "media-fetch-failed", count: 0, newestAt: null },
-      ],
+  it("a kind the panel could not read is UNKNOWN, not silence", async () => {
+    // The reason the fixture above has to be complete: an absent sensor is not
+    // good news, and the digest says so.
+    const { pagerDigest, WATCHED_KINDS } = await import("./chokepoints");
+    const d = pagerDigest(
+      WATCHED_KINDS.slice(1).map((kind) => ({ kind, count: 0, newestAt: null })),
       now
     );
+    expect(d.state).not.toBe("ok");
+    expect(d.events.find((e) => e.kind === WATCHED_KINDS[0])?.count24h).toBeNull();
+  });
+
+  it("a paging kind firing is an ALARM and a digest kind firing is only a WARN", async () => {
+    const { pagerDigest } = await import("./chokepoints");
+    const { WATCHED_KINDS } = await import("./chokepoints");
+    const quiet = () => WATCHED_KINDS.map((kind) => ({ kind, count: 0, newestAt: null as string | null }));
+    const withFiring = (target: string, count: number, ageMs: number) =>
+      quiet().map((r) =>
+        r.kind === target ? { ...r, count, newestAt: new Date(now - ageMs).toISOString() } : r
+      );
+
+    const paging = pagerDigest(withFiring("wa-send-dropped", 3, 120_000), now);
     expect(paging.state).toBe("alarm");
     expect(paging.events.find((e) => e.kind === "wa-send-dropped")?.newestAgeMs).toBe(120_000);
 
-    const digest = pagerDigest(
-      [
-        { kind: "wa-send-dropped", count: 0, newestAt: null },
-        { kind: "wa-ban-risk", count: 0, newestAt: null },
-        { kind: "media-fetch-failed", count: 9, newestAt: new Date(now - 60_000).toISOString() },
-      ],
-      now
-    );
+    const digest = pagerDigest(withFiring("media-fetch-failed", 9, 60_000), now);
     expect(digest.state).toBe("warn");
+
+    // The new digest kind behaves the same way: visible, but not a page.
+    const degraded = pagerDigest(withFiring("wa-rep-bump-degraded", 2, 60_000), now);
+    expect(degraded.state).toBe("warn");
   });
 
   it("AN UNREADABLE COUNTER IS UNKNOWN, NEVER ZERO - an absent sensor is not good news", async () => {
