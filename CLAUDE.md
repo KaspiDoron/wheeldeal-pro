@@ -107,15 +107,41 @@ merge into `master` with `--no-ff`.
 | Cloud Run (the app) | `master` | push, via `.github/workflows/deploy-gcp.yml` |
 | Render (Evolution + crons) | `master` | the Blueprint, on Manual Sync |
 
-A change to `render.yaml` therefore does nothing until it reaches `master` AND
-the owner runs a Manual Sync - the Blueprint does not follow a feature branch.
+A change to `render.yaml` does nothing until it reaches `master` AND somebody
+applies it - the Blueprint does not follow a feature branch.
 
 > This section previously named `claude/rental-negotiation-app-pc33ux`, which
-> stopped existing long ago. That was not a cosmetic staleness: Render's
-> blueprint had been pointed at it, so every Manual Sync failed with
-> "not found: file: .../render.yaml" - a file that exists, on a branch that does
-> not. If you rename or retire a branch, grep the repo for its name before you
-> delete it.
+> stopped existing long ago. If you rename or retire a branch, grep the repo
+> for its name before you delete it.
+
+### The Render Blueprint is OPTIONAL - do not treat it as the deploy path
+
+Manual Sync has been failing with `not found: file:
+github.com/KaspiDoron/wheeldeal-pro/render.yaml` even though the Blueprint's
+own Settings show Branch = `master` and Blueprint Path = `render.yaml`. **The
+repo side is verified clean** - `render.yaml` is a normal committed file at the
+repo root on `master`, it is not gitignored, it is the only root-level YAML,
+and a GitHub **API** read of that exact path at `refs/heads/master` returns the
+file. The 404 is produced inside Render, from state Render holds; its own UI
+contradicts itself (Settings says `master`, the breadcrumb still shows a branch
+deleted months ago), which is the signature of a record that did not fully
+write. The repo rename `Rental-App` -> `wheeldeal-pro` is the likely trigger.
+
+**So do not block on the Blueprint.** Every service it describes already
+exists and runs. To apply a `render.yaml` change while Render is still in the
+stack, do it by hand in the dashboard - which is also SAFER, because a
+Blueprint sync restarts `wd-evolution` and drops every linked WhatsApp socket
+at once, while editing one service or adding a cron does not.
+
+If the Blueprint is worth repairing: **Disconnect Blueprint** (this does NOT
+delete services), then create a new one from `master` - services are adopted by
+name. If the repo is missing from the picker, Render's GitHub App lost it in
+the rename (Render -> Settings -> GitHub -> Configure). If the Blueprint's Sync
+Hook URL fails identically, the fault is Render-side and belongs in a support
+ticket, not in this repo.
+
+`AUTHENTICATION_API_KEY` is `sync: false` and is unaffected by any of this -
+that is exactly what `sync: false` protects.
 
 ## MCP servers (tooling for AI-assisted development)
 

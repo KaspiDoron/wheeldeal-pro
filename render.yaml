@@ -1,13 +1,34 @@
 # WheelDeal WhatsApp backend on Render - SMALLEST PAID setup (robust, no sleep).
 #
-# THE BLUEPRINT MUST TRACK `master`. This file only takes effect when Render's
-# Blueprint reads it, and the Blueprint reads ONE branch - whichever is set in
-# Render -> Blueprints -> WhatsApp Evolution Server -> Settings -> Branch. It
-# was pinned to `claude/rental-negotiation-app-pc33ux`, a branch that no longer
-# exists, so every Manual Sync failed with "not found: file:
-# .../render.yaml" - reporting a real file as missing because the branch under
-# it was gone. Editing this file on a feature branch changes nothing until the
-# change reaches `master` and someone runs a Manual Sync.
+# HOW A CHANGE TO THIS FILE ACTUALLY REACHES RENDER - read this first.
+#
+# This file only takes effect when somebody APPLIES it, and editing it on a
+# feature branch changes nothing until the change reaches `master`.
+#
+# THE BLUEPRINT IS CURRENTLY BROKEN, ON RENDER'S SIDE, AND IS OPTIONAL.
+# Manual Sync fails with "not found: file:
+# github.com/KaspiDoron/wheeldeal-pro/render.yaml" while the Blueprint's own
+# Settings show Branch = `master` and Blueprint Path = `render.yaml`. The repo
+# side is verified clean four ways: this file is a normal committed file at the
+# repo ROOT on `master`, it is not gitignored, it is the only root-level YAML,
+# and a GitHub API read of that exact path at refs/heads/master returns it. The
+# 404 is generated inside Render - its UI even contradicts itself, with the
+# breadcrumb still naming a branch deleted months ago. The repo rename
+# Rental-App -> wheeldeal-pro is the likely trigger.
+#
+# THEREFORE: to apply a change here, do it BY HAND in the Render dashboard
+# (add/edit the service or cron directly). That is not a workaround so much as
+# the safer path anyway - a Blueprint sync restarts wd-evolution and drops every
+# linked WhatsApp socket at once, while adding a cron touches nothing else.
+#
+# To attempt a repair: Disconnect Blueprint (this does NOT delete services) and
+# create a new one from `master`; services are adopted by NAME. If the repo is
+# missing from the picker, Render's GitHub App lost it in the rename
+# (Render -> Settings -> GitHub -> Configure). If the Blueprint's Sync Hook URL
+# fails identically, it is a Render-side fault for a support ticket.
+#
+# The free Evolution fleet (deploy/fleet/README.md) retires Render entirely,
+# and this whole problem with it. Do not over-invest in fixing it.
 #
 # Render reads this Blueprint, builds the Evolution API image from
 # deploy/evolution/Dockerfile, provisions a Postgres database AND a free Redis
@@ -26,8 +47,10 @@
 #   1. A real Redis cache (free Key Value instance) - the cache never touches
 #      Prisma again (CACHE_REDIS_ENABLED=true).
 #   2. DATABASE_SAVE_IS_ON_WHATSAPP=false - stop persisting those rows at all.
-# To apply: Render dashboard -> Blueprints -> your repo -> "Manual Sync" (it
-# re-reads this file), or delete + re-create the Blueprint. Zero other work.
+# To apply: set these env vars by hand on wd-evolution -> Environment (the
+# Blueprint's Manual Sync is broken Render-side; see the header). Note that
+# saving an env var RESTARTS the service and drops linked sockets, so do it
+# when no tester is mid-hunt.
 #
 # CRASH FIX 2 ("Exited with status 1" alerts during pairing):
 # Status 1 is an UNCAUGHT EXCEPTION inside Evolution, NOT an out-of-memory kill
@@ -101,9 +124,15 @@ services:
   # retention is itself about one full fill. Seven days is far more than the
   # 10-row tail anything actually reads.
   #
-  # OWNER: this is the one blueprint change that needs a Manual Sync to take
-  # effect. The script is defensive - every statement is IF-EXISTS guarded and
-  # a renamed table degrades to a logged no-op rather than a red cron.
+  # OWNER: this is the one item here with a deadline, and the Blueprint cannot
+  # currently deliver it (see the header). Create it BY HAND instead - Render
+  # dashboard -> New + -> Cron Job -> branch `master`, region Oregon, runtime
+  # Docker, Root Directory `deploy/prune`, Dockerfile `./deploy/prune/Dockerfile`,
+  # schedule `0 4 * * *`, env PRUNE_DAYS=7 and EVO_DATABASE_URL = the Internal
+  # Database URL from wd-evo-db -> Connect. Then hit "Run now" once and read the
+  # log; that single run is the proof. The script is defensive - every statement
+  # is IF-EXISTS guarded and a renamed table degrades to a logged no-op rather
+  # than a red cron.
   - type: cron
     name: wd-evo-prune
     runtime: docker

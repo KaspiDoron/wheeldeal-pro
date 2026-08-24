@@ -18,6 +18,14 @@ const read = (p: string) => readFileSync(join(process.cwd(), p), "utf8");
 // present and valid on master, reported missing because the branch under it was
 // gone. The Evolution retention cron therefore never got created, and the
 // Evolution database was on course to fill in 17-28 days at beta scale.
+//
+// EPILOGUE, AND THE REASON THIS FILE GREW. The Blueprint was moved to `master`
+// and Manual Sync STILL 404s. So the dead branch was a real defect and is no
+// longer the live cause: the fault is now inside Render's own record (its
+// Settings say `master` while its breadcrumb still names the deleted branch).
+// This file therefore pins two things at once - that no config names a branch
+// that does not exist, AND that the repo side of the sync is verifiably clean,
+// so the next person to read the 404 does not go looking here for it.
 
 const DEAD_BRANCH = "claude/rental-negotiation-app-pc33ux";
 
@@ -53,10 +61,31 @@ describe("no config points at a branch that does not exist", () => {
     expect(section).toMatch(/master/);
   });
 
-  it("render.yaml says the same thing, where someone editing it will see it", () => {
+  it("render.yaml tells an editor how a change here actually reaches Render", () => {
+    // INTENT PRESERVED, WORDING MOVED ON. This used to pin the sentence "THE
+    // BLUEPRINT MUST TRACK `master`", written when a dead branch was the whole
+    // story. The Blueprint now tracks `master` and STILL 404s (see below), so
+    // that sentence is no longer the thing an editor needs to read. What the
+    // header must still do is state the branch and state how to apply a change.
     const y = read("render.yaml");
     const header = y.slice(0, y.indexOf("databases:"));
-    expect(header).toMatch(/BLUEPRINT MUST TRACK `master`/);
+    expect(header).toMatch(/`master`/);
+    expect(header).toMatch(/BY HAND/);
+    expect(header).toMatch(/OPTIONAL/);
+  });
+
+  it("nothing in the repo still blames the dead branch for the CURRENT sync failure", () => {
+    // The disproved diagnosis. The Blueprint's own Settings show `master` and
+    // Manual Sync still fails, so a doc that says "it fails because it is
+    // pinned to a deleted branch" sends the next reader to fix a setting that
+    // is already correct. A wrong cause stated confidently is worse than none.
+    for (const f of ["CLAUDE.md", "render.yaml"]) {
+      const text = read(f);
+      expect(
+        text,
+        `${f} still presents the dead branch as the live cause`
+      ).not.toMatch(/pinned to `?claude\/rental-negotiation-app/);
+    }
   });
 
   it("the infra clone command checks out a branch that exists", () => {
@@ -89,6 +118,42 @@ describe("no config points at a branch that does not exist", () => {
     const listed = [...wf.matchAll(/^\s*-\s*(claude\/[\w./-]+)\s*$/gm)].map((m) => m[1]);
     expect(listed.length).toBeGreaterThan(0);
     for (const b of listed) expect(heads, `workflow lists ${b}`).toContain(`refs/heads/${b}`);
+  });
+
+  it("THE REPO SIDE IS CLEAN - the four checks that locate the 404 inside Render", () => {
+    // Recorded as a test so nobody re-derives this a fourth time. Render
+    // reports `render.yaml` missing on a branch where it demonstrably is not.
+    // If all four of these hold, the fault is not in this repository.
+    const root = process.cwd();
+    // 1. tracked by git at the ROOT of master (not merely present on disk)
+    let tree = "";
+    try {
+      tree = execSync("git ls-tree origin/master --name-only", {
+        encoding: "utf8",
+        timeout: 20_000,
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+    } catch {
+      tree = "";
+    }
+    if (tree.trim()) {
+      const rootYaml = tree.split("\n").filter((n) => /\.ya?ml$/i.test(n.trim()));
+      expect(rootYaml).toContain("render.yaml");
+      // 2. exactly one root-level YAML, so a rename or a case slip is visible
+      expect(rootYaml).toHaveLength(1);
+    }
+    // 3. not gitignored (an ignored file is invisible to every integration)
+    let ignored = false;
+    try {
+      execSync("git check-ignore -q render.yaml", { cwd: root, stdio: "ignore" });
+      ignored = true;
+    } catch {
+      ignored = false;
+    }
+    expect(ignored).toBe(false);
+    // 4. spelled exactly `render.yaml` - not .yml, not RENDER.yaml
+    expect(existsSync(join(root, "render.yaml"))).toBe(true);
+    expect(existsSync(join(root, "render.yml"))).toBe(false);
   });
 
   it("render.yaml really is at the root, with every Dockerfile it names", () => {

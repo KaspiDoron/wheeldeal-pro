@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { requireManagement } from "@/lib/session";
 import {
   hostOccupancy,
+  inviteHeadroom,
   drainAlarm,
   dbLatency,
   pagerDigest,
@@ -38,13 +39,28 @@ async function collect() {
   const { sbSelect, sbSelectDark, sbCountDark } = await import("@/lib/runtime-config");
 
   // 1) EVOLUTION HOST OCCUPANCY - the ceiling whose failure mode is a ban.
-  const occupancy = await (async () => {
+  //    Read ONCE and used twice: occupancy (paired now) and invite headroom
+  //    (how many more testers the fleet could hold if they all linked).
+  const fleet = await (async () => {
     try {
       const { hostCapacity } = await import("@/lib/evolution");
-      const cap = await hostCapacity();
-      return hostOccupancy(cap.hosts, cap.cap);
+      return await hostCapacity();
     } catch {
-      return hostOccupancy([], 0);
+      return { cap: 0, hosts: [] as { url: string; users: number }[], users: 0, capacity: 0 };
+    }
+  })();
+  const occupancy = hostOccupancy(fleet.hosts, fleet.cap);
+
+  // 1b) INVITED TESTERS vs FLEET CAPACITY - "can I invite 40 more?" as a
+  //     number on a screen. The two ceilings live in different modules and
+  //     the owner was doing this arithmetic by hand before every invite wave.
+  const invites = await (async () => {
+    try {
+      const { betaAllowlist, BETA_ALLOWLIST_MAX } = await import("@/lib/allowlist");
+      const list = await betaAllowlist();
+      return inviteHeadroom(list.length, fleet.hosts.length, fleet.cap, BETA_ALLOWLIST_MAX);
+    } catch {
+      return inviteHeadroom(0, 0, 0, 0);
     }
   })();
 
@@ -88,6 +104,16 @@ async function collect() {
       state: occupancy.state,
       value: occupancy.pct === null ? "-" : `${occupancy.users}/${occupancy.capacity} (${occupancy.pct}%)`,
       detail: occupancy.detail,
+    },
+    {
+      id: "invites",
+      label: "Invited testers vs fleet capacity",
+      state: invites.state,
+      value:
+        invites.capacity === 0
+          ? `${invites.invited}/-`
+          : `${invites.invited}/${invites.capacity}`,
+      detail: invites.detail,
     },
     {
       id: "drain",

@@ -93,6 +93,71 @@ export function hostOccupancy(
   };
 }
 
+export interface InviteHeadroom {
+  state: ChokeState;
+  /** Testers on the beta allowlist right now (the owner is not counted). */
+  invited: number;
+  /** hosts x per-host cap - how many numbers the fleet can actually hold. */
+  capacity: number;
+  /** Invites that could still be sent before the fleet is the binding wall. */
+  headroom: number;
+  detail: string;
+}
+
+/**
+ * CAN I INVITE MORE TESTERS? - the arithmetic the owner was doing by hand.
+ *
+ * Two independent ceilings decide this and they were on different screens:
+ * the invite list has its own cap (`BETA_ALLOWLIST_MAX`), and the Evolution
+ * fleet holds `hosts x maxPerHost` linked numbers. An invite past the SECOND
+ * one is not refused at the door - the tester signs in perfectly happily and
+ * then cannot link WhatsApp, which is the confusing half of the failure.
+ *
+ * Not every invited tester links a number, so this deliberately compares
+ * INVITES against capacity rather than paired sessions: it is the pessimistic
+ * reading, and the pessimistic reading is the one worth alarming on when the
+ * downside is a tester who cannot use the product.
+ */
+export function inviteHeadroom(
+  invited: number,
+  hostCount: number,
+  cap: number,
+  listMax: number
+): InviteHeadroom {
+  const capacity = Math.max(0, hostCount) * Math.max(0, cap);
+  const headroom = capacity - invited;
+  if (hostCount <= 0 || cap <= 0) {
+    return {
+      state: "unknown",
+      invited,
+      capacity: 0,
+      headroom: 0,
+      detail: `${invited} tester(s) invited and NO Evolution host is configured, so none of them can link WhatsApp. Add a host before the next invite.`,
+    };
+  }
+  // ALARM means someone ALREADY cannot link - not merely "no slack left".
+  // Exactly-full is a warning: every invited tester still has a socket, and
+  // calling that red trains the owner to ignore the tile that is red when a
+  // tester genuinely cannot use the product.
+  const state: ChokeState = headroom < 0 ? "alarm" : headroom <= cap ? "warn" : "ok";
+  const listNote =
+    invited >= listMax ? ` The invite list is also at its own ${listMax} ceiling.` : "";
+  return {
+    state,
+    invited,
+    capacity,
+    headroom,
+    detail:
+      headroom < 0
+        ? `${invited} testers invited against a fleet that holds ${capacity}. ${-headroom} of them can sign in and then FAIL to link WhatsApp. Add hosts or shrink the list.${listNote}`
+        : headroom === 0
+          ? `Exactly full: ${invited} invited, ${capacity} linkable. Every current tester has a socket and the next invite does not. Stand up the next lane before it goes out.${listNote}`
+          : headroom <= cap
+            ? `Room for ${headroom} more tester(s) before the fleet is full - less than one host's worth. Stand up the next lane now, not after the invites go out.${listNote}`
+            : `Room for ${headroom} more tester(s): ${hostCount} host(s) x ${cap} = ${capacity} linkable numbers, ${invited} invited.${listNote}`,
+  };
+}
+
 export interface DrainAlarm {
   state: ChokeState;
   ageMs: number | null;

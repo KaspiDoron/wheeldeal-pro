@@ -1,8 +1,9 @@
 // Private-beta access lock.
 //
-// While the beta lock is ON, ONLY the 26 approved accounts may hold a session:
+// While the beta lock is ON, ONLY approved accounts may hold a session:
 //   - the owner (always allowed, always Ultra/owner)
-//   - up to 25 invited testers, each pinned to a plan (free / pro / ultra)
+//   - up to BETA_ALLOWLIST_MAX invited testers, each pinned to a plan
+//     (free / pro / ultra)
 // Anyone else is refused at EVERY cookie-issuing entry point (email login,
 // email-verified signup, Google OAuth) and is also kicked on the next /me poll
 // if they were removed mid-session. There is no other way to obtain a session,
@@ -25,6 +26,27 @@ export interface BetaEntry {
   // billing. Backward-compatible - old stored JSON simply lacks the field.
   test?: boolean;
 }
+
+/**
+ * THE HARD CEILING ON THE TESTER LIST - and the reason it is a constant.
+ *
+ * This number was written inline as a bare `25` inside `saveBetaAllowlist`,
+ * where it silently TRUNCATED every entry past the 25th: the owner pasted a
+ * longer list, got a 200, and lost the tail without being told. It also
+ * disagreed with the copy in the admin panel the moment either moved.
+ *
+ * It stays a CAP rather than becoming unbounded - an invite list with no
+ * ceiling is how a beta stops being a beta, and the ceiling is what keeps the
+ * tester count comparable against fleet capacity (hosts x `maxPerHost`). The
+ * value is the only place the number lives; the panel renders it and the save
+ * path refuses past it out loud.
+ *
+ * 100, not 25: the beta target moved to 100 testers, and the old value made
+ * that impossible to even invite regardless of how many Evolution hosts exist.
+ * Capacity is enforced separately, at link time, by `resolveHost`'s per-host
+ * cap - being on the list has never meant a socket is waiting.
+ */
+export const BETA_ALLOWLIST_MAX = 100;
 
 function ownerEmailLocal(): string {
   return (process.env.OWNER_EMAIL || "kaspidoron@gmail.com").trim().toLowerCase();
@@ -106,18 +128,33 @@ export async function isAllowed(email: string): Promise<boolean> {
 export const BETA_BLOCK_MESSAGE =
   "WheelDeal is in a private, invite-only beta. This email is not on the tester list yet - please contact the owner to be added.";
 
-/** Owner action: replace the whole tester list (25 max besides the owner). */
-export async function saveBetaAllowlist(entries: BetaEntry[]): Promise<void> {
+/**
+ * Owner action: replace the whole tester list (BETA_ALLOWLIST_MAX besides the
+ * owner).
+ *
+ * Returns what was actually stored AND what was dropped. The old signature
+ * returned void while silently binning everything past the cap, so a truncated
+ * save and a complete one were indistinguishable to the caller and to the
+ * owner. The route surfaces `dropped` so an over-long paste says so.
+ */
+export async function saveBetaAllowlist(
+  entries: BetaEntry[]
+): Promise<{ saved: BetaEntry[]; dropped: number; max: number }> {
   const clean: BetaEntry[] = [];
   const seen = new Set<string>();
+  let dropped = 0;
   for (const e of entries) {
     const email = String(e?.email ?? "").trim().toLowerCase();
     if (!email.includes("@") || seen.has(email) || email === ownerEmailLocal()) continue;
     seen.add(email);
+    if (clean.length >= BETA_ALLOWLIST_MAX) {
+      dropped += 1;
+      continue;
+    }
     clean.push({ email, plan: normalizePlanLoose(e?.plan), ...(e?.test ? { test: true } : {}) });
-    if (clean.length >= 25) break;
   }
   await setConfig("beta_allowlist", JSON.stringify(clean));
+  return { saved: clean, dropped, max: BETA_ALLOWLIST_MAX };
 }
 
 // ---------------------------------------------------------------------------
