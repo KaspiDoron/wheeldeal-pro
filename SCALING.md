@@ -763,26 +763,35 @@ document.
    should page someone - `wa-send-dropped`, `wa-ban-risk`,
    `wa-send-expired`, `host-geo-mismatch`, `media-fetch-failed`,
    `wa-rep-bump-degraded` - are written faithfully to the database and read by
-   **nobody** unless a human opens the admin panel.
-   (`wa-rep-bump-degraded` is the newest and the quietest: the atomic safety
-   counters refused a write for a reason other than "the migration has not been
-   run", so they silently fell back to the racy path and will UNDER-count. The
-   risk gauge then reads *healthier* than the truth on exactly the numbers
-   closest to a ban. Nothing else surfaces it, because the app keeps working.) Wave 7 puts their 24-hour
+   **nobody** unless a human opens the admin panel. Wave 7 puts their 24-hour
    counts and the age of the most recent one on the choke-point card, with an
    "email me this digest" button that uses your existing email provider. That
    is a **pull**, not a **page**. It is deliberately not a new dependency and a
    new bill, and it is deliberately not as good as a real alerting pipeline.
-3. **The workers VM is not provisioned.** `services/workers` and the BullMQ
+   (`wa-rep-bump-degraded` is the newest and the quietest: the atomic safety
+   counters refused a write for a reason other than "the migration has not been
+   run", so they silently fell back to the racy path and will UNDER-count. The
+   risk gauge then reads *healthier* than the truth on exactly the numbers
+   closest to a ban. Nothing else surfaces it, because the app keeps working.)
+3. **Supabase egress is measured by the app, not by whoever happens to be
+   watching.** The read path counts its own bytes at the two `sbSelect`
+   chokepoints and flushes at most one `api_usage` row per instance per 15
+   minutes (kind `sb-egress-bytes`); the choke-point card projects it to 30 days
+   against the free 5 GB. Read path only - writes, Storage and Realtime are not
+   in it - and it over-states where transport compression is active, which is
+   the right direction to be wrong in for a safety ceiling. It refuses to
+   project a month from under 12 hours of traffic, because a confident wrong
+   number on a launch panel gets acted on where a dash does not.
+4. **The workers VM is not provisioned.** `services/workers` and the BullMQ
    offload path exist in the repo. Nothing runs them. Inbound webhook work is
    *bounded* (4 concurrent heavy turns per instance), not *offloaded*.
-4. **The second monitored pinger is a runbook step, not code.** Section 5 tells
+5. **The second monitored pinger is a runbook step, not code.** Section 5 tells
    you to add it. Nothing in this repository will notice if you do not.
-5. **AI "remaining quota" is an estimate for ten of the twelve providers.** The
+6. **AI "remaining quota" is an estimate for ten of the twelve providers.** The
    panel says so; believe the panel.
-6. **The WABA tier and template cost are values you typed.** The new drift check
+7. **The WABA tier and template cost are values you typed.** The new drift check
    catches disagreement *when you press it*. It does not watch continuously.
-7. **Evolution's own memory ceiling is not instrumented.** The app knows how
+8. **Evolution's own memory ceiling is not instrumented.** The app knows how
    many users it has placed on a host. It does not know that host's RAM. Watch
    it in Render's dashboard.
 
@@ -793,8 +802,10 @@ document.
 Admin -> Keys, top to bottom:
 
 1. **Deploy info** - the revision serving is the one you deployed.
-2. **Choke points** - all four green: host occupancy under 80%, heartbeat under
-   5 minutes, database under 400 ms, no paging events in 24h.
+2. **Choke points** - every reading green: host occupancy under 80%, invited
+   testers inside fleet capacity, Supabase egress projecting under 60% of the
+   free 5 GB, heartbeat under 5 minutes, database under 400 ms, no paging
+   events in 24h.
 3. **Service health** - "Check now". Every configured service green, including
    the new Redis, OpenStreetMap and live-email rows.
 4. **WA doctor** - a real inbound traced end to end.

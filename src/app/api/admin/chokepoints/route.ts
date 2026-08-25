@@ -10,6 +10,7 @@ import {
   WATCHED_KINDS,
   type ChokeState,
 } from "@/lib/chokepoints";
+import { formatBytes } from "@/lib/ops/egress";
 
 // THE CHOKE-POINT PANEL'S DATA (Wave 7, SCALING.md).
 //
@@ -64,6 +65,34 @@ async function collect() {
     }
   })();
 
+  // 1c) SUPABASE EGRESS - the ceiling the report-8 audit ranked FIRST, and the
+  //     one that was only ever visible on somebody else's dashboard. A
+  //     restricted project takes the whole app down, not one feature.
+  const egress = await (async () => {
+    const { egressReading } = await import("@/lib/ops/egress");
+    const { EGRESS_USAGE_KIND } = await import("@/lib/runtime-config");
+    const since = new Date(now - 7 * 24 * 3600_000).toISOString();
+    const rows = await sbSelectDark<{ count: number; created_at: string }>(
+      "api_usage",
+      `select=count,created_at&kind=eq.${encodeURIComponent(
+        EGRESS_USAGE_KIND
+      )}&created_at=gte.${encodeURIComponent(since)}&order=created_at.asc&limit=5000`
+    );
+    if (rows === null) return egressReading(null, 0);
+    if (rows.length === 0) return egressReading(0, 0);
+    // The sample runs from the OLDEST flush in the window, not from seven days
+    // ago - projecting a month from "7 days" when the meter has only been
+    // running for one would under-state it by a factor of seven.
+    const firstAt = Date.parse(rows[0].created_at);
+    const windowDays = Number.isFinite(firstAt)
+      ? Math.max(0, (now - firstAt) / (24 * 3600_000))
+      : 0;
+    return egressReading(
+      rows.reduce((n, r) => n + (Number(r.count) || 0), 0),
+      windowDays
+    );
+  })();
+
   // 2) DRAIN HEARTBEAT - nothing sends unless something pings.
   const lastPing = await sbSelect<{ created_at: string }>(
     "agent_events",
@@ -114,6 +143,18 @@ async function collect() {
           ? `${invites.invited}/-`
           : `${invites.invited}/${invites.capacity}`,
       detail: invites.detail,
+    },
+    {
+      id: "egress",
+      label: "Supabase egress (30d projection)",
+      state: egress.state,
+      value:
+        egress.fraction === null
+          ? egress.bytes === null
+            ? "-"
+            : `${formatBytes(egress.bytes)} so far`
+          : `${Math.round(egress.fraction * 100)}% of 5 GB`,
+      detail: egress.detail,
     },
     {
       id: "drain",

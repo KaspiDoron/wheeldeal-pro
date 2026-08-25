@@ -14,9 +14,15 @@
 //   2. Invited testers vs fleet capacity - the invite decision, pre-computed.
 //      A tester past the fleet's capacity signs in fine and then cannot link
 //      WhatsApp, so this compares INVITES (pessimistic) rather than pairings.
-//   3. Queue drain heartbeat - nothing sends unless something pings.
-//   4. Database round trip - the PostgREST pool queues before it errors.
-//   5. The three event kinds PRODUCTION-READINESS.md says should page someone.
+//   3. Supabase egress against the free 5 GB/month. The audit ranked this
+//      ceiling FIRST and it was the only one with no instrument at all - the
+//      advice was "watch the Supabase graph during a hunt", which needs a human
+//      present at the moment traffic happens and leaves nothing behind. The
+//      app counts its own bytes now; a restricted project takes the WHOLE app
+//      down, not one feature.
+//   4. Queue drain heartbeat - nothing sends unless something pings.
+//   5. Database round trip - the PostgREST pool queues before it errors.
+//   6. The event kinds PRODUCTION-READINESS.md says should page someone.
 //
 // The digest button is the deliberate NON-answer to error tracking: no Sentry,
 // no new dependency, no new bill - the counts that already exist, mailed to

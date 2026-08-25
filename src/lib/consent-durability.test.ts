@@ -92,18 +92,15 @@ describe("the fallback is not write-only", () => {
     globalThis.fetch = vi.fn(async (url: string | URL | Request) => {
       const u = String(url);
       if (u.includes("/consent_events")) {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => [
+        return new Response(
+          JSON.stringify([
             { kind: "terms", version: "v1", context: null, accepted_at: "2026-07-01T00:00:00.000Z" },
-          ],
-        } as unknown as Response;
+          ]),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
       }
-      return {
-        ok: true,
-        status: 200,
-        json: async () => [
+      return new Response(
+        JSON.stringify([
           {
             created_at: "2026-07-20T00:00:00.000Z",
             detail: JSON.stringify({
@@ -118,8 +115,9 @@ describe("the fallback is not write-only", () => {
             created_at: "2026-07-21T00:00:00.000Z",
             detail: JSON.stringify({ email: "other@x.co", consentKind: "terms", version: "v1" }),
           },
-        ],
-      } as unknown as Response;
+        ]),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
     }) as unknown as typeof fetch;
 
     const rows = await consentLedger("A@B.co");

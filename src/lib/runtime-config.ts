@@ -276,6 +276,67 @@ async function timedFetch(url: string, init: RequestInit, ms = 8000): Promise<Re
 }
 
 /** Read rows from a Supabase table via the service role. [] if unset. */
+// ---------------------------------------------------------------------------
+// THE EGRESS METER (owner report 10).
+//
+// Supabase's free 5 GB/month egress is the ceiling the report-8 audit ranked
+// FIRST - ahead of the Evolution hosts - and the only instruction anyone ever
+// wrote for it was "watch the Supabase usage graph during a hunt". That needs a
+// human present at the moment traffic happens and leaves nothing behind.
+//
+// Every read in this app goes through `sbSelect` or `sbSelectStrict`, so the
+// bytes can be counted here, once, at the one place they all pass. See
+// `ops/egress` for what the number is and is not.
+//
+// COST DISCIPLINE. This sits on the hottest path in the system, so:
+//   - counting is an addition, and `content-length` is preferred over measuring
+//     the body (the header is also the WIRE size, which is what is billed);
+//   - the flush is fire-and-forget and never awaited by a read;
+//   - it writes at most one row per instance per flush, so 20 instances cost 20
+//     rows, not one row per query.
+// ---------------------------------------------------------------------------
+export const EGRESS_USAGE_KIND = "sb-egress-bytes";
+const EGRESS_FLUSH_BYTES = 16 * 1024 * 1024;
+const EGRESS_FLUSH_MS = 15 * 60_000;
+
+let egressBytes = 0;
+let egressLastFlush = Date.now();
+let egressFlushing = false;
+
+/** Wire size where PostgREST declares it; the decoded UTF-8 length otherwise. */
+function measuredBytes(res: Response, text: string): number {
+  const declared = Number(res.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > 0) return declared;
+  // Byte length, not string length: this app carries Thai, Lao, Khmer and
+  // Myanmar text, where `.length` under-counts by up to 3x - and under-counting
+  // a safety ceiling is the wrong direction to be wrong in.
+  return Buffer.byteLength(text, "utf8");
+}
+
+function noteEgress(bytes: number): void {
+  if (!Number.isFinite(bytes) || bytes <= 0) return;
+  egressBytes += bytes;
+  const now = Date.now();
+  if (egressBytes < EGRESS_FLUSH_BYTES && now - egressLastFlush < EGRESS_FLUSH_MS) return;
+  if (egressFlushing) return;
+  egressFlushing = true;
+  const flushing = egressBytes;
+  egressBytes = 0;
+  egressLastFlush = now;
+  // Fire and forget: a read must never wait on its own telemetry, and a lost
+  // flush under-reports rather than failing a request.
+  void sbInsert("api_usage", [{ kind: EGRESS_USAGE_KIND, count: Math.round(flushing) }])
+    .catch(() => {})
+    .finally(() => {
+      egressFlushing = false;
+    });
+}
+
+/** Bytes measured by THIS instance and not yet flushed (diagnostics only). */
+export function pendingEgressBytes(): number {
+  return egressBytes;
+}
+
 export async function sbSelect<T = Record<string, unknown>>(
   table: string,
   query = "select=*&limit=50"
@@ -288,7 +349,12 @@ export async function sbSelect<T = Record<string, unknown>>(
       cache: "no-store",
     });
     if (!res.ok) return [];
-    return (await res.json()) as T[];
+    // text() rather than json() so the payload can be weighed on the way past.
+    // Same cost - json() materialises the same string internally - and a
+    // malformed body still throws into the same catch.
+    const text = await res.text();
+    noteEgress(measuredBytes(res, text));
+    return JSON.parse(text) as T[];
   } catch {
     return [];
   }
@@ -379,7 +445,11 @@ export async function sbSelectStrict<T = Record<string, unknown>>(
       headers: { apikey: conn.key, Authorization: `Bearer ${conn.key}` },
       cache: "no-store",
     });
-    if (res.ok) return { rows: (await res.json()) as T[] };
+    if (res.ok) {
+      const text = await res.text();
+      noteEgress(measuredBytes(res, text));
+      return { rows: JSON.parse(text) as T[] };
+    }
     // PostgREST: 404 = unknown relation; 400 + 42703/42P01 = missing column/table.
     //
     // THE CODES ARE NOT THE ONLY SHAPE. PostgREST answers a missing column from
