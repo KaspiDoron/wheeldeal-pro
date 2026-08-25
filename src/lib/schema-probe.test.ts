@@ -20,8 +20,15 @@ const readCode = (p: string) =>
 // database contained. The one instrument built to catch a silent degradation was
 // itself silently degraded, and no test existed that could have noticed.
 
+// A REAL Response, not a hand-rolled shape. The partial fake had `json` and
+// nothing else, so it broke the moment production started weighing payloads on
+// the way past (the egress meter, owner report 10). A stand-in that implements
+// one method of the thing it stands in for will keep doing that.
 const OK = (rows: unknown[] = []) =>
-  ({ ok: true, status: 200, json: async () => rows }) as unknown as Response;
+  new Response(JSON.stringify(rows), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
 
 const ERR = (status: number, body: string) =>
   ({ ok: false, status, text: async () => body, json: async () => ({}) }) as unknown as Response;

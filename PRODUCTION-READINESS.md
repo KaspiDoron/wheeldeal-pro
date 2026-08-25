@@ -284,6 +284,19 @@ daily limits are the cost guard in both modes.
    as well as a pooled one - and says "at capacity" rather than blaming the
    configuration.
 
+**Supabase egress is a THIRD ceiling, and it is the one the audit ranked
+first.** The free tier allows 5 GB/month and a restricted project takes the
+whole app down, not one feature. Every previous plan ended with "watch the
+Supabase usage graph during a real hunt", which needs a human present at the
+moment traffic happens and leaves nothing behind. The app now counts its own
+read-path bytes at the `sbSelect`/`sbSelectStrict` chokepoint and Admin -> Ops
+-> choke points renders a 30-day projection against the 5 GB. It is an
+estimate - read path only, and it over-states where transport compression is
+active - and it refuses to project a month from less than 12 hours of traffic,
+because a confident wrong number on a launch panel gets acted on where a dash
+does not. **If it goes amber before an invite wave, decide on Supabase Pro
+($25/mo) before the wave, not after the project is restricted.**
+
 **Being invited is not a socket.** A tester past the fleet ceiling signs in
 perfectly happily and then cannot link WhatsApp, which is the confusing half of
 that failure. Admin -> Ops -> choke points now renders *"Invited testers vs
