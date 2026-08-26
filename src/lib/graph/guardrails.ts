@@ -16,6 +16,9 @@
 
 import type { ExtractedOffer } from "../agents";
 import type { StructuredRFQ } from "../types";
+// The ONE digit fold (18 scripts). See the note beside extractPriceNumbers
+// for why this file must not keep its own.
+import { normalizeDigits } from "../integrity/translation";
 
 // ---------------------------------------------------------------------------
 // Money-number extraction (the hard part: telling a PRICE from a cc / day / %)
@@ -33,15 +36,36 @@ const DEPOSIT_CTX = /(deposit|bond|caution|down\s?payment|security|passport|insu
 // A temporal cue right before a 4-digit number means it is a YEAR, not a price.
 const TEMPORAL = /(in|by|until|till|since|around|before|after|come|back|return|year|month)\s*$/i;
 
-// Fold common non-latin numerals to ASCII so a locally-composed bargain (Ultra
-// writes natively in Thai/Arabic/etc.) still has its numbers validated.
-const NON_LATIN_DIGITS: Record<string, string> = {};
-for (const set of ["٠١٢٣٤٥٦٧٨٩", "۰۱۲۳۴۵۶۷۸۹", "๐๑๒๓๔๕๖๗๘๙", "०१२३४५६७८९"]) {
-  for (let i = 0; i < 10; i++) NON_LATIN_DIGITS[set[i]] = String(i);
-}
-export function normalizeDigits(s: string): string {
-  return s.replace(/[^\x00-\x7f]/g, (ch) => NON_LATIN_DIGITS[ch] ?? ch);
-}
+// ONE DIGIT RULE, NOT TWO. This file used to carry its OWN fold, covering four
+// scripts (Arabic-Indic, Persian, Thai, Devanagari) while `integrity/translation`
+// covered eighteen. That is not a style difference - it decided whether these
+// rails could READ the message they were validating.
+//
+// Owner report 8.1 F4 already found this exact bug class once, in `citedRival`,
+// and fixed it by wiring the 18-script fold into `spte/*`. The fix never reached
+// here, and `spte/rails.ts` ended up importing BOTH: the 18-script fold on line
+// 15 for cite-the-rival, and this file's 4-script one on line 9 for
+// checkOutboundNumbers, correctDuration and verbatimNumerals. One file, two
+// strengths of the same rule.
+//
+// The reason nobody saw it for ten audit rounds is mechanical: this file
+// contained raw control bytes, so `grep`, ripgrep and `git diff` all treated it
+// as binary and silently skipped it (fixed in the commit before this one).
+//
+// It failed OPEN, which is the worst direction. Reproduced against the live
+// modules with the thread grounded at 250 and the model inventing 180:
+//
+//   ASCII / Thai            rail ok=false  ungrounded-number   <- correct
+//   Lao / Khmer / Myanmar   rail ok=TRUE   sees no numbers     <- price SENT
+//   Bengali / Fullwidth     rail ok=TRUE   sees no numbers     <- price SENT
+//
+// ...in three markets this app explicitly supports (855/856/95 have had
+// business-hours gating since owner report 8 wave D), and the comment at
+// `spte/rails.ts:496` names Lao, Khmer and Myanmar three lines after asserting a
+// draft is "already validated as real by checkOutboundNumbers below".
+// The fold itself is imported at the top of this file. NOT re-exported:
+// nothing imports `normalizeDigits` from here, and leaving a second door open is
+// how a codebase grows a second copy again.
 
 /**
  * Every PRICE-scale number in a message, with the non-price numbers removed:
@@ -304,18 +328,39 @@ export function correctDuration(
   if (!text || !durationDays || durationDays < 1) return { text, changed: false, from: [] };
   const from: number[] = [];
   const canonical = `${durationDays} ${durationDays === 1 ? "day" : "days"}`;
-  const out = text.replace(DURATION_TOKEN, (whole, digits: string, unit: string) => {
-    const n = parseInt(digits, 10);
-    if (!Number.isFinite(n) || n <= 0) return whole;
-    const resolved = /week/i.test(unit) ? n * 7 : n;
+  // MATCH ON THE FOLDED TEXT, SPLICE INTO THE ORIGINAL.
+  //
+  // This used to run `.replace()` straight over `text`, so it only ever saw
+  // ASCII digits: on a message localized into Thai, Lao, Khmer or Myanmar it
+  // matched nothing and the wrong rental length went out untouched. Folding the
+  // digits fixes DETECTION, but folding the text we SEND would also rewrite the
+  // price's script - so the fold is used to find the span and the original
+  // string is what gets edited.
+  //
+  // Safe because `normalizeDigits` is a 1:1 code-point map: every digit becomes
+  // exactly one ASCII character and everything else (emoji, flags, astral-plane
+  // symbols) passes through unchanged, so the two strings share indices. Pinned
+  // by a test, because the whole splice rests on it.
+  const folded = normalizeDigits(text);
+  const rx = new RegExp(DURATION_TOKEN.source, "gi");
+  let out = "";
+  let cursor = 0;
+  for (const m of folded.matchAll(rx)) {
+    const whole = m[0];
+    const n = parseInt(m[1], 10);
+    const at = m.index ?? 0;
+    if (!Number.isFinite(n) || n <= 0) continue;
+    const resolved = /week/i.test(m[2]) ? n * 7 : n;
     // Same length (allowing weeks==days-equivalent) or an implausible length ->
     // leave untouched.
-    if (resolved === durationDays) return whole;
-    if (resolved < 1 || resolved > 90) return whole;
+    if (resolved === durationDays) continue;
+    if (resolved < 1 || resolved > 90) continue;
     from.push(resolved);
-    return canonical;
-  });
-  return { text: out, changed: from.length > 0, from };
+    out += text.slice(cursor, at) + canonical;
+    cursor = at + whole.length;
+  }
+  out += text.slice(cursor);
+  return { text: from.length > 0 ? out : text, changed: from.length > 0, from };
 }
 
 /**
