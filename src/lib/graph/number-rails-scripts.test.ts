@@ -236,3 +236,42 @@ describe("the app reads a price the shop wrote in its own numerals", () => {
     expect(original).not.toContain("250");
   });
 });
+
+// ---------------------------------------------------------------------------
+// THE GUARD AGAINST MY OWN FIX. Folding digits makes MORE text match, so the
+// risk it introduces is the opposite of the bug it fixes: a phone number, plate,
+// address or odometer reading in local numerals now being read as a price.
+//
+// The claim is PARITY, not "extracts nothing": whatever the extractor decides
+// about a sentence in ASCII, it must decide identically in every other script.
+// Folding may only change whether a number is VISIBLE, never whether it is a
+// price. Anything else is a regression dressed as a fix.
+// ---------------------------------------------------------------------------
+describe("folding did not loosen the extractor", () => {
+  const NOT_PRICES = [
+    "call me on 0812345678",
+    "our address is 45/12 Moo 3",
+    "open 08:30 to 20:00",
+    "we have 125cc and 155cc",
+    "sorry we are closed 2 days",
+    "the year 2026 model",
+    "45,000 km on it",
+  ];
+
+  it.each(SCRIPTS)("non-price numbers stay non-prices in %s", (_name, base) => {
+    for (const sentence of NOT_PRICES) {
+      const ascii = extractQuotedPrices(sentence, { durationDays: 4 });
+      const local = extractQuotedPrices(inScript(sentence, base), { durationDays: 4 });
+      expect(local.offer?.pricePerDay ?? null, `${sentence} in script ${base}`).toBe(
+        ascii.offer?.pricePerDay ?? null
+      );
+    }
+  });
+
+  it("a real price is still found - the control that keeps the block above honest", () => {
+    // Without this, "extracts nothing everywhere" would satisfy every assertion.
+    expect(extractQuotedPrices("250 baht per day", { durationDays: 4 }).offer?.pricePerDay).toBe(
+      250
+    );
+  });
+});
