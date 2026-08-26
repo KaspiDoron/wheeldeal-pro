@@ -1,4 +1,5 @@
 import type { StructuredRFQ } from "../types";
+import { normalizeDigits } from "../integrity/translation";
 
 // WHAT WE PROMISED THE SHOP IS THE AUTHORITY.
 //
@@ -34,7 +35,15 @@ export interface RentalPromise {
  * used to be reachable by a looser pattern, and both would corrupt the promise.
  */
 export function citedDurationDays(text: string | null | undefined): number | null {
-  const s = String(text ?? "");
+  // FOLD THE DIGITS FIRST. This matched raw text, so it read ASCII and nothing
+  // else: "for the 4 days" gave 4 while the same sentence localized into Thai,
+  // Lao, Khmer or any of the other fifteen scripts this app meets gave null -
+  // a promise the thread silently stopped carrying the moment it was translated.
+  //
+  // That made the duration rule read digits at THREE different strengths across
+  // the codebase (18 scripts in integrity/translation, 4 in graph/guardrails,
+  // 0 here). One fold now, imported.
+  const s = normalizeDigits(String(text ?? ""));
   // "8 days", "for 8 days", "8-day", "8 day rental"
   const m = s.match(/\b(\d{1,3})\s*[-–]?\s*days?\b/i);
   if (!m) return null;
