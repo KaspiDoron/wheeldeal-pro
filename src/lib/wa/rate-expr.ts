@@ -1,3 +1,4 @@
+import { normalizeDigits } from "../integrity/translation";
 // A RATE HAS A DENOMINATOR.
 //
 // On 27 Jul a Chiang Mai shop sent a price board captioned:
@@ -132,6 +133,12 @@ function parseAmount(raw: string): number {
 export function scanRates(text: string): RateExpr[] {
   const out: RateExpr[] = [];
   if (!text) return out;
+  // The RATE pattern is \d-based, so fold local numerals before matching -
+  // otherwise a Thai, Lao, Khmer or Myanmar price is simply not a rate. Done in
+  // the PRIMITIVE rather than in its callers: this has three of them, and a
+  // guard that each caller has to remember is the shape that let the outbound
+  // rails ship blind (owner report 11 B1).
+  text = normalizeDigits(text);
   for (const m of text.matchAll(RATE)) {
     const [whole, curLead, rawAmount, curTrail, seps, rawQty, rawUnit] = m;
     const amount = parseAmount(rawAmount);
