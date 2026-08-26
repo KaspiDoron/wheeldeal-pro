@@ -28,6 +28,7 @@ import {
   CUR_WORDS as RATE_CUR_WORDS,
   CUR_TAIL_GENERIC,
 } from "./rate-expr";
+import { normalizeDigits } from "../integrity/translation";
 
 export type VehicleClassHint = "car" | "motorbike" | "scooter" | undefined;
 
@@ -515,6 +516,19 @@ export function extractQuotedPrices(
 ): QuotedPrices {
   const none: QuotedPrices = { offer: null, listPrice: null, allOffers: [] };
   if (!text || !text.trim()) return none;
+  // READ THE SHOP'S DIGITS, WHATEVER SCRIPT THEY ARE IN.
+  //
+  // Every pattern below is built on \d, which is ASCII-only, so a shop writing
+  // "๒๕๐ บาท/วัน" or "២៥០ រៀល" produced offer:null - and this app's own
+  // documented starvation chain then runs to its end: no deterministic price
+  // hit, no vendor_replies.price, no offers row, found=false, and the card
+  // renders "No price yet" while the shop is looking at the price it just sent.
+  //
+  // Folded for READING only; the original body is what the transcript stores
+  // and shows, so the traveller still sees exactly what the shop wrote. The
+  // fold is idempotent, so the nested scanRates/parseRateLadder calls below
+  // folding again costs nothing.
+  text = normalizeDigits(text);
   // QUOTING A NUMBER IS NOT STATING IT. Ingest appends "(quoting: ...)" so the
   // model sees a reply's referent; the deterministic rails must skip it - a
   // shop quoting OUR message would otherwise turn our numbers into its offer.

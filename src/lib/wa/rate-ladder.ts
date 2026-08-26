@@ -34,6 +34,7 @@
 // dictionary of phrasings at all.
 
 import { mentionedCurrencies } from "./price-extract";
+import { normalizeDigits } from "../integrity/translation";
 
 export interface RateTier {
   /** Smallest stay this row covers. */
@@ -136,6 +137,9 @@ export function parseRateLadder(
   opts: { localCurrency?: string } = {}
 ): RateTier[] {
   if (!text || !text.trim()) return [];
+  // Same reason as scanRates: every row pattern here is \d-based, so a tier
+  // list written in local numerals parses as no tiers at all.
+  text = normalizeDigits(text);
   const rows: Array<Omit<RateTier, "pricePerDay" | "unit">> = [];
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim();

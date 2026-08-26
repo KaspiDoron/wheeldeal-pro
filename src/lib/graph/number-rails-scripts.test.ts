@@ -9,6 +9,8 @@ import {
 } from "./guardrails";
 import { citedDurationDays as promiseDuration } from "../wa/rental-params";
 import { normalizeDigits } from "../integrity/translation";
+import { extractQuotedPrices } from "../wa/price-extract";
+import { scanRates } from "../wa/rate-expr";
 
 // OWNER REPORT 11, B1 - THE NUMBER RAILS COULD NOT READ THE MESSAGE THEY GUARD.
 //
@@ -169,5 +171,68 @@ describe("the invariant the duration repair rests on", () => {
     ] as const) {
       expect(normalizeDigits(inScript("250", base)), name).toBe("250");
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE INBOUND HALF. Fixing the outbound rails exposed the same root cause one
+// layer earlier: the app could not READ a price the shop wrote in its own
+// numerals either. Every pattern in price-extract, rate-expr and rate-ladder is
+// built on \d, which is ASCII-only.
+//
+// This repo has already documented where that ends, in owner report 6's
+// starvation chain: no deterministic price hit -> no usablePrice -> no
+// vendor_replies.price -> no offers row -> found=false -> no quotedPricePerDay
+// -> the card renders "No price yet" while the shop is looking at the price it
+// just sent. That is the exact complaint the owner photographed twice.
+//
+// The fold goes in the PRIMITIVES, not their callers. scanRates alone has three
+// callers, and a guard each caller must remember is precisely the shape that let
+// the outbound rails ship blind.
+// ---------------------------------------------------------------------------
+describe("the app reads a price the shop wrote in its own numerals", () => {
+  it.each(SCRIPTS)("a plain daily quote in %s", (_name, base) => {
+    const r = extractQuotedPrices(inScript("250 baht per day", base), { durationDays: 4 });
+    expect(r.offer?.pricePerDay).toBe(250);
+    expect(r.offer?.currency).toBe("THB");
+  });
+
+  it.each(SCRIPTS)("a PACKAGE price in %s still divides out to a daily rate", (_name, base) => {
+    // "900 for 4 days" -> 225/day. The arithmetic runs on the folded digits, so
+    // a package quote in local script must land on the same number as ASCII.
+    const r = extractQuotedPrices(inScript("900 baht for 4 days", base), { durationDays: 4 });
+    expect(r.offer?.pricePerDay).toBe(225);
+  });
+
+  it.each(SCRIPTS)("a cc tier list in %s parses to the same offers as ASCII", (_name, base) => {
+    const ascii = extractQuotedPrices("4/Days 110cc 220 125cc 270 155cc 350", {
+      durationDays: 4,
+      engineSizeCc: 125,
+    });
+    const local = extractQuotedPrices(inScript("4/Days 110cc 220 125cc 270 155cc 350", base), {
+      durationDays: 4,
+      engineSizeCc: 125,
+    });
+    // Parity is the assertion, not a specific count: whatever ASCII does with a
+    // tier list, local script must do identically.
+    expect(local.allOffers.length).toBe(ascii.allOffers.length);
+    expect(local.offer?.pricePerDay).toBe(ascii.offer?.pricePerDay);
+  });
+
+  it.each(SCRIPTS)("scanRates - the shared primitive - reads %s", (_name, base) => {
+    // Fixed in the primitive because it has three callers (price-extract x3 and
+    // vehicle/resolution), and one of them forgetting is how this class recurs.
+    const rates = scanRates(inScript("250 baht per day", base));
+    expect(rates.length).toBeGreaterThan(0);
+    expect(rates[0].amount).toBe(250);
+  });
+
+  it("the shop's ORIGINAL text is never mutated - folding is for reading only", () => {
+    // The transcript must still show what the shop actually wrote. The fold
+    // happens on a local copy inside the reader; nothing writes it back.
+    const original = inScript("250 baht per day", 0x0e50);
+    extractQuotedPrices(original, { durationDays: 4 });
+    expect(original).toBe(inScript("250 baht per day", 0x0e50));
+    expect(original).not.toContain("250");
   });
 });
