@@ -59,14 +59,28 @@ export async function POST(req: Request) {
   // not small, and the cost is that number's account.
   if (phone) {
     const { sbSelect } = await import("@/lib/runtime-config");
+    const { sameNumber } = await import("@/lib/wa/phone-key");
     const digits = String(phone).replace(/\D/g, "");
     if (digits.length >= 8) {
-      const clash = await sbSelect<{ email: string }>(
+      // MATCH THE NUMBER, NOT THE SPELLING. This used to query
+      // `phone=eq.${phone.trim()}` - an exact-string compare against whatever
+      // each account happened to type. So A links "+66 81 234 5678" and B links
+      // "+66812345678", the strings differ, the clash is missed, and TWO
+      // accounts register a device on one WhatsApp number: the precise failure
+      // "one number, one account" exists to stop, and the restriction risk the
+      // copy below warns about. `app_users.phone` stores the raw typed string on
+      // both sides, so no PostgREST filter can normalise it - and this is a
+      // link-time check on a small (beta) table, not a hot path. Load the phone
+      // book once and compare on the national tail (sameNumber), which folds
+      // country-code, trunk-zero and separator spelling.
+      const book = await sbSelect<{ email: string; phone: string | null }>(
         "app_users",
-        `select=email&phone=eq.${encodeURIComponent(String(phone).trim())}&limit=5`
-      ).catch(() => [] as { email: string }[]);
-      const other = clash.find(
-        (r) => (r.email ?? "").toLowerCase() !== session.email.toLowerCase()
+        "select=email,phone&phone=not.is.null&limit=1000"
+      ).catch(() => [] as { email: string; phone: string | null }[]);
+      const other = book.find(
+        (r) =>
+          (r.email ?? "").toLowerCase() !== session.email.toLowerCase() &&
+          sameNumber(r.phone, phone)
       );
       if (other) {
         return NextResponse.json(
