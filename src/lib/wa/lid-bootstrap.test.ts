@@ -18,10 +18,18 @@ const state = {
   inbound: [] as Array<{ from_number: string }>,
 };
 vi.mock("../runtime-config", () => ({
+  // lidAliasForShop still reads with sbSelect...
   sbSelect: async (_t: string, q: string) => {
     if (q.includes("direction=eq.outbound")) return state.outbound;
     if (q.includes("direction=eq.inbound")) return state.inbound;
     return [];
+  },
+  // ...and aliasFromThreads now reads STRICT so it can tell our outage apart
+  // from an empty result (OR11 I2.3). Same rows, wrapped in the strict shape.
+  sbSelectStrict: async (_t: string, q: string) => {
+    if (q.includes("direction=eq.outbound")) return { rows: state.outbound };
+    if (q.includes("direction=eq.inbound")) return { rows: state.inbound };
+    return { rows: [] };
   },
 }));
 

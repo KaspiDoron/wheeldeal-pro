@@ -108,9 +108,21 @@ describe("a truncated webhook batch asks to be redelivered", () => {
   it("THE SILENT TAIL: overflow sets retryable, not just a trace", () => {
     // The trace already existed - which is how we know it happens. A traced
     // drop is still a drop, and the Cloud channel has no sweep behind it.
-    expect(ingest).toMatch(/const capped = items\.slice\(0, 25\);/);
     expect(ingest).toMatch(/retryable = true;/);
     expect(ingest).toMatch(/redelivery: "requested"/);
+  });
+
+  it("THE TAIL IS NOT DROPPED FOREVER: the budget advances, it is not a slice", () => {
+    // The old `items.slice(0, 25)` capped by ARRAY INDEX, so a >25 batch
+    // 503-looped: every redelivery re-took items 0..24 (now claimed, cheap-
+    // skipped) and items 25+ were never in the window (OR11 I2.2). The fix
+    // iterates the WHOLE batch and caps the number of items that do REAL work.
+    expect(ingest).not.toMatch(/const capped = items\.slice\(0, 25\);/);
+    expect(ingest).toMatch(/for \(const data of items\)/);
+    expect(ingest).toMatch(/if \(heavyProcessed >= HEAVY_PER_INVOCATION\)/);
+    // The budget counts only genuinely-new work (a won store claim), so an
+    // already-handled head is cheap-skipped and each redelivery advances.
+    expect(ingest).toMatch(/heavyProcessed \+= 1;/);
   });
 
   it("redelivery is safe because the store claims de-duplicate", () => {

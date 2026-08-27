@@ -475,6 +475,21 @@ export async function webhookToken(): Promise<string | null> {
   return deriveWebhookToken({ secret: process.env.SESSION_SECRET, nodeEnv: process.env.NODE_ENV });
 }
 
+/**
+ * THE TOKEN WE AUTHENTICATE AN INBOUND WEBHOOK WITH - host-independent (OR11
+ * I2.4). `webhookToken()` gates on `getHosts()`, which reads EVOLUTION_HOSTS
+ * from the vault; during a Supabase outage that read returns empty and the
+ * token became null, so a webhook carrying a PERFECTLY VALID token was answered
+ * 403 - a permanent reject that made Evolution DROP the shop's reply. But the
+ * token is derived purely from SESSION_SECRET (bootstrap env, immune to a vault
+ * wobble), so authenticity never depended on the host list at all. The route
+ * authenticates with THIS; only registration (which genuinely needs a host to
+ * point at) keeps the host-gated webhookToken().
+ */
+export function webhookAuthToken(): string | null {
+  return deriveWebhookToken({ secret: process.env.SESSION_SECRET, nodeEnv: process.env.NODE_ENV });
+}
+
 /** The canonical public origin the webhook must point at. The admin-set
  * APP_DOMAIN (the GCP gateway URL) WINS over the request origin, so a
  * preview/tap-time origin can never get baked into Evolution. Returns null when
