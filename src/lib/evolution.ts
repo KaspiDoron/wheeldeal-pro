@@ -26,6 +26,7 @@ import { digitsOnly } from "./phone";
 import { boundedSet } from "./bounded-map";
 import { parseDialPrefixes, affinityFor, AFFINITY_MISMATCH } from "./wa/host-region";
 import { placeHost } from "./wa/host-placement";
+import { isHardSendFailure } from "./wa/send-classify";
 import { readOrientationFromBase64 } from "./media/orientation";
 import type { InboundImage } from "./media/orientation";
 
@@ -682,10 +683,12 @@ function healthStore() {
 }
 
 /**
- * Probe one host and explain the result. "ok" means reachable and not
- * server-erroring (a 401 still means the box is ALIVE - just a wrong key), so
- * the pool keeps using it. The human-readable detail powers the owner panel's
- * "why is this host down" line and the per-host Test API output.
+ * Probe one host and explain the result. "ok" means reachable AND usable for
+ * placement: a 500 is a crashing box, and a 401/403 is a box that answers but
+ * rejects our API key - both are `ok:false`, because `resolveHost` must not put
+ * a real user on a host we cannot send through (owner report 11 H2.1). The
+ * human-readable detail powers the owner panel's "why is this host down" line
+ * and the per-host Test API output.
  */
 async function hostHealthDetail(h: Host): Promise<{ ok: boolean; detail: string }> {
   const cache = healthStore();
@@ -710,19 +713,27 @@ async function hostHealthDetail(h: Host): Promise<{ ok: boolean; detail: string 
     });
     clearTimeout(timer);
     const ms = Date.now() - started;
-    if (res.status < 500) {
-      ok = true; // reachable and not erroring (401 still = alive)
-      detail =
-        res.status === 401 || res.status === 403
-          ? `Awake but rejecting the API key (HTTP ${res.status}) - check this host's AUTHENTICATION_API_KEY matches the key in EVOLUTION_HOSTS.`
-          : `Healthy (HTTP ${res.status}, ${ms}ms).`;
+    if (res.status === 401 || res.status === 403) {
+      // ALIVE BUT UNUSABLE (owner report 11 H2.1). A wrong API key means the box
+      // answers, but we cannot send through it - and it used to be rated
+      // `ok:true` ("401 still = alive"), so `resolveHost` placed real users on
+      // it. Every send then 401s, and the send path classified an Evolution
+      // apikey rejection as an ACCOUNT-level restriction, tripping ban-recovery
+      // on the traveller's own number. A single mistyped key silently drove its
+      // whole cohort toward a ban. It is NOT healthy for placement; the detail
+      // still tells the owner exactly what to fix.
+      ok = false;
+      detail = `Awake but rejecting the API key (HTTP ${res.status}) - this host's AUTHENTICATION_API_KEY does not match the key in EVOLUTION_HOSTS. No user can send through it until they match.`;
+    } else if (res.status < 500) {
+      ok = true; // reachable and not erroring
+      detail = `Healthy (HTTP ${res.status}, ${ms}ms).`;
     } else {
       detail = `Server error HTTP ${res.status} - Evolution is crashing. Known causes: the OnWhatsappCache/Prisma bug (fix: redeploy the updated render.yaml Blueprint - it adds Redis + DATABASE_SAVE_IS_ON_WHATSAPP=false) or a bad DATABASE_CONNECTION_URI.`;
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : "unreachable";
     detail = /abort/i.test(msg)
-      ? "No response within 4.5s - host is asleep or cold-starting. Keep-awake cron should wake it; the pool routes around it meanwhile."
+      ? "No response within 9s - host is asleep or cold-starting. Keep-awake cron should wake it; the pool routes around it meanwhile."
       : `Unreachable: ${msg}. Check the URL is correct and the service is deployed.`;
   }
   cache.set(h.url, { ok, detail, exp: Date.now() + 15_000 });
@@ -2787,14 +2798,11 @@ export async function sendFromUser(
     // healthy number. A scattered dead number (invalid/not-on-WhatsApp) is also
     // a LIST-quality problem, so it stays "soft" and resets the streak - only a
     // genuine run of account-level failures halts the whole queue.
-    const hard =
-      res.status === 401 ||
-      res.status === 403 ||
-      res.status === 429 ||
-      /forbidden|too many|rate.?limit|\bban\b|banned|restrict|not.?authoriz|spam/i.test(
-        String(errText)
-      );
-    await noteSendOutcome(email, hard ? "hard" : "soft");
+    // Classify for the stop-loss breaker via the pure `isHardSendFailure` helper
+    // (owner report 11 H2.1): 429 or WhatsApp-restriction text is HARD; an
+    // Evolution 401/403 apikey rejection is our config, NOT the number, so it is
+    // SOFT and never trips ban-recovery on the traveller. See send-classify.ts.
+    await noteSendOutcome(email, isHardSendFailure(res.status, errText) ? "hard" : "soft");
   } catch {
     /* best-effort */
   }

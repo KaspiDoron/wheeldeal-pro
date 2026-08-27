@@ -2014,9 +2014,12 @@ function sendStreak(): Map<string, { n: number; first: number }> {
  *   "soft" - a failure that is NOT an account-restriction signal (e.g. one
  *            invalid/non-WhatsApp number): clears the streak (an isolated bad
  *            number in a healthy batch must not trip the breaker).
- *   "hard" - an account-level restriction signal (blocked/forbidden/401/403/429,
- *            or a socket drop / send timeout): increments the streak; on reaching
- *            STOP_LOSS_MAX_FAILS within the window it trips enterBanRecovery.
+ *   "hard" - an account-level restriction signal ONLY - an HTTP 429 rate limit,
+ *            or WhatsApp restriction/ban text in the response body (see
+ *            isHardSendFailure in wa/send-classify). NOT an Evolution 401/403
+ *            apikey rejection: that is our config, not the number (OR11 H2.1).
+ *            Increments the streak; on reaching STOP_LOSS_MAX_FAILS within the
+ *            window it trips enterBanRecovery.
  * Returns { tripped } so callers can log/stop the current drain immediately.
  * Never throws - the send path must not break on the breaker.
  */

@@ -59,3 +59,35 @@ export function recipientRetryDecision(priorAttempts: number): RetryDecision {
   const delayMs = Math.min(attempts * 4, 20) * 60_000;
   return { drop: false, attempts, delayMs };
 }
+
+/**
+ * STOP-LOSS classification of a FAILED send: is this an ACCOUNT-level
+ * restriction signal ("hard", which counts toward the ban-recovery breaker in
+ * `noteSendOutcome`) or not ("soft", which clears the streak)?
+ *
+ * Only two things are hard:
+ *   - HTTP 429: an Evolution/WhatsApp RATE LIMIT. Volume is a property of the
+ *     number, so a run of these is a real account-level signal.
+ *   - error TEXT that reads as a WhatsApp restriction/ban/rate limit. This reads
+ *     the response BODY, so a genuine restriction that arrives with some other
+ *     status is still caught.
+ *
+ * DELIBERATELY NOT HARD (owner report 11 H2.1):
+ *   - HTTP 401/403: the Evolution API GATEWAY rejecting OUR apikey - a wrong
+ *     AUTHENTICATION_API_KEY on our side, NOT WhatsApp restricting the
+ *     traveller's number. A single mistyped host key used to trip ban-recovery
+ *     on every number placed on that host. These SHORT-CIRCUIT to soft BEFORE
+ *     the text branch, because the gateway's own 401/403 body literally says
+ *     "Unauthorized"/"Forbidden" and would otherwise false-match the regex and
+ *     re-escalate the very failure we are trying to exonerate.
+ *   - HTTP 0 / 5xx: evoFetch's own timeout or a crashing host - target infra,
+ *     not the number. (Handled by falling through to the text branch, which a
+ *     bare "Evolution API 500" does not match.)
+ */
+export function isHardSendFailure(status: number, errText?: string | null): boolean {
+  if (status === 401 || status === 403) return false;
+  if (status === 429) return true;
+  return /forbidden|too many|rate.?limit|\bban\b|banned|restrict|not.?authoriz|spam/i.test(
+    String(errText ?? ""),
+  );
+}
