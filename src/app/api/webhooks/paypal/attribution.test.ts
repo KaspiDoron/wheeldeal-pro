@@ -31,6 +31,11 @@ interface Scenario {
   /** What PayPal answers for fetchPaypalSubscription (renewals). */
   paypalPlanId?: string | null;
   setPlanOk?: boolean;
+  /** Signature verification outcome (default: verified). */
+  verified?: boolean;
+  /** PAYPAL_WEBHOOK_ID: undefined keeps the default "WH-TEST"; null unsets it
+   *  (the not-configured path). */
+  webhookId?: string | null;
 }
 
 async function loadHook(s: Scenario = {}) {
@@ -40,7 +45,7 @@ async function loadHook(s: Scenario = {}) {
   const marks: Array<{ kind: string; email: string; subscriptionId: string }> = [];
 
   vi.doMock("@/lib/paypal", () => ({
-    verifyPaypalWebhook: async () => true,
+    verifyPaypalWebhook: async () => s.verified ?? true,
     tierForPaypalPlan: async (planId: string | null) =>
       planId === PRO_PLAN ? "pro" : planId === ULTRA_PLAN ? "ultra" : null,
     fetchPaypalSubscription: async () =>
@@ -69,7 +74,12 @@ async function loadHook(s: Scenario = {}) {
     };
   });
   vi.doMock("@/lib/runtime-config", () => ({
-    getConfig: async (k: string) => (k === "PAYPAL_WEBHOOK_ID" ? "WH-TEST" : undefined),
+    getConfig: async (k: string) =>
+      k === "PAYPAL_WEBHOOK_ID"
+        ? s.webhookId === undefined
+          ? "WH-TEST"
+          : (s.webhookId ?? undefined)
+        : undefined,
     sbInsert: async (_t: string, rows: Array<Record<string, unknown>>) => {
       events.push(...rows);
       return true;
@@ -99,6 +109,55 @@ const activated = (customId: string, planId = PRO_PLAN, id = "I-ATTACKER") =>
     event_type: "BILLING.SUBSCRIPTION.ACTIVATED",
     resource: { id, plan_id: planId, custom_id: customId },
   });
+
+describe("OR11 T2 - the signature gate actually protects plan grants (EXECUTED)", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("a FORGED webhook (id set, signature invalid) is rejected 401 and grants NOTHING", () => {
+    return (async () => {
+      // The existing suite stubbed verification to always pass; this proves the
+      // gate itself. A raw POST with a valid-looking Ultra activation but a bad
+      // signature must not touch the account.
+      const { POST, calls } = await loadHook({
+        verified: false,
+        linked: "victim@example.com",
+        plans: { "victim@example.com": "free" },
+      });
+      const res = await POST(activated("victim@example.com|ultra", ULTRA_PLAN));
+      expect(res.status).toBe(401);
+      expect(calls).toEqual([]); // no setPlan - a forged event cannot grant Ultra
+    })();
+  });
+
+  it("NOT CONFIGURED is not OK: no webhook id -> 503 (retry) and grants NOTHING", async () => {
+    // Answering 200 here would burn PayPal's one retry channel on a deploy that
+    // cannot verify anything; 503 makes it retry into a configured deploy. Either
+    // way, an unverifiable event never moves a plan.
+    const { POST, calls, events } = await loadHook({
+      webhookId: null,
+      linked: "buyer@example.com",
+      plans: { "buyer@example.com": "free" },
+    });
+    const res = await POST(activated("buyer@example.com|ultra", ULTRA_PLAN));
+    expect(res.status).toBe(503);
+    expect(calls).toEqual([]);
+    // ...and the knock is recorded so the owner can see what could not verify.
+    expect(events.some((e) => String(e.type).startsWith("pp_unconfigured_"))).toBe(true);
+  });
+
+  it("a VALID signature (id set, verified) is allowed through to the grant logic", async () => {
+    const { POST, calls } = await loadHook({
+      verified: true,
+      linked: "buyer@example.com",
+      plans: { "buyer@example.com": "free" },
+    });
+    const res = await POST(activated("buyer@example.com|ultra", ULTRA_PLAN));
+    expect(res.status).toBe(200);
+    // A verified activation for a linked buyer DOES grant - the gate is not
+    // rejecting everything, which is what makes the two refusals above meaningful.
+    expect(calls).toContainEqual({ email: "buyer@example.com", plan: "ultra" });
+  });
+});
 
 describe("ATTACK: custom_id cannot move another account's plan - in either direction", () => {
   afterEach(() => vi.restoreAllMocks());
