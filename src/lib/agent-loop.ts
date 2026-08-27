@@ -2144,11 +2144,22 @@ export async function processVendorReply(opts: {
       if (consumed.length) {
         await finishBeforeResponse("claim-coalesced", async () => {
           const { sbInsertReturning } = await import("./runtime-config");
-          const { claimKey } = await import("./wa/inbound-claim");
+          const { claimKey, settleReplyClaim } = await import("./wa/inbound-claim");
           for (const id of consumed) {
+            // CLAIM the sibling so no other frame answers it again...
             await sbInsertReturning("wa_processed", [
               { wa_message_id: claimKey(opts.senderEmail, id) },
             ]).catch(() => {});
+            // ...and SETTLE it in the same breath. This turn's reply answered
+            // the WHOLE burst, so every coalesced sibling is DONE - but the bare
+            // claim carries no settled_at, and wa_processed rows are leases:
+            // past CLAIM_LEASE_MS an unsettled claim reads as a dead turn
+            // (claimIsDeadTurn), so the recovery sweep re-answered the entire
+            // burst ten minutes later. The primary message was settled after its
+            // send (see above); its siblings never were. settleReplyClaim
+            // no-ops on a pre-migration schema, so this degrades to today's
+            // behaviour rather than breaking the claim.
+            await settleReplyClaim(id, opts.senderEmail).catch(() => {});
           }
         });
       }
