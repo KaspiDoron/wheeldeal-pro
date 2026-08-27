@@ -34,6 +34,24 @@ import { sbInsertReturning, sbSelect } from "../runtime-config";
  * Legacy rows carry the bare id; every reader below honors BOTH spellings so
  * a deploy never re-answers what an older instance already claimed.
  */
+/**
+ * A PostgREST `in.(...)` value list with every key URL-ENCODED (owner report 11).
+ *
+ * The claim key is `email:messageId`, and a `+`-address (Gmail's `you+tag@...`,
+ * common among testers) is stored LITERALLY by the insert - it goes in a JSON
+ * body - but read back through a QUERYSTRING filter, where `+` decodes to a
+ * space. So `in.("doron+test@x.co:MSG")` asked PostgREST for
+ * `"doron test@x.co:MSG"`, the release/dedup/stand-down reads all MISSED the
+ * row the insert stored, and the recovery sweep re-answered an already-answered
+ * shop (and a concurrent frame could double-reply). Encoding the value - and
+ * ONLY the value, never the structural quotes - makes the querystring round-trip
+ * to the exact stored key. The double quotes stay outside the encoding so the
+ * in-list syntax is preserved.
+ */
+export function quotedInList(keys: string[]): string {
+  return keys.map((k) => `"${encodeURIComponent(k)}"`).join(",");
+}
+
 export function claimKey(receiverEmail: string | null | undefined, waMessageId: string): string {
   const id = (waMessageId || "").trim();
   const who = (receiverEmail || "").trim().toLowerCase();
@@ -66,7 +84,7 @@ export async function releaseReplyClaim(
     const keys = scoped === id ? [id] : [id, scoped];
     await sbDelete(
       "wa_processed",
-      `wa_message_id=in.(${keys.map((k) => `"${k}"`).join(",")})`
+      `wa_message_id=in.(${quotedInList(keys)})`
     );
   } catch {
     /* best effort - the next redelivery or sweep retries */
@@ -90,7 +108,7 @@ export async function releaseInboundStore(
     const keys = scoped === id ? [id] : [id, scoped];
     await sbDelete(
       "wa_inbound_seen",
-      `wa_message_id=in.(${keys.map((k) => `"${k}"`).join(",")})`
+      `wa_message_id=in.(${quotedInList(keys)})`
     );
   } catch {
     /* best effort - the sweep can still re-pull the window */
