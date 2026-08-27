@@ -213,22 +213,54 @@ export async function GET(req: Request) {
       // lever that does not cost anything visible.
       `select=id,decision_id,vendor_id,vendor_name,stage,reasoning,output,created_at&user_email=eq.${enc}&created_at=gte.${pgTimestamp(sinceIso)}&order=created_at.desc&limit=40`
     ).catch(() => [] as TraceRow[]),
-    sbSelect<{
-      id: number;
-      to_number: string;
-      body: string;
-      // Outbound rows carry the gloss as raw.englishGloss (stamped by every
-      // send path from the outbox meta); raw.english is the INBOUND key.
-      raw: { vendorId?: string; vendorName?: string; englishGloss?: string; kind?: string } | null;
-      received_at: string;
-    }>(
-      "whatsapp_messages",
-      // Marker rows (session pause/takeover flags) live in the same table -
-      // keep them out of the human-facing feed. Fetched deep enough (150) that
-      // the per-vendor state rollup below covers a full 40+ shop batch, not just
-      // the newest 40 (the feed itself is still sliced to `limit`).
-      `select=id,to_number,body,raw,received_at&direction=eq.outbound&raw->>sender=eq.${enc}&to_number=not.in.(session,takeover,cancel)&received_at=gte.${pgTimestamp(sinceIso)}&order=received_at.desc&limit=150`
-    ).catch(() => []),
+    (() => {
+      type OutRow = {
+        id: number;
+        to_number: string;
+        body: string;
+        raw: { vendorId?: string; vendorName?: string; englishGloss?: string; kind?: string } | null;
+        received_at: string;
+      };
+      // PROJECT ONLY the four raw fields the feed reads (OR11 E2.1), never the
+      // whole `raw` jsonb: this is a 150-row read on a 6s poll, and shipping the
+      // full blob to pull four small strings was the last un-trimmed egress
+      // after OR8-A7. Re-inflated to the nested shape below so every consumer
+      // (deriveCountered, the state rollup, the per-vendor last-message join) is
+      // untouched. Outbound rows carry the gloss as raw.englishGloss (stamped by
+      // every send path from the outbox meta); raw.english is the INBOUND key.
+      return sbSelect<{
+        id: number;
+        to_number: string;
+        body: string;
+        vendorId: string | null;
+        vendorName: string | null;
+        englishGloss: string | null;
+        kind: string | null;
+        received_at: string;
+      }>(
+        "whatsapp_messages",
+        // Marker rows (session pause/takeover flags) live in the same table -
+        // keep them out of the human-facing feed. Fetched deep enough (150)
+        // that the per-vendor state rollup below covers a full 40+ shop batch.
+        `select=id,to_number,body,vendorId:raw->>vendorId,vendorName:raw->>vendorName,englishGloss:raw->>englishGloss,kind:raw->>kind,received_at&direction=eq.outbound&raw->>sender=eq.${enc}&to_number=not.in.(session,takeover,cancel)&received_at=gte.${pgTimestamp(sinceIso)}&order=received_at.desc&limit=150`
+      )
+        .then(
+          (rows): OutRow[] =>
+            rows.map((r) => ({
+              id: r.id,
+              to_number: r.to_number,
+              body: r.body,
+              received_at: r.received_at,
+              raw: {
+                vendorId: r.vendorId ?? undefined,
+                vendorName: r.vendorName ?? undefined,
+                englishGloss: r.englishGloss ?? undefined,
+                kind: r.kind ?? undefined,
+              },
+            }))
+        )
+        .catch((): OutRow[] => []);
+    })(),
     (async () => {
       type ReplyFeedRow = {
         id: number;
@@ -753,24 +785,30 @@ export async function GET(req: Request) {
     };
   }
 
-  let waHealth: SenderSafety | null = null;
-  try {
-    waHealth = await senderSafety(email);
-  } catch {}
-
-  // The plan's rolling introductions budget, so the queued panel can show a
+  // Two INDEPENDENT reads on a 6s poll - run them CONCURRENTLY, not serially
+  // (OR11 E2.3). senderSafety gathers the safety signals; newContactBudget reads
+  // the intro ledger (cheap now it is cached, E2.2). Neither needs the other.
+  // The plan's rolling introductions budget lets the queued panel show a
   // STANDING "X of N new shops this window - next opens ~HH:MM" indicator
   // instead of the limit only flashing once as a mass-bargain toast.
+  let waHealth: SenderSafety | null = null;
   let introBudget: {
     remaining: number;
     cap: number;
     windowHours: number;
     nextFreeAt: string;
   } | null = null;
-  try {
-    const { newContactBudget } = await import("@/lib/wa-guard");
-    introBudget = await newContactBudget(email, session.plan);
-  } catch {}
+  {
+    const [health, budget] = await Promise.all([
+      senderSafety(email).catch(() => null),
+      (async () => {
+        const { newContactBudget } = await import("@/lib/wa-guard");
+        return newContactBudget(email, session.plan);
+      })().catch(() => null),
+    ]);
+    waHealth = health;
+    introBudget = budget;
+  }
 
   // HONEST ETA (W2): the queue rows above carry not_before (a LOWER bound). Turn
   // it into a realistic [etaFrom, etaTo] window by simulating the drain's min-gap
@@ -780,11 +818,15 @@ export async function GET(req: Request) {
   try {
     const { getPolicies } = await import("@/lib/wa-guard");
     const { computeQueueEtas } = await import("@/lib/wa/eta");
-    const policies = await getPolicies();
-    const lastOut = await sbSelect<{ received_at: string }>(
-      "whatsapp_messages",
-      `select=received_at&direction=eq.outbound&raw->>sender=eq.${enc}&order=received_at.desc&limit=1`
-    ).catch(() => []);
+    // Independent reads - fetch the policies and the last-send timestamp
+    // concurrently (OR11 E2.3).
+    const [policies, lastOut] = await Promise.all([
+      getPolicies(),
+      sbSelect<{ received_at: string }>(
+        "whatsapp_messages",
+        `select=received_at&direction=eq.outbound&raw->>sender=eq.${enc}&order=received_at.desc&limit=1`
+      ).catch(() => [] as { received_at: string }[]),
+    ]);
     const stealth =
       waHealth?.state === "paused" ? 2.5 : waHealth?.state === "pacing" ? 1.5 : 1;
     const etas = computeQueueEtas(

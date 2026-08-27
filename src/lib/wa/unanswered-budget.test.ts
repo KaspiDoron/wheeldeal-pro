@@ -129,9 +129,11 @@ describe("two meters, because the refund question is genuinely open", () => {
 });
 
 describe("admission is the minimum, and it degrades safely", () => {
+  // The budget-computation logic moved into computeNewContactBudget behind a
+  // short-TTL caching wrapper (OR11 E2.2); the logic these cases pin lives there.
   const fn = guard.slice(
-    guard.indexOf("export async function newContactBudget"),
-    guard.indexOf("export async function newContactBudget") + 3000
+    guard.indexOf("async function computeNewContactBudget"),
+    guard.indexOf("async function computeNewContactBudget") + 3600
   );
 
   it("takes the lowest of the sent budget and both meters", () => {

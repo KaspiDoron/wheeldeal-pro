@@ -1399,10 +1399,37 @@ export type IntroBudgetBind = "window" | "unanswered" | "monthly" | "daily";
  * waits until tomorrow" wall. Exported so the mass-bargain route can tell the
  * user the truth AT CLICK TIME.
  */
-export async function newContactBudget(senderKey: string, plan?: string): Promise<IntroBudget> {
+// PER-INSTANCE SHORT-TTL CACHE (OR11 E2.2). newContactBudget scans the intro
+// ledger (introductionsInWindow / unansweredMeters - up to ~1,700 rows) and was
+// recomputed on EVERY 6s activity poll to render two chips, plus once per send
+// decision. The atomic per-send fleet-gap slot claim is the real velocity ceiling,
+// so this budget is advisory/display and tolerates a few seconds of staleness;
+// 12s (2x the poll) means the poll always hits the cache after the first read.
+// The click-time mass route passes { fresh: true } to keep its exact "truth at
+// click time" contract. Per-instance like safetySignalCache - each Cloud Run
+// instance keeps its own, which is the same currency every health read accepts.
+const newContactBudgetCache = new Map<string, { at: number; budget: IntroBudget }>();
+const NEW_CONTACT_BUDGET_TTL_MS = 12_000;
+
+export async function newContactBudget(
+  senderKey: string,
+  plan?: string,
+  opts?: { fresh?: boolean }
+): Promise<IntroBudget> {
+  const resolvedPlan = plan ?? (await planForSender(senderKey));
+  const key = `${senderKey.toLowerCase()}::${resolvedPlan}`;
+  if (!opts?.fresh) {
+    const hit = newContactBudgetCache.get(key);
+    if (hit && Date.now() - hit.at < NEW_CONTACT_BUDGET_TTL_MS) return hit.budget;
+  }
+  const budget = await computeNewContactBudget(senderKey, resolvedPlan);
+  newContactBudgetCache.set(key, { at: Date.now(), budget });
+  return budget;
+}
+
+async function computeNewContactBudget(senderKey: string, resolvedPlan: string): Promise<IntroBudget> {
   const p = await getPolicies();
   const rep = await getReputation(senderKey);
-  const resolvedPlan = plan ?? (await planForSender(senderKey));
   const windowHours = planCapacity(resolvedPlan).windowHours;
   const cap = newContactCap(rep, p, resolvedPlan);
   let count = 0;

@@ -308,14 +308,19 @@ export async function GET(req: Request) {
       }
     }
     // vendor_id -> the digits we actually messaged, via this user's outbound rows.
-    const out = await sbSelect<{ to_number: string; raw: { vendorId?: string } | null }>(
+    // Project ONLY raw->>vendorId, never the whole `raw` jsonb (OR11 E2.1). This
+    // read runs on a 6-second poll over up to 200 rows; shipping the full blob
+    // (message payload, reading, lid, ...) to extract one string was the single
+    // biggest un-trimmed egress left after OR8-A7. Same JSON-path projection the
+    // reading read above already uses.
+    const out = await sbSelect<{ to_number: string; vendorId: string | null }>(
       "whatsapp_messages",
-      `select=to_number,raw&direction=eq.outbound&raw->>sender=eq.${encodeURIComponent(
+      `select=to_number,vendorId:raw->>vendorId&direction=eq.outbound&raw->>sender=eq.${encodeURIComponent(
         session.email
       )}&order=received_at.desc&limit=200`
     ).catch(() => []);
     for (const o of out) {
-      const vid = o.raw?.vendorId;
+      const vid = o.vendorId;
       if (vid && o.to_number && !numberByVendor.get(vid)) numberByVendor.set(vid, o.to_number);
     }
     const { shopAskedLocation } = await import("@/lib/wa/detectors");
