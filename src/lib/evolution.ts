@@ -26,7 +26,7 @@ import { digitsOnly } from "./phone";
 import { boundedSet } from "./bounded-map";
 import { parseDialPrefixes, affinityFor, AFFINITY_MISMATCH } from "./wa/host-region";
 import { placeHost } from "./wa/host-placement";
-import { isHardSendFailure } from "./wa/send-classify";
+import { isHardSendFailure, isAmbiguousSendFailure } from "./wa/send-classify";
 import { readOrientationFromBase64 } from "./media/orientation";
 import type { InboundImage } from "./media/orientation";
 
@@ -2529,6 +2529,17 @@ export async function sendFromUser(
   retryAfterSeconds?: number;
   messageId?: string;
   unconfirmed?: boolean;
+  /**
+   * The send FAILED but AMBIGUOUSLY - a status-0 abort/timeout, where the
+   * request may or may not have reached WhatsApp (OR11 H2.2). The drain must
+   * NOT release this send's idempotency claim: keeping it lets the fromMe echo
+   * of a message that DID land be recognised as ours (not convicted as a human
+   * takeover), and makes a retry hit the duplicate-hold path instead of
+   * re-POSTing a possible double. Absent/false on a DEFINITIVE failure (a 4xx
+   * Evolution rejected, an explicit WhatsApp error), where the send provably
+   * did not land and the claim SHOULD be released for a clean retry.
+   */
+  ambiguous?: boolean;
   /** The provider's own record of WHICH chat this landed in. For a
    * privacy-migrated contact this is the `<opaque>@lid` form - the exact
    * lid<->phone mapping the inbound path needs to resolve the shop's FIRST
@@ -2806,5 +2817,5 @@ export async function sendFromUser(
   } catch {
     /* best-effort */
   }
-  return { ok: false, error: errText };
+  return { ok: false, error: errText, ambiguous: isAmbiguousSendFailure(res.status) };
 }

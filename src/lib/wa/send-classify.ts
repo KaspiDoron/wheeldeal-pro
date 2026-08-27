@@ -91,3 +91,25 @@ export function isHardSendFailure(status: number, errText?: string | null): bool
     String(errText ?? ""),
   );
 }
+
+/**
+ * Was a FAILED send AMBIGUOUS - did it maybe land, or provably not?
+ *
+ * A status-0 result is evoFetch's own abort/timeout (or a network blip): the
+ * request MAY have reached WhatsApp and been delivered, we simply never saw the
+ * response. Every other failure status is DEFINITIVE - Evolution answered and
+ * rejected (a 4xx / 5xx), or the send path returned an explicit WhatsApp error -
+ * so the message provably did not land.
+ *
+ * This decides whether the drain releases the message's idempotency claim after
+ * a failure (OR11 H2.2):
+ *   - DEFINITIVE  -> release the claim, so the retry is a clean re-send.
+ *   - AMBIGUOUS   -> KEEP the claim, because (a) if it landed, its fromMe echo
+ *     must still be recognised as ours (echo-check-2 reads wa_send_claims) and
+ *     not convicted as a human takeover, and (b) the retry must hit the
+ *     duplicate-hold path rather than re-POST a possible double (a ban signal).
+ *   This is the same "landed-but-timed-out" protection gcSendClaims documents.
+ */
+export function isAmbiguousSendFailure(status: number): boolean {
+  return status === 0;
+}
