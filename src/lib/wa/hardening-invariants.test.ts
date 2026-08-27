@@ -232,9 +232,14 @@ describe("anti-ban: send-side STOP-LOSS wired into the one send chokepoint", () 
   it("wa-guard exports noteSendOutcome and evolution.ts feeds it on every outcome", () => {
     expect(read("src/lib/wa-guard.ts")).toMatch(/export async function noteSendOutcome/);
     const evo = read("src/lib/evolution.ts");
-    // A clean send resets the streak; a hard failure feeds the breaker.
+    // A clean send resets the streak; a hard failure feeds the breaker. The
+    // hard/soft split now goes through the pure isHardSendFailure classifier
+    // (OR11 H2.1) so an Evolution 401/403 apikey rejection is soft, not a strike
+    // on the number.
     expect(evo).toMatch(/noteSendOutcome\(email,\s*"ok"\)/);
-    expect(evo).toMatch(/noteSendOutcome\(email,\s*hard\s*\?\s*"hard"\s*:\s*"soft"\)/);
+    expect(evo).toMatch(
+      /noteSendOutcome\(email,\s*isHardSendFailure\(res\.status,\s*errText\)\s*\?\s*"hard"\s*:\s*"soft"\)/
+    );
   });
 });
 
