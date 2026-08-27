@@ -7,7 +7,7 @@
 // workers, off the request path, with retries + DLQ.
 
 import express from "express";
-import { webhookToken, noteWebhookAccepted, noteWebhook403 } from "@wheeldeal/core";
+import { webhookAuthToken, noteWebhookAccepted, noteWebhook403 } from "@wheeldeal/core";
 import { logger, env, installProcessGuards } from "@wheeldeal/shared";
 import { claimInboundIds, redis } from "@wheeldeal/redis";
 import { enqueueInbound } from "@wheeldeal/queues";
@@ -55,7 +55,11 @@ app.get("/readyz", async (_req, res) => {
 app.post(["/api/webhooks/evolution", "/webhooks/evolution"], async (req, res) => {
   const started = Date.now();
   try {
-    const expected = await webhookToken();
+    // Host-independent auth (OR11 I2.4): the old webhookToken() returned null
+    // whenever getHosts() came back empty, which a vault outage causes falsely -
+    // so a webhook with a VALID token was 403'd and its reply DROPPED. The token
+    // is derived from SESSION_SECRET alone, so authenticity never needed hosts.
+    const expected = webhookAuthToken();
     if (!expected || req.query.token !== expected) {
       // Throttled breadcrumb so a stale-token 403 storm is visible in-app.
       void noteWebhook403(

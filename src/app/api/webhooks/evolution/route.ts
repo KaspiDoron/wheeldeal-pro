@@ -12,7 +12,7 @@
 // authenticates, parses and delegates.
 
 import { NextResponse } from "next/server";
-import { webhookToken } from "@/lib/evolution";
+import { webhookAuthToken } from "@/lib/evolution";
 import { processEvolutionWebhook } from "@/lib/wa/ingest";
 import { noteWebhookAccepted, noteWebhook403 } from "@/lib/wa/webhook-trace";
 import { selfKickOrigin } from "@/lib/request-origin";
@@ -20,7 +20,14 @@ import { selfKickOrigin } from "@/lib/request-origin";
 export async function POST(req: Request) {
   const url = new URL(req.url);
   const presented = url.searchParams.get("token");
-  const expected = await webhookToken();
+  // AUTHENTICATE ON THE HOST-INDEPENDENT TOKEN (OR11 I2.4). The old
+  // `webhookToken()` returned null whenever getHosts() came back empty - which a
+  // vault outage causes falsely - so a webhook carrying a VALID token was 403'd
+  // and Evolution DROPPED the shop's reply for good. The token is derived from
+  // SESSION_SECRET alone (bootstrap env), so authenticity never needed the host
+  // list; `!expected` now means SESSION_SECRET is genuinely missing, not a
+  // transient vault wobble.
+  const expected = webhookAuthToken();
   if (!expected || presented !== expected) {
     // Leave a throttled breadcrumb (per process) so a stale-token 403 storm is
     // visible in-app instead of silent. NO body parse, NO full token logged.

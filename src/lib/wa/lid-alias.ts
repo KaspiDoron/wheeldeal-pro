@@ -141,7 +141,7 @@ export async function resolveChatIdentity(
   email: string,
   remoteJid: string,
   data: unknown
-): Promise<ResolvedIdentity | null> {
+): Promise<ResolvedIdentity | "unavailable" | null> {
   if (isPhoneJid(remoteJid)) {
     const phone = waDigits(remoteJid);
     return phone ? { phone, via: "jid", lid: "" } : null;
@@ -160,6 +160,10 @@ export async function resolveChatIdentity(
   if (remembered) return { phone: remembered, via: "memory", lid };
 
   const stored = await aliasFromThreads(email, lid);
+  // null = the thread store was UNREACHABLE (our outage). Do NOT guess and do
+  // NOT drop - hand "unavailable" up so ingest can ask for a redelivery, the
+  // same way isVendorThread's null is treated (OR11 I2.3).
+  if (stored === null) return "unavailable";
   if (stored) {
     rememberAlias(email, lid, stored);
     return { phone: stored, via: "thread", lid };
@@ -197,24 +201,32 @@ export async function lidAliasForShop(email: string, digits: string): Promise<st
  * can never name another's. Returns "" on any failure - a missing alias is
  * a normal outcome.
  */
-async function aliasFromThreads(email: string, lid: string): Promise<string> {
+async function aliasFromThreads(email: string, lid: string): Promise<string | null> {
   if (!email || !lid) return "";
-  const { sbSelect } = await import("../runtime-config");
+  const { sbSelectStrict } = await import("../runtime-config");
+  // STRICT reads (OR11 I2.3). A permissive `.catch(() => [])` here made a DB
+  // OUTAGE indistinguishable from "no alias on file", so an @lid shop reply -
+  // whose phone can ONLY be recovered from these rows - was DROPPED on our own
+  // wobble (the route answers 200, so nothing redelivers). "unavailable" now
+  // propagates as null so the caller can fail loud; "missing" (no table, fresh
+  // deploy) is a real empty and stays "".
   // Outbound anchor first: raw.lid is stamped at send time from the
   // provider's own key.remoteJid (see sendFromUser -> the sent-row writers).
-  const outs = await sbSelect<{ to_number: string }>(
+  const outs = await sbSelectStrict<{ to_number: string }>(
     "whatsapp_messages",
     `select=to_number&direction=eq.outbound&raw->>lid=eq.${encodeURIComponent(
       lid
     )}&raw->>sender=eq.${encodeURIComponent(email)}&order=received_at.desc&limit=1`
-  ).catch(() => [] as { to_number: string }[]);
-  const fromOutbound = waDigits(outs[0]?.to_number ?? "");
+  );
+  if (!("rows" in outs)) return outs.error === "missing" ? "" : null;
+  const fromOutbound = waDigits(outs.rows[0]?.to_number ?? "");
   if (fromOutbound) return fromOutbound;
-  const rows = await sbSelect<{ from_number: string }>(
+  const rows = await sbSelectStrict<{ from_number: string }>(
     "whatsapp_messages",
     `select=from_number&direction=eq.inbound&raw->>lid=eq.${encodeURIComponent(
       lid
     )}&raw->>receiver=eq.${encodeURIComponent(email)}&order=received_at.desc&limit=1`
-  ).catch(() => [] as { from_number: string }[]);
-  return waDigits(rows[0]?.from_number ?? "");
+  );
+  if (!("rows" in rows)) return rows.error === "missing" ? "" : null;
+  return waDigits(rows.rows[0]?.from_number ?? "");
 }

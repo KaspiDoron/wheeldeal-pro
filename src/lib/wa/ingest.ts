@@ -431,34 +431,36 @@ export async function processEvolutionWebhook(
 
     const items = Array.isArray(body.data) ? body.data : [body.data];
 
-    // Bounded, never SILENTLY truncated: the old slice(0, 3) discarded the
-    // 4th+ frame of a batched upsert with no trace of any kind - a shop
-    // sending four quick messages lost one invisibly.
-    // 25, not 10 - and the overflow asks for a REDELIVERY rather than only
-    // leaving a note.
-    //
-    // The trace was already here, which is how we know this happens; what was
-    // missing is that a traced drop is still a drop. The tail of a truncated
-    // batch had exactly one recovery path - the wa-sync sweep, minutes away -
-    // and on the Cloud channel there is no sweep at all. Marking it retryable
-    // makes the webhook answer 503 so the provider redelivers the whole batch,
-    // which the per-message store claims then de-duplicate: the messages we
-    // already handled are skipped and only the tail does work.
-    const capped = items.slice(0, 25);
-    if (items.length > capped.length) {
-      retryable = true;
-      void noteInboundDropped(undefined, "batch", "batch-truncated", {
-        via: "webhook",
-        total: items.length,
-        kept: capped.length,
-        redelivery: "requested",
-      });
-    }
-    for (const data of capped) {
+    // Bounded per invocation, but the bound ADVANCES across redeliveries - it is
+    // NOT a positional slice. The old `items.slice(0, 25)` capped by array index
+    // and set retryable, so on a >25 batch the webhook 503'd, the provider
+    // redelivered the SAME batch, and the slice re-took items 0..24 (now claimed,
+    // so cheap-skipped) while items 25+ were never in the window: the tail was
+    // dropped FOREVER and the webhook 503-looped. Instead we iterate the WHOLE
+    // batch and cap the number of items that do REAL work (a won store claim)
+    // per invocation. Already-claimed items cost only a claim check and do not
+    // count, so each redelivery skips the handled head cheaply and advances onto
+    // the next unclaimed window until the batch is fully drained (OR11 I2.2).
+    const HEAVY_PER_INVOCATION = 25;
+    let heavyProcessed = 0;
+    for (const data of items) {
       // Per-item isolation (audit DEFECT 5): a throw handling ONE message in a
       // multi-message webhook batch must not drop its siblings - the route always
       // returns 200, so Evolution never redelivers them. Contain each item.
       try {
+      // WORK BUDGET REACHED - stop and let the rest redeliver (OR11 I2.2). The
+      // already-handled head will be cheap-skipped by its store claims next
+      // time, so this advances the window rather than re-truncating it.
+      if (heavyProcessed >= HEAVY_PER_INVOCATION) {
+        retryable = true;
+        void noteInboundDropped(undefined, "batch", "batch-truncated", {
+          via: "webhook",
+          total: items.length,
+          kept: heavyProcessed,
+          redelivery: "requested",
+        });
+        break;
+      }
       if (!data?.key) continue;
       const remoteJid = String(data.key.remoteJid ?? "");
       const jidKind = waIdKind(remoteJid);
@@ -514,7 +516,23 @@ export async function processEvolutionWebhook(
       // outbound anchor). A privacy @lid chat carries no phone of its own and is
       // resolved only from evidence - see wa/lid-alias. No evidence => dropped,
       // never guessed.
-      const identity = await resolveChatIdentity(email, remoteJid, data).catch(() => null);
+      const identity = await resolveChatIdentity(email, remoteJid, data).catch(
+        () => "unavailable" as const
+      );
+      // UNRESOLVABLE-BECAUSE-OUTAGE is not the same as UNRESOLVABLE-BY-EVIDENCE
+      // (OR11 I2.3). An @lid chat's phone lives ONLY in our thread rows, so a DB
+      // wobble during that lookup used to drop a genuine shop reply for good
+      // (200, never redelivered). Fail loud instead: request a redelivery, and
+      // do NOT consume the work budget on it.
+      if (identity === "unavailable") {
+        retryable = true;
+        void noteInboundDropped(email, lidKey(remoteJid) || remoteJid, "identity-unavailable", {
+          via: "webhook",
+          jid: remoteJid.slice(0, 48),
+          lid: lidKey(remoteJid),
+        });
+        continue;
+      }
       const from = identity?.phone ?? "";
       if (!from) {
         // The trace carries the LID as a structured field (not only as the
@@ -770,6 +788,11 @@ export async function processEvolutionWebhook(
         void noteInboundDropped(email, from, "store-claim-lost", { via: "webhook", msgId });
         continue;
       }
+      // A WON claim (or a rare id-less frame) is real work this invocation - it
+      // counts toward the advancing per-invocation budget (OR11 I2.2). Placed
+      // AFTER every cheap `continue` above (groups, echoes, lost claims), so
+      // only genuinely-new messages consume the budget.
+      heavyProcessed += 1;
       const stored = await sbInsert("whatsapp_messages", [
         {
           wa_message_id: msgId,

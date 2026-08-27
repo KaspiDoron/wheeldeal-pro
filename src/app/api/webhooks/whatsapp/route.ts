@@ -227,8 +227,23 @@ export async function POST(req: Request) {
           // for up to 14 days as "shop replies". A non-vendor-thread inbound is
           // stored UNATTRIBUTED (receiver=null) so it is invisible to everyone.
           const { isVendorThread } = await import("@/lib/drill");
-          const receiver =
-            resolved && (await isVendorThread(digitsOnly(msg.from), resolved)) ? resolved : null;
+          let receiver: string | null = null;
+          if (resolved) {
+            const gate = await isVendorThread(digitsOnly(msg.from), resolved);
+            // null = the vendor-gate store was UNREACHABLE (our outage), NOT a
+            // verdict of "not a shop". Treating it as `false` parked a possibly
+            // genuine shop reply unattributed - invisible to its user, and Meta
+            // answered 200 so it never redelivered. Mirror the attribution-
+            // unavailable path (and the Evolution ingest gate, which fails loud
+            // on this exact null): make Meta retry the whole batch. OR11 I2.1.
+            if (gate === null) {
+              return NextResponse.json(
+                { error: "vendor-gate unavailable - retry" },
+                { status: 503 }
+              );
+            }
+            receiver = gate ? resolved : null;
+          }
           rows.push({
             wa_message_id: msg.id,
             from_number: msg.from,
