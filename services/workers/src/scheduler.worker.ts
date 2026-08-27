@@ -10,6 +10,7 @@ import {
   drainGraphWakeups,
   sendFromUser,
   reassertWebhook,
+  rearmOpenWebhooks,
   sbSelect,
   recentActiveSenders,
   syncInboundReplies,
@@ -88,23 +89,6 @@ export async function scheduleHeartbeat(): Promise<void> {
     removeOnComplete: 10,
     removeOnFail: 20,
   });
-}
-
-/** Reassert the webhook for every currently-open instance (bounded fan-out).
- * Each reassertWebhook is throttled ~1h/instance internally, so a 30m tick is a
- * no-op for healthy instances. Also runnable once on gateway boot. */
-export async function rearmOpenWebhooks(limit = 50): Promise<{ scanned: number; rearmed: number }> {
-  const rows = await sbSelect<{ email: string }>(
-    "wa_sessions",
-    `select=email&status=eq.open&order=updated_at.desc&limit=${limit}`
-  ).catch(() => [] as { email: string }[]);
-  let rearmed = 0;
-  for (const r of rows) {
-    if (!r.email) continue;
-    const res = await reassertWebhook(r.email).catch(() => null);
-    if (res?.changed) rearmed += 1;
-  }
-  return { scanned: rows.length, rearmed };
 }
 
 export function startSchedulerWorker(): Worker<SchedulerJob> {

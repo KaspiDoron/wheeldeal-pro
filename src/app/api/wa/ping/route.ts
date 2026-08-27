@@ -73,6 +73,25 @@ export async function GET(req: Request) {
     /* best-effort */
   }
 
+  // FLEET WEBHOOK RE-ARM (owner report 11 D2.3). The webhook token is derived
+  // from SESSION_SECRET; a rotation leaves Evolution holding the OLD token, so
+  // every inbound reply is answered 403 and DROPPED - all inbound WhatsApp goes
+  // dark. The automatic repair (rearmOpenWebhooks) used to live ONLY in the
+  // undeployed BullMQ worker, so in production a rotation had no repair at all.
+  // Running it here - the one periodic runner that actually exists in prod -
+  // re-registers every open instance with the current token. Each reassert is
+  // throttled ~1h/instance internally, and this is gated to ~every 5 minutes so
+  // the 50-row scan is cheap, so it is a no-op for a healthy fleet and recovers
+  // a rotated one within minutes.
+  try {
+    if (Math.floor(Date.now() / 60_000) % 5 === 0) {
+      const { rearmOpenWebhooks } = await import("@/lib/evolution");
+      await rearmOpenWebhooks().catch(() => null);
+    }
+  } catch {
+    /* best-effort - never fail the keep-awake on the re-arm */
+  }
+
   // Extend this ping's reach: kick the self-chaining drain so one cron hit
   // keeps a staggered batch progressing for the following ~30 minutes even
   // between cron intervals. AWAITED to the point of leaving the instance - a

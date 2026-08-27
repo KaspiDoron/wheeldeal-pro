@@ -94,6 +94,20 @@ describe("no config points at a branch that does not exist", () => {
     expect(md).toMatch(/git clone -b master/);
   });
 
+  it("the GCE bootstrap scripts default to a branch that EXISTS (OR11 D2.2)", () => {
+    // THE SWEEP GAP THIS FILE MISSED. startup.sh and deploy.sh each defaulted
+    // BRANCH to the dead branch and then `git clone --branch "$BRANCH"` - so a
+    // GCE worker VM booted straight into a clone of a branch that cannot be
+    // fetched and never came up. The README was swept; these two shell scripts,
+    // where the failure actually happens, were not. Pin them here so the next
+    // rename cannot leave them behind again.
+    for (const f of ["infra/gcp/startup.sh", "infra/gcp/deploy.sh"]) {
+      const sh = read(f);
+      expect(sh, `${f} still names the dead branch`).not.toContain(DEAD_BRANCH);
+      expect(sh, `${f} must default BRANCH to master`).toMatch(/BRANCH[:=]"?\$\{BRANCH:-master\}"?|BRANCH="\$\{BRANCH:-master\}"/);
+    }
+  });
+
   it("REALITY CHECK: the branches these files name are really on the remote", () => {
     // The point of this whole file. Skips rather than fails where git or the
     // remote is unavailable (a fresh CI checkout, an offline sandbox) - a test

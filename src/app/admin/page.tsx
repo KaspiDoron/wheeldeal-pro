@@ -3270,8 +3270,10 @@ function BetaManager() {
       </button>
       {!lock && (
         <p className="mt-1.5 text-[10px] font-bold text-brandred">
-          Lock is OFF (BETA_LOCK=off) - anyone can sign up. Set BETA_LOCK=on in the
-          host env to enforce this list.
+          Lock is OFF (BETA_LOCK=off) - anyone can sign up. To enforce this list,
+          set the repo variable BETA_LOCK=on under Settings, Secrets and variables,
+          Actions, Variables, so it survives every deploy; a Cloud Run console
+          value is wiped on the next push.
         </p>
       )}
     </div>

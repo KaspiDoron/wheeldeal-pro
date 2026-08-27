@@ -640,6 +640,36 @@ export async function reassertWebhook(
   return { ok: set.ok, changed: set.ok, registeredUrl: set.ok ? webhookUrl : registeredUrl };
 }
 
+/**
+ * Re-assert the webhook for every currently-open instance (bounded fan-out).
+ *
+ * THE ONLY AUTOMATIC REPAIR FOR A ROTATED SESSION_SECRET (owner report 11 D2.3).
+ * The webhook token is derived from SESSION_SECRET; rotate it and Evolution
+ * still holds the OLD token on its registered URL, so every inbound reply is
+ * answered 403 and DROPPED - all inbound WhatsApp goes dark until each instance
+ * happens to reconnect. This walks the open instances and re-registers each with
+ * the current token. It used to live ONLY inside the BullMQ scheduler worker,
+ * which is not deployed (Dockerfile runs `node server.js`), so the repair never
+ * ran in production. It now lives here so the deployed /api/wa/ping cron can run
+ * it. Each reassertWebhook is throttled ~1h/instance internally, so frequent
+ * calls are a no-op for healthy instances.
+ */
+export async function rearmOpenWebhooks(
+  limit = 50
+): Promise<{ scanned: number; rearmed: number }> {
+  const rows = await sbSelect<{ email: string }>(
+    "wa_sessions",
+    `select=email&status=eq.open&order=updated_at.desc&limit=${limit}`
+  ).catch(() => [] as { email: string }[]);
+  let rearmed = 0;
+  for (const r of rows) {
+    if (!r.email) continue;
+    const res = await reassertWebhook(r.email).catch(() => null);
+    if (res?.changed) rearmed += 1;
+  }
+  return { scanned: rows.length, rearmed };
+}
+
 /** Read-only webhook diagnostics for the WA doctor: host health, the live
  * connection state, the URL Evolution ACTUALLY holds (via /webhook/find) and how
  * it compares to what we expect (token current/foreign/none, origin match). */

@@ -7,7 +7,7 @@
 #
 # Required VM metadata / instance attributes (set at create time):
 #   wd-repo         github owner/repo             (e.g. KaspiDoron/Rental-App)
-#   wd-branch       deploy branch                 (e.g. claude/rental-negotiation-app-pc33ux)
+#   wd-branch       deploy branch                 (e.g. master)
 #   wd-secret-name  Secret Manager secret id      (holds the full .env contents)
 #   wd-repo-secret  Secret Manager secret id      (a GitHub token for the private clone; optional if public)
 #   wd-api-domain   the gateway's PUBLIC domain   (default: <this VM's external IP>.sslip.io)
@@ -35,7 +35,7 @@ meta() { curl -s -H "Metadata-Flavor: Google" \
   "http://metadata.google.internal/computeMetadata/v1/instance/attributes/$1" || true; }
 
 REPO="$(meta wd-repo)";           REPO="${REPO:-KaspiDoron/Rental-App}"
-BRANCH="$(meta wd-branch)";       BRANCH="${BRANCH:-claude/rental-negotiation-app-pc33ux}"
+BRANCH="$(meta wd-branch)";       BRANCH="${BRANCH:-master}"
 SECRET_NAME="$(meta wd-secret-name)"; SECRET_NAME="${SECRET_NAME:-wheeldeal-env}"
 REPO_SECRET="$(meta wd-repo-secret)"
 OWNER_EMAIL="$(meta wd-owner-email)"

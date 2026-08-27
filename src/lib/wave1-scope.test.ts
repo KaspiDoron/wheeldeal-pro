@@ -209,7 +209,9 @@ describe("a rotated SESSION_SECRET is recoverable and visible", () => {
     // secret that silently blanks every integration key could not be delivered.
     const wf = read(".github/workflows/deploy-gcp.yml");
     expect(wf).toMatch(/SESSION_SECRET_PREVIOUS: \$\{\{ secrets\.SESSION_SECRET_PREVIOUS \}\}/);
-    expect(wf).toMatch(/for OPTIONAL in [^\n]*SESSION_SECRET_PREVIOUS; do/);
+    // (BETA_LOCK now follows it in the same loop - OR11 D2.1 - so this no
+    // longer requires PREVIOUS to be the final item, only present in the loop.)
+    expect(wf).toMatch(/for OPTIONAL in [^\n]*SESSION_SECRET_PREVIOUS[^\n]*; do/);
     expect(readCode("src/lib/runtime-config.ts")).toMatch(/SESSION_SECRET_PREVIOUS/);
   });
 

@@ -336,6 +336,13 @@ jobs:
           # src/lib/deploy-env.test.ts now fails if the two lists disagree.
           REDIS_URL: ${{ secrets.REDIS_URL }}
           SESSION_SECRET_PREVIOUS: ${{ secrets.SESSION_SECRET_PREVIOUS }}
+          # BETA_LOCK is an owner TOGGLE, not a secret (OR11 D2.1). Sourced from a
+          # repo VARIABLE so a deploy PRESERVES it: --set-env-vars replaces the
+          # whole service env, so an owner who set BETA_LOCK=off in the Cloud Run
+          # console had it WIPED on the next push and the beta silently re-locked
+          # (allowlist.ts defaults an absent value to "on"). Unset here = absent =
+          # locked, which is the safe default.
+          BETA_LOCK: ${{ vars.BETA_LOCK }}
         run: |
           set -euo pipefail
           IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY/$SERVICE"
@@ -386,7 +393,7 @@ jobs:
           # (optional - absent just keeps the documented in-memory caveat) so
           # the moment a Redis endpoint is reachable from Cloud Run the caps
           # become fleet-wide with no code change.
-          for OPTIONAL in EVOLUTION_API_URL EVOLUTION_API_KEY EVOLUTION_HOSTS APP_DOMAIN REDIS_URL SESSION_SECRET_PREVIOUS; do
+          for OPTIONAL in EVOLUTION_API_URL EVOLUTION_API_KEY EVOLUTION_HOSTS APP_DOMAIN REDIS_URL SESSION_SECRET_PREVIOUS BETA_LOCK; do
             VALUE="${!OPTIONAL:-}"
             if [ -n "$VALUE" ]; then
               ENV_VARS="$ENV_VARS##$OPTIONAL=$VALUE"

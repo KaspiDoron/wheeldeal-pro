@@ -77,6 +77,7 @@ export {
   webhookToken,
   webhookAuthToken,
   reassertWebhook,
+  rearmOpenWebhooks,
   emailForInstance,
   sendFromUser,
 } from "../../src/lib/evolution";
