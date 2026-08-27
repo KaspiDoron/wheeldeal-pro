@@ -365,7 +365,10 @@ export async function POST(req: Request) {
   // a batch that waits ~3 minutes (newContactBudget stamps nextFreeAt that
   // close on an unreadable read, deliberately, so it re-checks in minutes);
   // the cost of being wrong the other way is someone's WhatsApp account.
-  const budget = await newContactBudget(session.email, session.plan).catch(() => ({
+  // { fresh: true } bypasses the 12s budget cache (OR11 E2.2): this is the
+  // click-time truth the user acts on, so it must be exact, not a poll-warmed
+  // value that could be up to 12s stale after their own last batch.
+  const budget = await newContactBudget(session.email, session.plan, { fresh: true }).catch(() => ({
     remaining: 0,
     cap: planCapacity(session.plan).newContacts,
     windowHours: planCapacity(session.plan).windowHours,

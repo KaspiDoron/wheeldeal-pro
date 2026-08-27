@@ -82,8 +82,10 @@ async function repliesFor(db: FakeDb) {
       return rows;
     }
     if (table === "whatsapp_messages" && query.includes("direction=eq.outbound")) {
-      // How a vendor_id is joined to the digits we actually messaged.
-      return [{ to_number: DIGITS, raw: { vendorId: VENDOR } }];
+      // How a vendor_id is joined to the digits we actually messaged. The route
+      // now projects vendorId:raw->>vendorId FLAT (OR11 E2.1) instead of pulling
+      // the whole raw blob, so PostgREST returns a flat `vendorId` column.
+      return [{ to_number: DIGITS, vendorId: VENDOR }];
     }
     return [];
   };

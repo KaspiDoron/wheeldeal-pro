@@ -188,7 +188,13 @@ export async function resolvePlaceLocation(
   sessionToken?: string
 ): Promise<{ label: string; lat: number; lng: number } | null> {
   const key = await mapsKey();
-  const ck = `pd:${placeId}`;
+  // DISTINCT NAMESPACE from placeDetails (OR11 E2.4). Both used `pd:<id>` with
+  // INCOMPATIBLE shapes - a {label,lat,lng} here vs a {phone,rating,reviews,...}
+  // there - so whichever populated the key first poisoned the other: a shop
+  // resolved for its coordinates then read back as a details object with NaN
+  // lat/lng (a broken map pin), or details read back as a location with no
+  // phone/rating/reviews. Location-only key.
+  const ck = `ploc:${placeId}`;
   const cached = cacheGet<{ label: string; lat: number; lng: number }>(ck);
   if (cached) return cached;
   if (key) {
@@ -652,8 +658,10 @@ export async function placeDetails(placeId: string): Promise<PlaceDetailsResult 
   const key = await mapsKey();
   if (!key) return null;
 
-  // Details rarely change - cache 6 hours per place.
-  const ck = `pd:${placeId}`;
+  // Details rarely change - cache 6 hours per place. Namespaced apart from
+  // resolvePlaceLocation's `ploc:` key (OR11 E2.4): they cache incompatible
+  // shapes and used to collide on a shared `pd:` key.
+  const ck = `pdet:${placeId}`;
   const cached = cacheGet<PlaceDetailsResult>(ck);
   if (cached) return cached;
   await recordApi("place_details");
