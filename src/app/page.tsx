@@ -2319,13 +2319,22 @@ export default function Home() {
       : null;
 
     const pRes = await profileP;
-    const pData = await pRes.json();
-    if (!pRes.ok) {
+    // PARSE DEFENSIVELY, AND ONLY AFTER res.ok (OR11 F2.1). A non-JSON body - a
+    // 502/504 HTML error page from Cloud Run, a gateway timeout, an upstream
+    // that returned text - made `pRes.json()` THROW here, BEFORE the !ok branch
+    // could reset the funnel. The throw rejected the whole async startSearch, so
+    // "Structuring your request" hung forever with no way back and no error. A
+    // guarded parse turns every failure - malformed OR non-ok - into the same
+    // honest, recoverable message.
+    const pData = await pRes.json().catch(() => null);
+    if (!pRes.ok || !pData) {
       lowerAmbient();
       setPhase("idle");
       // M5: alert() is the one surface in the app that looks like a browser
       // crash - the same in-page channel every other failure uses.
-      setSourceError(pData.error ?? t("Could not parse your request - try rephrasing it."));
+      setSourceError(
+        (pData && pData.error) || t("Could not parse your request - try rephrasing it.")
+      );
       return;
     }
     setRfq(pData.rfq);
@@ -4635,7 +4644,13 @@ export default function Home() {
 
       {dashboardFor && (
         <ThreadDashboard
-          vendor={dashboardFor}
+          // LIVE vendor, not the open-time snapshot (OR11 F2.2). `dashboardFor`
+          // is frozen at the moment the sheet opened, so a price that landed
+          // while it was open never reached it - and the dashboard hands its
+          // vendor straight to onBook/onBargain, so booking and close-deal
+          // committed a STALE price. Re-derive from the live list by id each
+          // render; fall back to the snapshot only if the shop dropped out.
+          vendor={vendors.find((v) => v.id === dashboardFor.id) ?? dashboardFor}
           rfq={rfq}
           searchEpoch={epochOnServerClock() || undefined}
           queueItem={(() => {
