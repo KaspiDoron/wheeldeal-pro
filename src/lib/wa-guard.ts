@@ -3442,6 +3442,9 @@ export async function drainOutbox(
     retryAfterSeconds?: number;
     unconfirmed?: boolean;
     messageId?: string;
+    /** Ambiguous (status-0) failure - may have landed; do not release the
+     * idempotency claim. See sendFromUser (OR11 H2.2). */
+    ambiguous?: boolean;
   }>,
   opts?: DrainOptions
 ): Promise<number> {
@@ -3884,6 +3887,9 @@ export async function drainOutbox(
       unconfirmed?: boolean;
       messageId?: string;
       chatJid?: string;
+      /** Status-0 timeout - may have landed. Keep the idempotency claim so the
+       * echo is recognised and the retry cannot double-send (OR11 H2.2). */
+      ambiguous?: boolean;
     };
     try {
       r = await send(row.sender_key, row.to_number, verdict.text, isCold(row) ? "intro" : "reply");
@@ -3971,9 +3977,20 @@ export async function drainOutbox(
         ]).catch(() => {});
       }
     } else {
-      // Release the idempotency claim - the retry below must not be treated
-      // as a duplicate of the failed attempt.
-      await releaseMessageClaim(row.sender_key, row.to_number, verdict.text).catch(() => {});
+      // Release the idempotency claim so the retry below is not treated as a
+      // duplicate of the failed attempt - but ONLY when the send DEFINITIVELY
+      // did not land. An AMBIGUOUS status-0 timeout (r.ambiguous) may have
+      // reached WhatsApp, so releasing the claim would (a) leave the fromMe
+      // echo of a delivered message with no record - all three echo checks miss
+      // it and our own message is convicted as a HUMAN TAKEOVER, killing the
+      // thread and purging the queue - and (b) let the retry re-POST a possible
+      // duplicate (a velocity ban signal). Keeping the claim makes the echo
+      // recognisable AND routes the retry into the duplicate-hold path, which
+      // is exactly the "landed-but-timed-out" protection gcSendClaims already
+      // documents (OR11 H2.2).
+      if (!r.ambiguous) {
+        await releaseMessageClaim(row.sender_key, row.to_number, verdict.text).catch(() => {});
+      }
       // CLASSIFY the failure. A TRANSIENT infra failure (the Evolution host is
       // waking/restarting/timed-out - the "wd-evolution health check failed"
       // case) is NOT the recipient's fault and must NOT burn the retry cap or

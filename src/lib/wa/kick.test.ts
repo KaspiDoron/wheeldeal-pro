@@ -79,6 +79,19 @@ describe("a kick has to actually leave the instance", () => {
     expect(KICK_SETTLE_MS).toBeLessThanOrEqual(2_000);
     expect(KICK_SETTLE_MS).toBeGreaterThanOrEqual(500);
   });
+
+  it("EXECUTED: fires with cache:no-store so Next 14 cannot serve the kick from its Data Cache (OR11 H2.3)", async () => {
+    // Every kick is a GET to a fixed self URL; Next 14 caches GETs by default,
+    // so without no-store the SECOND kick of a shape is answered from cache and
+    // the dispatcher never runs. Assert the option reaches fetch.
+    const fetchMock = vi.fn(() => Promise.resolve(new Response("ok")));
+    vi.stubGlobal("fetch", fetchMock);
+    await kickDispatcher("http://x/api/wa/reply-tick", 50);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://x/api/wa/reply-tick",
+      expect.objectContaining({ cache: "no-store" })
+    );
+  });
 });
 
 describe("every inbound path uses it", () => {

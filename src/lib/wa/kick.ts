@@ -35,7 +35,14 @@ export const KICK_SETTLE_MS = 1200;
  */
 export async function kickDispatcher(url: string, settleMs = KICK_SETTLE_MS): Promise<void> {
   let settled = false;
-  const call = fetch(url)
+  // `cache: "no-store"` IS LOAD-BEARING (OR11 H2.3). Next 14 patches fetch to
+  // cache GETs in its Data Cache by default, keyed on the URL. Every kick is a
+  // GET to a fixed self URL (only the token/hop vary), so the SECOND kick of a
+  // given shape could be answered from cache in microseconds - the dispatcher
+  // never runs, and the reply lane silently stops firing until the next poll.
+  // no-store forces the request onto the wire every time, which is the entire
+  // point of a kick.
+  const call = fetch(url, { cache: "no-store" })
     .then(() => {
       settled = true;
     })
