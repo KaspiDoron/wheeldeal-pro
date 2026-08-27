@@ -60,6 +60,16 @@ import { validateMediaCoherence } from "./coherence";
 import { enforceEmojiTone, ensureGloballyUnique } from "./uniqueness";
 import { sessionTableRows } from "./session-table";
 
+/**
+ * How long a drainer's lease on a graph_wakeup holds before another drainer may
+ * reclaim it (owner report 11 C2.1). A wakeup turn is one bounded serverless
+ * compose (~60-90s); five minutes is comfortable headroom over that and keeps
+ * recovery after a genuine instance death fast. The claim bumps `not_before`
+ * this far into the future; success deletes the row, a mid-run death lets it
+ * fall due again.
+ */
+const WAKEUP_LEASE_MS = 5 * 60_000;
+
 import { getPolicyOverlay, DEFAULT_OVERLAY, type PolicyOverlay } from "../ops/overlay";
 import type {
   DeliverResult,
@@ -2176,18 +2186,37 @@ export async function drainGraphWakeups(
       )}${ownerFilter}&order=not_before.asc&limit=24`
     );
     if (due.length === 0) return 0;
-    const { sbDeleteReturning } = await import("../runtime-config");
+    const { sbUpdateReturning, sbDelete } = await import("../runtime-config");
     // CONCURRENT drain: each due wakeup is an INDEPENDENT thread whose turn is a
     // full multi-agent LLM compose. Running them sequentially made 40 live
     // threads advance one-at-a-time (the "loses track of conversations it
     // initiated" bug). A bounded worker pool overlaps the composes for distinct
     // threads while the per-recipient send pacing keeps each shop paced.
     const processOne = async (cand: WakeupRowDb): Promise<void> => {
-      const claimed = await sbDeleteReturning<WakeupRowDb>(
+      // A LEASE, NOT A DELETE (owner report 11 C2.1). This used to CLAIM by
+      // deleting the row, then run the (LLM) turn, then re-park only inside a
+      // catch. So the row was gone the instant the claim won, and the only
+      // recovery was a catchable throw. A poll route that abandons this drain
+      // mid-flight (its time budget elapsed) or a Cloud Run instance reclaimed
+      // between the delete and the compose left the wakeup DELETED with nothing
+      // to reclaim it - the strategic-wait / quiet-thread follow-up simply never
+      // fired. wa_outbox and wa_processed were both converted to leases to stop
+      // exactly this; graph_wakeups was missed.
+      //
+      // The lease needs no new column: bump `not_before` into the future to
+      // claim (only the drain's own SELECT reads not_before; session-close and
+      // unlink purge by user_email), delete only on success, and a mid-run
+      // death leaves the row to fall due again after WAKEUP_LEASE_MS. The
+      // `not_before=lte` filter is what makes the claim atomic - the first PATCH
+      // moves the row past `now`, so a second concurrent PATCH matches zero rows.
+      const nowIso = new Date().toISOString();
+      const leaseUntil = new Date(Date.now() + WAKEUP_LEASE_MS).toISOString();
+      const claimed = await sbUpdateReturning<WakeupRowDb>(
         "graph_wakeups",
-        `id=eq.${cand.id}`
+        `id=eq.${cand.id}&not_before=lte.${encodeURIComponent(nowIso)}`,
+        { not_before: leaseUntil }
       );
-      if (claimed.length === 0) return; // another drainer won this row
+      if (claimed.length === 0) return; // another drainer holds the lease
       const row = claimed[0];
       try {
         if (row.kind === "tick") {
@@ -2241,19 +2270,28 @@ export async function drainGraphWakeups(
         const prior = Number((row.payload as { retryAttempts?: number } | null)?.retryAttempts ?? 0);
         const decision = wakeupRetryDecision(prior);
         if (decision.reschedule) {
-          const sep = row.thread_key.lastIndexOf(":");
-          const base = {
-            kind: row.kind,
-            thread_key: row.thread_key,
-            not_before: new Date(Date.now() + decision.delayMs).toISOString(),
-            payload: { ...(row.payload ?? {}), retryAttempts: decision.attempts },
-          };
-          const ok = await sbInsert("graph_wakeups", [
-            { ...base, user_email: sep > 0 ? row.thread_key.slice(0, sep) : null },
-          ]).catch(() => false);
-          if (!ok) await sbInsert("graph_wakeups", [base]).catch(() => {});
+          // The row is still present (we leased it, did not delete it), so move
+          // its not_before to the backoff and record the attempt - an UPDATE,
+          // not an INSERT, or the retry would duplicate the wakeup.
+          await sbUpdate(
+            "graph_wakeups",
+            `id=eq.${row.id}`,
+            {
+              not_before: new Date(Date.now() + decision.delayMs).toISOString(),
+              payload: { ...(row.payload ?? {}), retryAttempts: decision.attempts },
+            }
+          ).catch(() => {});
+        } else {
+          // Out of retries: give up cleanly. Leaving the leased row would just
+          // re-fire it once the lease elapsed.
+          await sbDelete("graph_wakeups", `id=eq.${row.id}`).catch(() => {});
         }
+        return;
       }
+      // SUCCESS (or a dead/cancelled thread that yielded no input): the follow-up
+      // is done, so retire the leased row. A mid-run death never reaches here,
+      // which is the whole point - the row survives to be reclaimed.
+      await sbDelete("graph_wakeups", `id=eq.${row.id}`).catch(() => {});
     };
     // Bounded pool: at most CONCURRENCY composes in flight at once.
     const CONCURRENCY = 6;
