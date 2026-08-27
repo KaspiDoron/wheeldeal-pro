@@ -98,6 +98,33 @@ export interface AnswerGuide {
 }
 
 /**
+ * IS THIS SHARE-STRING COARSE ENOUGH TO NAME AS AN AREA? (owner report 11 S3)
+ *
+ * The `area` fact answers "where will you ride?" with a general place. But the
+ * only "where" the app holds is the traveller's stored stay LABEL - the precise
+ * hotel/street they typed (`stay_label`) - and it is populated even without the
+ * coordinate-sharing consent. Feeding it straight into the area answer made the
+ * agent say "riding around Ibis Styles Krabi, 123 Beach Rd" when a shop asked
+ * which city - stating the exact hotel, before any price, contradicting the
+ * `address` fact one case below which is instructed to REFUSE a hotel.
+ *
+ * A bare town ("Krabi", "Ao Nang", "Chiang Mai") is a legitimate area and stays
+ * friendly. Anything that looks like a precise address - a street number, a
+ * comma-separated multi-part label, or just a long one - is withheld here and
+ * reserved for the price-gated `pickup-location` move, which is the intended
+ * disclosure point. Conservative on purpose: when unsure, share less.
+ */
+export function coarseArea(label: string | null | undefined): string | null {
+  const t = String(label ?? "").trim();
+  if (!t) return null;
+  if (/\d/.test(t)) return null; // a street/unit number is not an area
+  if (t.includes(",")) return null; // "Hotel, Road, District" is an address
+  if (t.length > 24) return null; // a long label is a precise place, not a town
+  if (t.split(/\s+/).length > 3) return null; // more than three words is not a town
+  return t;
+}
+
+/**
  * The honest answer to each fact the shop asked about, for THIS request.
  *
  * A grounded fact that the request does not actually carry degrades to general
@@ -109,7 +136,9 @@ export function answerGuide(
   asked: TravellerFact[]
 ): AnswerGuide[] {
   const rfq = ctx.rfq;
-  const town = (ctx.town || "").trim();
+  // Only a coarse, town-like value may be named as an AREA. A precise stay
+  // label is withheld here and shared only via the price-gated pickup move.
+  const town = coarseArea(ctx.town) ?? "";
   const days = rfq?.durationDays;
   const start = (rfq as { startDate?: string } | undefined)?.startDate;
 
