@@ -8,7 +8,8 @@ import { startIncomingWorker } from "./incoming.worker";
 import { startOutboundWorker } from "./outbound.worker";
 import { startVisionWorker } from "./vision.worker";
 import { startOutreachWorker } from "./outreach.worker";
-import { startSchedulerWorker, scheduleHeartbeat, rearmOpenWebhooks } from "./scheduler.worker";
+import { startSchedulerWorker, scheduleHeartbeat } from "./scheduler.worker";
+import { rearmOpenWebhooks } from "@wheeldeal/core";
 
 async function main() {
   // Install BEFORE any worker starts, so a rejection thrown during boot is

@@ -102,7 +102,33 @@ export async function POST(req: Request) {
     if (me?.role !== "owner") {
       return NextResponse.json({ error: "Only the owner can use the kill switch." }, { status: 403 });
     }
-    await setConfig("KILL_SWITCH", body.killSwitch ? "1" : "");
+    // DO NOT DISCARD THE WRITE RESULT (OR11 D2.4). This is an EMERGENCY STOP.
+    // setConfig can fail (vault write error) or persist only to THIS instance's
+    // memory (Supabase unreachable) - and the route used to answer { ok: true }
+    // either way, so the owner saw "done" while the switch had not actually
+    // taken, or had taken on one of up to 20 instances. Report the truth.
+    const res = await setConfig("KILL_SWITCH", body.killSwitch ? "1" : "");
+    if (!res.ok) {
+      return NextResponse.json(
+        {
+          error:
+            res.error ??
+            "Could not save the kill switch - it is UNCHANGED. Try again before relying on it.",
+        },
+        { status: 502 }
+      );
+    }
+    return NextResponse.json({
+      ok: true,
+      killSwitch: body.killSwitch,
+      persistent: res.persistent,
+      ...(res.persistent
+        ? {}
+        : {
+            warning:
+              "Saved to THIS instance only - Supabase was unreachable, so the other running instances are NOT affected yet. Retry until it persists fleet-wide.",
+          }),
+    });
   }
 
   return NextResponse.json({ ok: true });
