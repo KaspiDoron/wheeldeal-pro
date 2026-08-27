@@ -355,7 +355,7 @@ export async function processVendorReply(opts: {
 
   if (opts.waMessageId) {
     const { sbInsertReturning } = await import("./runtime-config");
-    const { claimKey } = await import("./wa/inbound-claim");
+    const { claimKey, quotedInList } = await import("./wa/inbound-claim");
     // Receiver-scoped (H4): the bare provider id is not unique across
     // RECEIVERS - a shop's broadcast delivers the same id to two travellers,
     // and a global claim dropped the second one's copy as a duplicate.
@@ -366,7 +366,7 @@ export async function processVendorReply(opts: {
     ]);
     if (claimed.length === 0) {
       const keys = replyKey === opts.waMessageId ? [replyKey] : [replyKey, opts.waMessageId];
-      const filter = `wa_message_id=in.(${keys.map((k) => `"${k}"`).join(",")})&limit=1`;
+      const filter = `wa_message_id=in.(${quotedInList(keys)})&limit=1`;
       // ZERO ROWS BACK FROM THE INSERT DOES NOT MEAN "SOMEBODY ELSE HAS IT".
       // `sbInsertReturning` returns [] for a duplicate key AND for a missing
       // table AND for a network error AND for demo mode, so the follow-up read

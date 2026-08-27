@@ -173,7 +173,7 @@ export async function syncInboundReplies(email: string): Promise<number> {
       // BOTH claim spellings (H4): claims are receiver-scoped now
       // (email:msgId) with legacy bare-id rows still standing - a claim in
       // either spelling means this user's copy was answered.
-      const { claimKey } = await import("./wa/inbound-claim");
+      const { claimKey, quotedInList } = await import("./wa/inbound-claim");
       const claimSpellings = ids.flatMap((i) => {
         const scoped = claimKey(email, i);
         return scoped === i ? [i] : [i, scoped];
@@ -184,9 +184,7 @@ export async function syncInboundReplies(email: string): Promise<number> {
         settled_at?: string | null;
       }>(
         "wa_processed",
-        `select=wa_message_id,created_at,settled_at&wa_message_id=in.(${claimSpellings
-          .map((i) => `"${i}"`)
-          .join(",")})&limit=${claimSpellings.length}`
+        `select=wa_message_id,created_at,settled_at&wa_message_id=in.(${quotedInList(claimSpellings)})&limit=${claimSpellings.length}`
       );
       // Normalize back to the bare id so the skip test below matches. Only
       // OUR OWN scope prefix is stripped - a provider id that happens to
