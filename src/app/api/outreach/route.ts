@@ -649,7 +649,7 @@ async function handlePost(req: Request) {
     // message the shop had already received, and tapping again was the natural
     // response. The row is important, but it is not the send: record the loss
     // and answer honestly instead.
-    await sbInsert("whatsapp_messages", [
+    const wroteLog = await sbInsert("whatsapp_messages", [
       {
         // Provider id -> the webhook echo-check matches by id, never by body.
         wa_message_id: (result as { messageId?: string }).messageId ?? null,
@@ -680,26 +680,36 @@ async function handlePost(req: Request) {
           ...(lidKey(result.chatJid) ? { lid: lidKey(result.chatJid) } : {}),
         },
       },
-    ]).catch(async (e) => {
+    ]);
+    // sbInsert RETURNS false on failure - it never rejects, so the old .catch
+    // was dead code and `logged` reported true even when the row was lost.
+    // Check the boolean: the message left WhatsApp but our record of it did not
+    // reach the DB, so the reply may later die as `no-rfq-thread`.
+    if (!wroteLog) {
       logged = false;
       await sbInsert("agent_events", [
         {
           kind: "outbound-log-failed",
+          user_email: session.email,
+          to_number: digits,
           vendor_id: vendorId,
           vendor_name: vendorName,
           detail: JSON.stringify({
             email: session.email,
             channel: result.channel,
-            error: e instanceof Error ? e.message : String(e),
           }).slice(0, 800),
         },
       ]).catch(() => {});
-    });
+    }
   } else {
-    // Keep the failure observable without polluting the "sent" record.
+    // Keep the failure observable without polluting the "sent" record. Stamp the
+    // join columns so the trail (messagePath) and the per-user safety signals
+    // can actually find it.
     await sbInsert("agent_events", [
       {
         kind: "send-failed",
+        user_email: session.email,
+        to_number: digits,
         vendor_id: vendorId,
         vendor_name: vendorName,
         detail: JSON.stringify({

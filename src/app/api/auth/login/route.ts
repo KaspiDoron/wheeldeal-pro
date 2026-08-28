@@ -40,6 +40,21 @@ export async function POST(req: Request) {
   if (!EMAIL_RX.test(email)) {
     return NextResponse.json({ error: "Enter a valid email." }, { status: 400 });
   }
+  // IP RATE LIMIT, before the first Supabase read. Without it this route is an
+  // unthrottled user + beta-allowlist enumeration oracle: the per-email lock
+  // below is bypassed by rotating the email, and each attempt costs three
+  // Supabase round trips (isBlocked, allowedPlanFor, getUser). 30/hour/IP is far
+  // above any real person and closes the oracle to a scripted sweep.
+  {
+    const { rateLimit, clientIp } = await import("@/lib/rate-limit");
+    const ipVerdict = await rateLimit("login-ip", clientIp(req), 30, 3600);
+    if (!ipVerdict.ok) {
+      return NextResponse.json(
+        { error: "Too many attempts from this network. Wait a minute and try again." },
+        { status: 429, headers: { "Retry-After": String(ipVerdict.retryAfter) } }
+      );
+    }
+  }
   if (await isBlocked(email)) {
     return NextResponse.json(
       { error: "This account has been restricted by an administrator." },

@@ -444,6 +444,11 @@ export async function processEvolutionWebhook(
     const HEAVY_PER_INVOCATION = 25;
     let heavyProcessed = 0;
     for (const data of items) {
+      // Attributable across the catch: `email` is resolved INSIDE the try below,
+      // so the per-item catch cannot see it. Mirror it here so a swallowed item
+      // leaves a breadcrumb the owner can actually find (messagePath + the
+      // per-user safety signals both filter on user_email).
+      let itemEmail: string | undefined;
       // Per-item isolation (audit DEFECT 5): a throw handling ONE message in a
       // multi-message webhook batch must not drop its siblings - the route always
       // returns 200, so Evolution never redelivers them. Contain each item.
@@ -497,6 +502,7 @@ export async function processEvolutionWebhook(
         continue;
       }
       const email = who.email;
+      itemEmail = email ?? undefined;
       if (!email) {
         await sbInsert("agent_events", [
           {
@@ -1370,7 +1376,10 @@ export async function processEvolutionWebhook(
         // (media download / vision throw) with zero trace, so the WA doctor
         // reported a healthy thread while the shop got no answer.
         void noteInboundDropped(
-          undefined,
+          // Stamp the resolved sender so the breadcrumb is attributable
+          // (messagePath + safety signals filter on user_email), instead of an
+          // orphan row nobody can find.
+          itemEmail,
           String(data?.key?.remoteJid ?? "").split("@")[0],
           "ingest-error",
           { error: e instanceof Error ? e.message.slice(0, 120) : "unknown" }
@@ -1380,9 +1389,12 @@ export async function processEvolutionWebhook(
   } catch (e) {
     // Never fail the webhook - but never lose the fact either (I4): this
     // outer catch covers the whole BATCH, so an exception here means every
-    // message in the delivery was dropped with, until now, zero trace. The
-    // recovery sweep can re-answer them; it just needs the breadcrumb to
-    // exist when the owner asks where a reply went.
+    // message in the delivery was dropped. Set the FUNCTION-level retryable so
+    // the route answers 503 and Evolution redelivers (the handled head is
+    // skipped cheaply on redelivery) - passing retryable in the breadcrumb
+    // detail alone never reached the return, so the webhook 200'd and the whole
+    // delivery was lost.
+    retryable = true;
     void noteInboundDropped(undefined, "", "batch-error", {
       error: e instanceof Error ? e.message.slice(0, 120) : "unknown",
       retryable: true,

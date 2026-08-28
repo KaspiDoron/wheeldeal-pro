@@ -28,9 +28,16 @@ export async function POST(req: Request) {
   };
   const perTarget = await rateLimit("forgot", `${ip}:${key}`, 3, 3600);
   const perIp = await rateLimit("forgot-ip", ip, 10, 3600);
-  if (!perTarget.ok || !perIp.ok) {
+  // IP-INDEPENDENT per-victim bucket. The `${ip}:${key}` window resets when the
+  // attacker rotates IPs, so without this a known account could be spammed with
+  // temporary-password resets (a lockout DoS, since each reset overwrites the
+  // real password). A limiter that only ever refuses MORE is always safe to add.
+  const perVictim = await rateLimit("forgot-target", key, 3, 3600);
+  if (!perTarget.ok || !perIp.ok || !perVictim.ok) {
     return NextResponse.json(generic, {
-      headers: { "Retry-After": String(Math.max(perTarget.retryAfter, perIp.retryAfter)) },
+      headers: {
+        "Retry-After": String(Math.max(perTarget.retryAfter, perIp.retryAfter, perVictim.retryAfter)),
+      },
     });
   }
 

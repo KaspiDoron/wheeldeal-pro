@@ -181,6 +181,24 @@ describe("auth/forgot is throttled", () => {
     expect(src).toMatch(/rateLimit\("forgot", `\$\{ip\}:\$\{key\}`/);
     expect(src).toMatch(/rateLimit\("forgot-ip", ip/);
   });
+  it("also has an IP-INDEPENDENT per-victim bucket, so a rotating attacker cannot spam resets", () => {
+    // The `${ip}:${key}` window resets on an IP change; without a key-only
+    // bucket a known account could be locked out by repeated reset spam.
+    expect(src).toMatch(/rateLimit\("forgot-target", key/);
+  });
+});
+
+describe("auth/login is throttled and not an enumeration oracle", () => {
+  const src = read("src/app/api/auth/login/route.ts");
+  it("rate-limits by IP before the first Supabase read", () => {
+    expect(src).toMatch(/rateLimit\("login-ip", clientIp\(req\)/);
+    // The limit runs before isBlocked/allowedPlanFor/getUser - i.e. before the
+    // three reads that made each guess cost real work.
+    const ip = src.indexOf('rateLimit("login-ip"');
+    const blocked = src.indexOf("isBlocked(email)");
+    expect(ip).toBeGreaterThan(0);
+    expect(ip).toBeLessThan(blocked);
+  });
 });
 
 describe("open spend paths are throttled", () => {

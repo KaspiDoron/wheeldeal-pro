@@ -349,29 +349,44 @@ shared API key is what makes failover seamless:
 AUTHENTICATION_API_KEY   = <pick one long random string, SAME on all hosts>
 DATABASE_ENABLED         = true
 DATABASE_PROVIDER        = postgresql
-DATABASE_CONNECTION_URI  = <your Supabase Postgres "Connection string" URI>
+DATABASE_CONNECTION_URI  = <a DEDICATED Evolution Postgres - NOT the app's Supabase>
 DATABASE_SAVE_DATA_INSTANCE     = true
-DATABASE_SAVE_DATA_NEW_MESSAGE  = true
-DATABASE_SAVE_DATA_MESSAGE_UPDATE = true
-DATABASE_SAVE_DATA_CONTACTS     = true
-DATABASE_SAVE_DATA_CHATS        = true
+DATABASE_SAVE_DATA_NEW_MESSAGE  = false
+DATABASE_SAVE_DATA_MESSAGE_UPDATE = false
+DATABASE_SAVE_DATA_CONTACTS     = false
+DATABASE_SAVE_DATA_CHATS        = false
 CACHE_LOCAL_ENABLED      = true
 CACHE_REDIS_ENABLED      = false
 CONFIG_SESSION_PHONE_CLIENT = Mac OS
 CONFIG_SESSION_PHONE_NAME   = Chrome
 ```
 
+> **PRIVACY - do NOT point `DATABASE_CONNECTION_URI` at the app's Supabase.**
+> Evolution's Baileys layer persists to whatever DB you give it, and a linked
+> phone receives EVERY message the traveller gets - family, work, banking OTPs -
+> not only the rental-shop threads. Two hard rules: (1) use a **dedicated**
+> Evolution Postgres (the `wd-evo-db` in `render.yaml` is exactly this), never
+> the app's Supabase - co-locating puts those private tables in a schema with no
+> RLS, readable via the anon API key; (2) keep `SAVE_DATA_NEW_MESSAGE` and
+> `SAVE_DATA_CONTACTS` **false** - nothing on the app's live path reads
+> Evolution's `Message`/`Contact` tables (the recovery sweep pulls a short live
+> tail from the API, not the store), so persisting them only creates a private
+> data store the privacy policy promises does not exist. `INSTANCE` stays true:
+> that is the Baileys auth state (the link itself), not message content.
+
 Docker image for every host: `evoapicloud/evolution-api:v2.3.7` (newest stable v2 is
 `:v2.2.3`), internal port `8080`. Enter it WITHOUT a `docker.io/` prefix - Render
 (and some others) treat `docker.io/...` as a private registry and error with "No
 public image found". Just type `evoapicloud/evolution-api:v2.3.7`.
 
-Where to get `DATABASE_CONNECTION_URI`: Supabase -> Project Settings ->
-Database -> "Connection string" -> URI -> the **Session pooler** (port 5432).
-That is the right one for Evolution (it keeps a long-lived connection). It looks
-like:
-`postgresql://postgres.<ref>:[YOUR-PASSWORD]@aws-1-<region>.pooler.supabase.com:5432/postgres`
-Replace `[YOUR-PASSWORD]` with your Supabase database password (URL-encode any
+Where to get `DATABASE_CONNECTION_URI`: use a **dedicated** Postgres for
+Evolution - the `wd-evo-db` service in `render.yaml` is provisioned for exactly
+this, and its own connection string is what goes here. **Do NOT use the app's
+Supabase connection string** (see the privacy box above). If you run Evolution
+elsewhere, point it at any Postgres you control that is separate from the app
+database; the connection string looks like:
+`postgresql://user:[YOUR-PASSWORD]@host:5432/postgres`
+Replace `[YOUR-PASSWORD]` with that database's password (URL-encode any
 special characters, e.g. `@` -> `%40`). No `?pgbouncer=true` needed on 5432 -
 that flag is only for the 6543 transaction port. Paste the SAME URI on every host.
 
@@ -414,7 +429,7 @@ runcmd:
   - iptables -I INPUT 6 -m state --state NEW -p tcp --dport 8080 -j ACCEPT
   - netfilter-persistent save
   - sleep 5
-  - docker run -d --name evolution --restart always -p 8080:8080 -e AUTHENTICATION_API_KEY="wd-pool-KEY" -e DATABASE_ENABLED="true" -e DATABASE_PROVIDER="postgresql" -e DATABASE_CONNECTION_URI="postgresql://postgres.<ref>:YOUR-DB-PASSWORD@aws-1-<region>.pooler.supabase.com:5432/postgres" -e DATABASE_SAVE_DATA_INSTANCE="true" -e DATABASE_SAVE_DATA_NEW_MESSAGE="true" -e DATABASE_SAVE_DATA_MESSAGE_UPDATE="true" -e DATABASE_SAVE_DATA_CONTACTS="true" -e DATABASE_SAVE_DATA_CHATS="true" -e CACHE_LOCAL_ENABLED="true" -e CACHE_REDIS_ENABLED="false" -e CONFIG_SESSION_PHONE_CLIENT="Mac OS" -e CONFIG_SESSION_PHONE_NAME="Chrome" evoapicloud/evolution-api:v2.3.7
+  - docker run -d --name evolution --restart always -p 8080:8080 -e AUTHENTICATION_API_KEY="wd-pool-KEY" -e DATABASE_ENABLED="true" -e DATABASE_PROVIDER="postgresql" -e DATABASE_CONNECTION_URI="postgresql://user:YOUR-DB-PASSWORD@your-dedicated-evo-db-host:5432/postgres" -e DATABASE_SAVE_DATA_INSTANCE="true" -e DATABASE_SAVE_DATA_NEW_MESSAGE="false" -e DATABASE_SAVE_DATA_MESSAGE_UPDATE="false" -e DATABASE_SAVE_DATA_CONTACTS="false" -e DATABASE_SAVE_DATA_CHATS="false" -e CACHE_LOCAL_ENABLED="true" -e CACHE_REDIS_ENABLED="false" -e CONFIG_SESSION_PHONE_CLIENT="Mac OS" -e CONFIG_SESSION_PHONE_NAME="Chrome" evoapicloud/evolution-api:v2.3.7
 ```
 
 Shape choice (smooth WhatsApp, $0): the ARM VM.Standard.A1.Flex (up to 4 OCPU +

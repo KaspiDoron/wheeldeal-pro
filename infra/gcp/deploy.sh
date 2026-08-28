@@ -22,7 +22,7 @@ set -euo pipefail
 : "${PROJECT:?set PROJECT}"; : "${OWNER_EMAIL:?set OWNER_EMAIL}"
 REGION="${REGION:-us-central1}"; ZONE="${ZONE:-us-central1-a}"
 NAME="${NAME:-wheeldeal-vm}"; IP_NAME="${IP_NAME:-wheeldeal-ip}"
-REPO="${REPO:-KaspiDoron/Rental-App}"
+REPO="${REPO:-KaspiDoron/wheeldeal-pro}"
 BRANCH="${BRANCH:-master}"
 ENV_SECRET="${ENV_SECRET:-wheeldeal-env}"; REPO_SECRET="${REPO_SECRET:-}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
