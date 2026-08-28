@@ -675,6 +675,7 @@ export const I18N_CATALOG: string[] = [
   "Sending your feedback",
   "Sending...",
   "Sent",
+  "Reply received",
   "Sent - reply lands here",
   "Sent from inside the app. When the shop answers, the agent reads it and the price appears here automatically.",
   "Sent from the app",

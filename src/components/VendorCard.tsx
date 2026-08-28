@@ -1077,9 +1077,12 @@ function VendorCardInner({
                 disabled={!waConnected || rfqState === "sending" || askDone || queuedActive}
                 aria-disabled={!waConnected || rfqState === "sending" || askDone || queuedActive}
                 className={`btn w-full rounded-2xl py-2.5 text-[13px] font-extrabold ${
-                  queuedActive
-                    ? // Queued is a STATUS, not a call to action: a muted,
-                      // clearly non-interactive chip, never the green primary.
+                  (queuedActive || askDone) && rfqState !== "sending"
+                    ? // Queued AND "sent, waiting for a reply" are both STATUSES,
+                      // not calls to action: a muted, clearly non-interactive
+                      // chip, never the green primary. "Sent - reply lands here"
+                      // in the green primary invited taps on an element that
+                      // does nothing (the green-button trap).
                       "cursor-default bg-card2 text-soft disabled:opacity-100"
                     : `text-white disabled:opacity-60 ${
                         waConnected ? "bg-savings hover:brightness-95" : "bg-faint"
@@ -1094,7 +1097,10 @@ function VendorCardInner({
                   // and the reason is the guard's real one, never a guess.
                   `🕘 ${t(queueReasonLabel(vendor.queuedReason))}`
                 ) : askDone ? (
-                  `✓ ${t("Sent - reply lands here")}`
+                  // A reply has ALREADY landed once lastInboundAt is set - the
+                  // "reply lands here" promise is stale then, and the card is
+                  // showing the reply above. Say what is true.
+                  vendor.lastInboundAt ? t("Reply received") : t("Sent - reply lands here")
                 ) : waConnected ? (
                   t("Ask for price")
                 ) : (

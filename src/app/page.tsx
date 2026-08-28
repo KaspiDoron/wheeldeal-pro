@@ -1259,6 +1259,12 @@ export default function Home() {
       const canAdvance = (cur: string | undefined, target: string) =>
         cur !== "declined" &&
         cur !== "no-contact" &&
+        // "Out of stock" is terminal for the activity poll: an inbound row exists
+        // (that is how it went out of stock), so the poll would otherwise re-bump
+        // it to "negotiating" every ~6s while the replies poll pushed it back -
+        // the amber<->red flap the traveller saw. Only an explicit unavailable:
+        // false reply (handled in the replies poll) may revive it.
+        cur !== "out-of-stock" &&
         // A "no-response" card (we waited, nothing came) must not be rewound to
         // "awaiting-response" by the mere existence of its RFQ row - only a real
         // reply (active/offer) revives it.
@@ -1812,7 +1818,15 @@ export default function Home() {
   const waiting =
     vendors.some(
       (v) =>
-        ["sending", "rfq-sent", "awaiting-response", "negotiating"].includes(v.stage ?? "") ||
+        // "counter-offer" is the stage a shop enters right after the agent
+        // counters - reply polling MUST stay alive for the shop's response, and
+        // this poll is also the outbox + graph-wakeup drain. Omitting it stalled
+        // a hunt where every shop had been countered. "out-of-stock" keeps the
+        // restock-clear path (in the replies poll) running so the card can
+        // rejoin the live flow on its own.
+        ["sending", "rfq-sent", "awaiting-response", "negotiating", "counter-offer", "out-of-stock"].includes(
+          v.stage ?? ""
+        ) ||
         (v.stage === "offer-received" && v.offer && v.offer.presentable !== true)
     ) ||
     // Keep the reply loop (which also drives inbound recovery + the outbox drain)
