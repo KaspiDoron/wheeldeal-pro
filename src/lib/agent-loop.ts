@@ -2084,11 +2084,30 @@ export async function processVendorReply(opts: {
     // after the turn (never on the reply path), and if it is close enough,
     // park a choice for the traveller; the policy then holds the thread silent
     // instead of closing it.
-    if (extraction?.matchesSpec === false && ctx.sender && ctx.vendorId) {
+    // TRIGGER ON THE UNION, not on matchesSpec alone (owner problem #6). The old
+    // gate only fired when the extractor had ALREADY set matchesSpec=false - i.e.
+    // when a DIFFERENT CLASS word or an explicit cc mismatch appeared. The common
+    // phrasing "no Click today, only Nmax, 300 per day" has 'nmax' in the scooter
+    // vocabulary and no cc token, so classMatch was true, matchesSpec was true,
+    // and the substitution read never ran: the 300 landed as the requested
+    // vehicle's price. Run the read whenever a substitution is plausible, then
+    // let the LLM's own "a different vehicle was offered" judgement (read.offered)
+    // drive wrongVehicle - decideSubstitution still gates on closeness/confidence,
+    // so a genuine same-vehicle reply is a no-op.
+    const substitutionHint =
+      /\b(?:no|dont|don'?t|out of|sold out|instead|only have|only got|we have|i have|but (?:i|we)|another|other|different|alternative)\b/i.test(
+        opts.text ?? ""
+      );
+    const assessmentSuspect =
+      extraction?.vehicleAssessment != null && extraction.vehicleAssessment.status !== "confirmed";
+    const substitutionSuspected =
+      extraction?.matchesSpec === false || assessmentSuspect || substitutionHint;
+    if (substitutionSuspected && ctx.sender && ctx.vendorId) {
       const email = ctx.sender;
       const vendorId = ctx.vendorId;
       const inboundText = opts.text ?? "";
       const threadKey = turnInput.event.threadKey;
+      const assessmentWrong = extraction?.vehicleAssessment?.status === "wrong-vehicle";
       await finishBeforeResponse("substitution-offer", async () => {
         const { readAlternativeOffer } = await import("./semantic/classifiers");
         const { decideSubstitution } = await import("./vehicle/substitution");
@@ -2097,8 +2116,14 @@ export async function processVendorReply(opts: {
           (rfq?.engineSizeCc ? ` around ${rfq.engineSizeCc}cc` : "") +
           (rfq?.transmission && rfq.transmission !== "any" ? `, ${rfq.transmission}` : "");
         const read = await readAlternativeOffer(inboundText, context).catch(() => null);
+        // The shop genuinely offered a DIFFERENT vehicle when: the extractor
+        // flagged a class/cc mismatch, the assessment says wrong-vehicle, OR the
+        // classifier read a distinct vehicle offer. Any of these makes it a real
+        // substitution rather than a same-vehicle quote.
+        const wrongVehicle =
+          extraction?.matchesSpec === false || assessmentWrong || Boolean(read?.value?.offered);
         const decision = decideSubstitution({
-          wrongVehicle: true,
+          wrongVehicle,
           alternative: read?.value ?? null,
           currency: cur,
           now: Date.now(),

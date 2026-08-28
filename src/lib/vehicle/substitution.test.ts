@@ -191,9 +191,17 @@ describe("the pause is real, not just a data field", () => {
     expect(live).toMatch(/Date\.now\(\) - stored\.at < CHOICE_TTL_MS/);
   });
 
-  it("the read is off the reply path and only fires on a mismatch", () => {
+  it("the read is off the reply path and fires on a substitution SUSPICION (union), not matchesSpec alone", () => {
     const loop = readCode("src/lib/agent-loop.ts");
-    expect(loop).toMatch(/if \(extraction\?\.matchesSpec === false && ctx\.sender && ctx\.vendorId\)/);
+    // Owner problem #6: matchesSpec alone missed "no Click, only Nmax" (both
+    // scooters). The gate is now the union of matchesSpec===false, an unconfirmed
+    // assessment, and a substitution hint in the reply.
+    expect(loop).toMatch(/substitutionSuspected =\s*[\s\S]{0,120}?extraction\?\.matchesSpec === false/);
+    expect(loop).toMatch(/if \(substitutionSuspected && ctx\.sender && ctx\.vendorId\)/);
+    // wrongVehicle is now DERIVED (from the class mismatch, the assessment, or
+    // the classifier's own "a different vehicle was offered"), never hardcoded.
+    expect(loop).toMatch(/const wrongVehicle =/);
+    expect(loop).not.toMatch(/wrongVehicle: true,/);
     expect(loop).toMatch(/finishBeforeResponse\("substitution-offer"/);
   });
 });
