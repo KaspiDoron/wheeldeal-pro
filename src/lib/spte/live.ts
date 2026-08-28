@@ -710,10 +710,14 @@ async function persistThreadOutcome(args: {
   delivered?: SpteLiveResult["delivered"];
   /** W4.6 - the thread's language decision after this turn. */
   language?: ThreadLanguage;
+  /** The move this turn composed - "present" flips fields.presented so the
+   *  funnel phase can reach "presented"/"complete". */
+  move?: string;
 }): Promise<void> {
-  const { input, io, prior, digest, verified, delivered, language } = args;
+  const { input, io, prior, digest, verified, delivered, language, move } = args;
   try {
-    const { newThreadState, derivePhase } = await import("../graph/state");
+    const { newThreadState, derivePhase, depositKnown, fulfillmentKnown } =
+      await import("../graph/state");
     const base =
       prior ??
       newThreadState({
@@ -724,6 +728,64 @@ async function persistThreadOutcome(args: {
         toNumber: input.event.toDigits,
       });
     const fields = { ...base.fields };
+    // PROJECT THE DEAL-TERM FIELDS, so the funnel phase can leave "negotiating".
+    //
+    // `derivePhase` reads depositType/depositNote, fulfillment, rounds and
+    // presented off `fields` - but the ONLY writer of those was the graph
+    // engine's `applyExtractionToState`, which the SPTE route makes unreachable
+    // on an ordinary turn. So on the live engine every thread's phase was
+    // mechanically pinned at "opening"/"negotiating" no matter how much the shop
+    // had told us: the exact "stuck in negotiating" the owner reported. We
+    // project the deal-term fields HERE (declined/price/tone stay owned by the
+    // careful SPTE reads below - this is not a wholesale re-run of the graph
+    // extraction). A fact stated on THIS turn comes from the extraction; a fact
+    // stated on an EARLIER turn survives via the durable comprehension.
+    const ex = input.extraction;
+    if (ex?.depositType) {
+      fields.depositType = ex.depositType;
+      if (typeof ex.depositAmount === "number") fields.depositAmount = ex.depositAmount;
+      fields.depositCurrency = ex.depositCurrency ?? fields.currency;
+    }
+    if (ex?.deposit) fields.depositNote = ex.deposit;
+    if (ex?.pickupOffered === true) {
+      fields.pickupOffered = true;
+      if (!fields.fulfillment) fields.fulfillment = "pickup";
+    }
+    if (ex?.delivers === true) fields.fulfillment = "delivery";
+    else if (ex?.onShopOnly === true && fields.fulfillment !== "delivery") fields.fulfillment = "on-shop";
+    if (typeof ex?.deliveryFee === "number") fields.deliveryFee = ex.deliveryFee;
+    // The durable comprehension carries deposit/fulfillment facts the shop stated
+    // on EARLIER turns (this turn's extraction may be empty). OR them in so a
+    // fact once learned survives a quiet turn and keeps the phase advanced.
+    if (digest.depositKnown && !depositKnown(fields)) {
+      const kind = digest.comprehension?.depositKind;
+      fields.depositType =
+        kind === "cash" || kind === "cash-or-document"
+          ? "cash"
+          : kind === "document"
+            ? "passport"
+            : kind === "card"
+              ? "other"
+              : kind === "none"
+                ? "none"
+                : fields.depositType;
+      if (!fields.depositType) fields.depositNote = fields.depositNote ?? "stated";
+    }
+    if (digest.fulfillmentKnown && !fulfillmentKnown(fields)) {
+      const mode = digest.comprehension?.handoverMode;
+      fields.fulfillment =
+        mode === "delivery" || mode === "both"
+          ? "delivery"
+          : mode === "pickup"
+            ? "pickup"
+            : "on-shop";
+    }
+    // Round count and firm count are the model's durable read; keep the higher of
+    // the two sources so a projection can never walk them backwards.
+    fields.rounds = Math.max(fields.rounds ?? 0, digest.round ?? 0);
+    fields.firmCount = Math.max(fields.firmCount ?? 0, digest.firmCount ?? 0);
+    // A deal the agent PRESENTED to the traveller is past negotiation.
+    if (move === "present") fields.presented = true;
     fields.digest = persistableDigest(digest);
     // The vehicle this thread negotiates (owner report 6 C4): the thread key
     // is user:number with no vehicle dimension, so the sessionTable's rival
@@ -1164,6 +1226,7 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
     digest: outcome.digest,
     verified: tc.inbound.verified,
     delivered,
+    move: outcome.move,
     // W4.6: the language SWITCH is durable. Persisted whenever the thread has a
     // decision at all (not only when it changed), so a row written before this
     // existed adopts the hunt's setting once and stops re-deriving it.
