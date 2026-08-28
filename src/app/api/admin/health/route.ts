@@ -29,11 +29,19 @@ const timed = async <T>(fn: () => Promise<T>, ms = 8000): Promise<{ out: T | nul
   }
 };
 
-export async function GET() {
+export async function GET(req: Request) {
   const session = await requireManagement();
   if (!session) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
-  const checks: Promise<ServiceHealth>[] = [
+  // ?probes=cached: skip the LIVE service sweep (a real AI completion, five
+  // billed Google Maps calls, an SMTP AUTH, a PayPal OAuth and a per-host
+  // Evolution ping) and return only the DB-derived vitals. The Engine tab polls
+  // this every 10 min while open, so firing the billed sweep on that cadence was
+  // a standing money + Supabase-egress leak. The dedicated Health panel (and the
+  // "run live checks" button) call this with no param for the full sweep.
+  const cachedOnly = new URL(req.url).searchParams.get("probes") === "cached";
+
+  const checks: Promise<ServiceHealth>[] = cachedOnly ? [] : [
     // Supabase - the durable store everything leans on.
     (async (): Promise<ServiceHealth> => {
       const { supabaseDiagnostics } = await import("@/lib/runtime-config");
