@@ -843,6 +843,19 @@ export async function processVendorReply(opts: {
    *  Filled by the menu block below and written onto the offers row. */
   let priceBasisDays: number | undefined;
 
+  // THE LOCAL CURRENCY OF RECORD, resolved ONCE and NEVER defaulted to USD here.
+  // The old chain read `currencyForRegion(ctx.region)`, a free-text regex that
+  // returns undefined for a region with no country token ("Ao Nang", "Krabi"),
+  // and every site then fell back to USD - so a +66 shop's bare "250 per day"
+  // was stored as $250/day, the trust-killer the owner reported. The shop's
+  // phone prefix is a far more reliable signal and it was never consulted:
+  // resolve region -> shop-prefix country, and only leave it undefined (not USD)
+  // when truly nothing is known.
+  const { countryForShop: _countryForShop } = await import("./copy/region");
+  const localCur =
+    currencyForRegion(ctx.region || undefined) ??
+    currencyForRegion(_countryForShop(from) || undefined);
+
   // DETERMINISTIC BACKSTOP (the "3 of 4 offers vanished" fix): the LLM
   // extractor can miss/fail (quota, odd phrasing) - but a price a human can
   // read in the text must NEVER be dropped. extractRentalDailyPrice reads the
@@ -854,7 +867,7 @@ export async function processVendorReply(opts: {
     const det = extractRentalDailyPrice(extractText, {
       vehicleClass: rfq.vehicleClass === "car" ? "car" : rfq.vehicleClass,
       durationDays: rfq.durationDays,
-      localCurrency: currencyForRegion(ctx.region || undefined) ?? undefined,
+      localCurrency: localCur ?? undefined,
       engineSizeCc: rfq.engineSizeCc,
     });
     if (det && det.classMatch !== false) {
@@ -885,7 +898,7 @@ export async function processVendorReply(opts: {
       const det = extractRentalDailyPrice(extractText, {
         vehicleClass: rfq.vehicleClass === "car" ? "car" : rfq.vehicleClass,
         durationDays: rfq.durationDays,
-        localCurrency: currencyForRegion(ctx.region || undefined) ?? undefined,
+        localCurrency: localCur ?? undefined,
         engineSizeCc: rfq.engineSizeCc,
       });
       const dur = rfq.durationDays;
@@ -954,7 +967,7 @@ export async function processVendorReply(opts: {
   if (extractText) {
     const { ladderRateFor } = await import("./wa/rate-ladder");
     const board = ladderRateFor(extractText, rfq.durationDays, {
-      localCurrency: currencyForRegion(ctx.region || undefined) ?? undefined,
+      localCurrency: localCur ?? undefined,
     });
     if (board && board.pricePerDay > 0) {
       usablePrice = board.pricePerDay;
@@ -1002,7 +1015,7 @@ export async function processVendorReply(opts: {
     const quoted = extractQuotedPrices(extractText, {
       vehicleClass: rfq.vehicleClass === "car" ? "car" : rfq.vehicleClass,
       durationDays: rfq.durationDays,
-      localCurrency: currencyForRegion(ctx.region || undefined) ?? undefined,
+      localCurrency: localCur ?? undefined,
       engineSizeCc: rfq.engineSizeCc,
     });
     const candidates = quoted.allOffers.map((h) => ({
@@ -1162,12 +1175,11 @@ export async function processVendorReply(opts: {
   // the shop actually typed it - a photo-only reply or a mis-read token can
   // never turn a Thai quote into ringgit ("RM 300/day" on a Krabi thread).
   const { reconcileCurrency } = await import("./wa/price-extract");
-  const cur =
-    reconcileCurrency(
-      extraction.currency,
-      currencyForRegion(ctx.region || undefined),
-      extractText || ""
-    ) || "USD";
+  // Resolve against the shop-prefix-aware localCur, not the region alone. USD
+  // is only the ABSOLUTE last resort - when the region, the shop's prefix and
+  // the reply all fail to name a currency - so a Thai shop's bare number is
+  // stored as THB, not dollars.
+  const cur = reconcileCurrency(extraction.currency, localCur, extractText || "") || localCur || "USD";
 
   // THE SHOP'S MENU. A reply naming more than one price is a CHOICE, not a
   // quote: "some models 200 and some new 250/day". Collapsing that to one number
