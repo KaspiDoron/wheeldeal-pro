@@ -1289,6 +1289,35 @@ export async function processVendorReply(opts: {
       }
     }
   }
+  // UNGROUNDED-PRICE RAIL (owner problem #4: hallucinated prices on automated /
+  // no-price template replies). The model can return found=true with a number
+  // that appears NOWHERE - not in the shop's message, not as a total, not in a
+  // photo, and not as a number we proposed and the shop agreed to. There is no
+  // honest source for such a price, so we must never show it: prefer "unknown"
+  // over inventing information. Deliberately conservative - it only fires when
+  // the price is groundless on EVERY source, so a real quote is never dropped:
+  //   - a photo/board was read      -> the price can come from the image
+  //   - the price is DERIVED        -> the total is in the text (priceBasisDays)
+  //   - the number (or number x days) is verbatim in the shop's reply
+  //   - the number is in the recent conversation (a proposal the shop agreed to)
+  if (usablePrice && extractText && images.length === 0 && priceBasisDays === undefined) {
+    const { isPriceGrounded } = await import("./wa/price-grounding");
+    if (!isPriceGrounded(usablePrice, rfq.durationDays, [extractText, history])) {
+      await sbInsert("agent_events", [
+        {
+          kind: "price-ungrounded",
+          user_email: ctx.sender ?? null,
+          to_number: from,
+          vendor_id: ctx.vendorId ?? "",
+          vendor_name: ctx.vendorName ?? "",
+          detail: `Model read ${usablePrice} ${extraction.currency ?? "?"} but it is nowhere in the reply, no photo, no agreement - dropped rather than shown. "${(extractText ?? "").slice(0, 160)}"`,
+        },
+      ]).catch(() => {});
+      usablePrice = undefined;
+      extraction.found = false;
+      extraction.pricePerDay = undefined;
+    }
+  }
   // CREDIBILITY CLAMP (the Bargained-0 kill): a "floor" at/above the shop's
   // own live quote is bad data, not a reason to go mute - it used to flip
   // priceAtOrBelowFloor true and make the bargain edge illegal for EVERY shop
