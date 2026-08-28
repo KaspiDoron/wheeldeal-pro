@@ -1,4 +1,5 @@
 import { outboxToKeyPatch } from "../wa/outbox-columns";
+import type { SendResult } from "../wa/transport";
 import { finishBeforeResponse } from "../after";
 // The digraph execution engine - one serverless invocation per event.
 //
@@ -1564,7 +1565,7 @@ export type LiveSend = (
    * batch starve its own negotiation.
    */
   lane?: "intro" | "reply"
-) => Promise<{ ok: boolean; error?: string; unconfirmed?: boolean }>;
+) => Promise<SendResult>;
 
 export function liveGraphIO(send: LiveSend): GraphIO {
   return {
@@ -2031,13 +2032,17 @@ export function liveGraphIO(send: LiveSend): GraphIO {
       // treated exactly like a failed send: release the idempotency claim and
       // re-queue. Without this the claim leaked and the identical reply was then
       // refused as a `duplicate` for the whole claim-GC horizon (audit DEFECT 4).
-      let result: { ok: boolean; error?: string; unconfirmed?: boolean };
+      let result: SendResult;
       try {
         result = await send(senderKey, toNumber, verdict.text);
       } catch (e) {
         result = { ok: false, error: e instanceof Error ? e.message : "send threw" };
       }
-      if (!result.ok) await releaseSendClaim(senderKey, toNumber, verdict.text).catch(() => {});
+      // Keep the claim on an AMBIGUOUS failure - it may have landed, and
+      // releasing it lets a duplicate follow (OR11 H2.2, now honoured on this
+      // path too, not only in the drain).
+      if (!result.ok && !result.ambiguous)
+        await releaseSendClaim(senderKey, toNumber, verdict.text).catch(() => {});
       if (result.ok) {
         await afterSend(senderKey, toNumber);
         await sbInsert("whatsapp_messages", [

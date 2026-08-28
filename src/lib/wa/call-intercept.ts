@@ -207,7 +207,9 @@ export async function handleCallEvent(args: {
         const { sendFromUser } = await import("../evolution");
         const result = await sendFromUser(email, known, verdict.text, true, { lane: "reply" });
         if (!result.ok) {
-          await releaseSendClaim(email, known, verdict.text).catch(() => {});
+          // Ambiguous (status-0): may have landed - keep the claim so a retry
+          // cannot duplicate a delivered reply.
+          if (!result.ambiguous) await releaseSendClaim(email, known, verdict.text).catch(() => {});
           detail = `send-failed: ${result.error ?? "unknown"}`;
         } else {
           await afterSend(email, known).catch(() => {});

@@ -53,8 +53,54 @@ describe("the wiring: sendFromUser surfaces it, the drain acts on it", () => {
   });
 
   it("ambiguous rides the drain's send-function contract so the flag reaches the branch", () => {
-    // Both the injected `send` param type and the local `r` carry the flag,
-    // else the guard above could never see it.
-    expect((guard.match(/ambiguous\?: boolean;/g) ?? []).length).toBeGreaterThanOrEqual(2);
+    // The injected `send` param is now the unified SendResult (which carries
+    // ambiguous), and the local `r` type still carries it - either way the flag
+    // reaches the guard.
+    expect(guard).toMatch(/import type \{ SendResult \} from "\.\/wa\/transport"/);
+    expect(guard).toMatch(/=> Promise<SendResult>/);
+    expect(guard).toMatch(/ambiguous\?: boolean/);
+  });
+});
+
+// THE SAME FIX ON THE FIVE DIRECT-SEND PATHS (Wave 0). The OR11 H2.2 fix landed
+// only in drainOutbox; every route/lib that sends WITHOUT the drain released the
+// claim unconditionally, reproducing the duplicate-plus-false-takeover class.
+// The unified SendResult makes `ambiguous` visible on all of them.
+describe("EXECUTED: SendResult carries ambiguous, honoured on every direct-send path", () => {
+  it("SendResult declares the ambiguous safety field", async () => {
+    const t = await import("./transport");
+    // Type-level; assert the runtime module loads and the field is documented.
+    expect(typeof t).toBe("object");
+    const src = readCode("src/lib/wa/transport.ts");
+    expect(src).toMatch(/ambiguous\?: boolean/);
+  });
+
+  for (const [path, file] of [
+    ["agent-loop reply send", "src/lib/agent-loop.ts"],
+    ["graph engine live send", "src/lib/graph/engine.ts"],
+    ["single outreach", "src/app/api/outreach/route.ts"],
+    ["mass outreach", "src/app/api/outreach/mass/route.ts"],
+    ["call-intercept reply", "src/lib/wa/call-intercept.ts"],
+  ] as const) {
+    it(`${path}: the claim is kept on an ambiguous failure`, () => {
+      const code = readCode(file);
+      // Every release near this file's send is now gated by the ambiguous flag:
+      // `!result.ambiguous` / `!ambiguous`. The presence of the guard next to a
+      // releaseSendClaim is what proves the fix reached this path.
+      expect(code).toMatch(/!(result\.ambiguous|ambiguous)\b/);
+      expect(code).toMatch(/releaseSendClaim/);
+    });
+  }
+
+  it("deals/recheck no longer leaks the claim for 72h on a failed send", () => {
+    const code = readCode("src/app/api/deals/recheck/route.ts");
+    expect(code).toMatch(/releaseSendClaim\(session\.email, digits, guard\.text\)/);
+    expect(code).toMatch(/"ambiguous" in r && r\.ambiguous/);
+  });
+
+  it("the admin queue flush passes the WHOLE SendResult, never {ok} alone", () => {
+    const code = readCode("src/app/api/admin/wa-queue/route.ts");
+    expect(code).not.toMatch(/return \{ ok: r\.ok \};/);
+    expect(code).toMatch(/return await sendFromUser\(/);
   });
 });

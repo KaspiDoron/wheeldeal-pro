@@ -32,6 +32,7 @@ import {
   pgTimestamp,
 } from "./runtime-config";
 import { parseFlag } from "./config-flags";
+import type { SendResult } from "./wa/transport";
 import { policyRowValue } from "./wa/policy-values";
 import {
   resolveOffset,
@@ -3459,20 +3460,7 @@ export async function drainOutbox(
     // metered against one shared pool and a full batch starved its own
     // replies. Passing it is the whole fix.
     lane?: "intro" | "reply"
-  ) => Promise<{
-    ok: boolean;
-    error?: string;
-    rateLimited?: boolean;
-    /** The budget could not be READ - neither a cap nor a host fault. */
-    budgetUnreadable?: boolean;
-    /** The limiter's own wait. Present only on a cap refusal. */
-    retryAfterSeconds?: number;
-    unconfirmed?: boolean;
-    messageId?: string;
-    /** Ambiguous (status-0) failure - may have landed; do not release the
-     * idempotency claim. See sendFromUser (OR11 H2.2). */
-    ambiguous?: boolean;
-  }>,
+  ) => Promise<SendResult>,
   opts?: DrainOptions
 ): Promise<number> {
   const due = new Date().toISOString();

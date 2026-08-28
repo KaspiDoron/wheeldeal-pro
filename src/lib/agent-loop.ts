@@ -57,6 +57,7 @@ import { waDigits, numberFilter } from "./wa/phone-key";
 import { resolveThreadContext } from "./wa/thread-context";
 import type { TraceRow } from "./orchestrator";
 import type { StructuredRFQ, Vendor } from "./types";
+import type { SendResult } from "./wa/transport";
 import { digitsOnly } from "./phone";
 
 /**
@@ -118,10 +119,7 @@ interface ThreadMsg {
   wa_message_id?: string | null;
 }
 
-export type SendFn = (
-  to: string,
-  message: string
-) => Promise<{ ok: boolean; error?: string }>;
+export type SendFn = (to: string, message: string) => Promise<SendResult>;
 
 // Gracious one-time closers (varied further by the anti-ban content variator).
 // CRITICAL: these must NEVER imply a deal is accepted or a booking confirmed
@@ -2762,8 +2760,11 @@ export async function processVendorReply(opts: {
     const result = await opts.send(from, verdict.text);
     // A failed send must free the message slot or its own retry reads as a
     // duplicate of itself. The gap slot is deliberately kept - the attempt
-    // consumed the pacing window either way.
-    if (!result.ok) await releaseSendClaim(senderKey, from, verdict.text);
+    // consumed the pacing window either way. But an AMBIGUOUS failure (status-0
+    // timeout) may have LANDED, so the claim is kept: releasing it here is
+    // exactly how a duplicate followed (the OR11 H2.2 fix, landed in the drain
+    // but not on this direct-send path).
+    if (!result.ok && !result.ambiguous) await releaseSendClaim(senderKey, from, verdict.text);
     stampTurnLatency(ctx.sender, from, {
       composeMs: Date.now() - turnStartedAt,
       plannedDelayS: 0,

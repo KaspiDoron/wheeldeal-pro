@@ -74,8 +74,11 @@ export async function POST(req: Request) {
       // matters: flushing a stuck reply through the cold-intro budget is how a
       // manual rescue turns into a rate-limit refusal on the reply lane that
       // had headroom all along.
-      const r = await sendFromUser(senderKey, to, text, true, { skipJitter: true, lane });
-      return { ok: r.ok };
+      // Pass the WHOLE result through: narrowing to {ok} discarded the provider
+      // message id, the @lid chat anchor, the rate-limit signal and - the unsafe
+      // one - the `ambiguous` flag, so this admin flush was the one drain adapter
+      // that could release a claim on a status-0 send that had actually landed.
+      return await sendFromUser(senderKey, to, text, true, { skipJitter: true, lane });
     });
     return NextResponse.json({ ok: true, sent });
   }

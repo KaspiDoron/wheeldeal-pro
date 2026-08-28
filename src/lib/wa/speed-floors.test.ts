@@ -90,8 +90,12 @@ describe("every send site is claim-gated", () => {
     expect(j).toBeGreaterThan(i);
   });
 
-  it("a failed send frees its message slot so the retry is not a self-duplicate", () => {
-    expect(loop).toMatch(/if \(!result\.ok\) await releaseSendClaim\(senderKey, from, verdict\.text\)/);
+  it("a DEFINITIVE failed send frees its message slot so the retry is not a self-duplicate", () => {
+    // An ambiguous (status-0) failure keeps the claim - it may have landed, and
+    // releasing it is how a duplicate followed (OR11 H2.2, now honoured here too).
+    expect(loop).toMatch(
+      /if \(!result\.ok && !result\.ambiguous\) await releaseSendClaim\(senderKey, from, verdict\.text\)/
+    );
   });
 });
 

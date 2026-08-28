@@ -671,11 +671,13 @@ export async function POST(req: Request) {
     }
 
     let ok = false;
+    let ambiguous = false;
     let reason: string | undefined;
     let sentChatLid = "";
     if (personal) {
       const r = await sendFromUser(session.email, digits, guard.text);
       ok = r.ok;
+      ambiguous = Boolean(r.ambiguous);
       reason = r.error;
       sentChatLid = lidKey(r.chatJid);
       if (r.rateLimited) {
@@ -707,9 +709,11 @@ export async function POST(req: Request) {
           },
         },
       ]);
-    } else {
+    } else if (!ambiguous) {
       await releaseSendClaim(session.email, digits, guard.text).catch(() => {});
     }
+    // AMBIGUOUS (status-0 timeout): keep the claim - the intro may have landed,
+    // and releasing it would let the next mass run re-introduce the same shop.
     results.push({
       id: v.id,
       sent: ok,

@@ -496,6 +496,8 @@ async function handlePost(req: Request) {
     unconfirmed?: boolean;
     messageId?: string;
     chatJid?: string;
+    /** status-0 timeout - may have landed; keep the claim, never blind-retry. */
+    ambiguous?: boolean;
   } = {
     channel: "none",
     ok: false,
@@ -583,6 +585,7 @@ async function handlePost(req: Request) {
       unconfirmed: r.unconfirmed,
       messageId: r.messageId,
       chatJid: r.chatJid,
+      ambiguous: r.ambiguous,
     };
     if (r.rateLimited) {
       const { releaseSendClaim } = await import("@/lib/wa-guard");
@@ -619,13 +622,16 @@ async function handlePost(req: Request) {
   }
   if (result.ok) {
     await afterSend(session.email, digits);
-  } else {
+  } else if (!result.ambiguous) {
     // Failed send: release the idempotency claim so the user's retry tap is
     // not swallowed as a "duplicate" of the failure.
     const { releaseSendClaim } = await import("@/lib/wa-guard");
     await releaseSendClaim(session.email, digits, guardedMessage).catch(() => {});
     await releaseMove();
   }
+  // AMBIGUOUS (status-0 timeout): the message may already be on the shop's
+  // phone. Keep the idempotency claim and do NOT release the move - a retry
+  // that duplicated a delivered intro is exactly what this guards against.
 
   // TRUTH RULE: the outbound whatsapp_messages row is the record every
   // surface (thread peek, activity feed, deals dashboard, contacted counts)
