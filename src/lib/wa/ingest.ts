@@ -1429,21 +1429,40 @@ export async function processEvolutionWebhook(
   // hands it to the sender as the fourth argument. Dropping it on the floor here
   // re-billed every drained reply as a cold introduction - the same defect as
   // the inline send above, in the same file, on the same webhook invocation.
-  try {
-    const { drainOutbox } = await import("@/lib/wa-guard");
-    await drainOutbox((senderKey, to, text, lane) =>
-      sendFromUser(senderKey, to, text, true, { lane })
-    );
-  } catch {
-    /* best-effort */
-  }
-  try {
-    const { drainGraphWakeups } = await import("@/lib/graph/engine");
-    await drainGraphWakeups((senderKey, to, text) =>
-      sendFromUser(senderKey, to, text, true, { lane: "reply" })
-    );
-  } catch {
-    /* best-effort */
+  // SCOPED AND BOUNDED, like the three sibling poll routes (/api/replies,
+  // /api/activity, /api/wa/status) already are - the webhook tail was the one
+  // caller still draining FLEET-WIDE with no time budget. A burst of 7 inbound
+  // webhooks meant 7 unscoped drains, each able to run OTHER users' sends and up
+  // to 24 other users' multi-agent LLM wakeup composes, ahead of the reply we
+  // are racing to deliver - the head-of-line block behind the owner's "7 shops
+  // at once stalls everything". Scope each drain to a sender this batch actually
+  // touched (replyOnly - the cold lane is driven by the tick kick below), and
+  // bound both under a 3s race so a slow host delays only its own thread.
+  const DRAIN_BUDGET_MS = 3_000;
+  const boundedDrain = <T,>(p: Promise<T>) =>
+    Promise.race([p, new Promise((r) => setTimeout(r, DRAIN_BUDGET_MS))]);
+  for (const sender of touchedSenders) {
+    try {
+      const { drainOutbox } = await import("@/lib/wa-guard");
+      await boundedDrain(
+        drainOutbox((senderKey, to, text, lane) => sendFromUser(senderKey, to, text, true, { lane }), {
+          replyOnly: true,
+          senderKey: sender,
+        }).catch(() => 0)
+      );
+    } catch {
+      /* best-effort */
+    }
+    try {
+      const { drainGraphWakeups } = await import("@/lib/graph/engine");
+      await boundedDrain(
+        drainGraphWakeups((senderKey, to, text, lane) => sendFromUser(senderKey, to, text, true, { lane }), {
+          userEmail: sender,
+        }).catch(() => 0)
+      );
+    } catch {
+      /* best-effort */
+    }
   }
 
   // FAST COUNTER-REPLY: the agent's reply we just composed is parked ~10-40s in
