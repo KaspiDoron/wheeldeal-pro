@@ -95,6 +95,23 @@ export async function setThreadTakeover(
       raw: { sender: email, digits, kind },
     },
   ]);
+  // TELEMETRY TWIN of the marker row. The escalation KPI (kpis.ts) counts
+  // `kind=in.(human-takeover,...)` on agent_events, but the takeover was only
+  // ever written here as a whatsapp_messages marker - so escalationPct was a
+  // structurally confident 0.0% (the flattering-zero shape). The marker row
+  // above stays the AUTHORITATIVE flag; this is a second, best-effort write for
+  // the join-column surfaces (KPIs, message-path) only.
+  void sbInsert("agent_events", [
+    {
+      kind,
+      user_email: email,
+      to_number: digits,
+      vendor_name: `+${digits}`,
+      detail: on
+        ? "Traveller typed in the thread - agents stood down."
+        : "Traveller handed the thread back to the agents.",
+    },
+  ]).catch(() => {});
   boundedSet(takeoverCache(), key, { paused: on, at: Date.now() }, CACHE_CAP);
   return ok;
 }

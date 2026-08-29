@@ -990,6 +990,11 @@ export async function processEvolutionWebhook(
                   }).slice(0, 200),
                 },
               ]).catch(() => {});
+              // ...and in the vocabulary the vitals/health counters actually
+              // read (push-skipped) - push-ingest is the doctor's breadcrumb,
+              // this is the fleet metric's.
+              const { markPushSkipped } = await import("@/lib/notify/state");
+              await markPushSkipped(email, `${event.kind}: ${verdict.reason}`);
               return;
             }
             const { sendPushToUser } = await import("@/lib/push");

@@ -1172,6 +1172,48 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
     }
   }
 
+  // ---- judge enqueue (never inline - a cheap later invocation grades it) -----
+  //
+  // The graph engine has sampled every delivery into a {kind:"judge"} wakeup
+  // since the judge existed - but SPTE, the engine that actually runs, never
+  // enqueued one, so `agent_scores` was EMPTY for all real traffic and every
+  // surface built on it (Studio Scores, judge calibration, the chief-judge
+  // thread verdicts, tactic learning's realized outcomes) read a structural
+  // zero. Same shape as the graph's gate: sampled by the spec's
+  // judgeSampleRate; skip blocked/failed deliveries (nothing reached the shop
+  // to grade - queued/held WILL go out verbatim, so those are gradable); skip
+  // the farewell (the graph excludes "deal-close" for the same reason - a
+  // goodbye is not a negotiation move a rubric can score). The payload matches
+  // runJudgeJob's contract exactly: `text` is required, decisionId joins the
+  // score to this turn's trace row, nodeId/tacticId mirror what writeTrace
+  // stamped above so the review console and the compiler see one identity.
+  if (send && delivered !== "blocked" && delivered !== "failed" && outcome.move !== "farewell") {
+    const sampleRate = await getGraphSpec()
+      .then((spec) => spec.settings.judgeSampleRate)
+      // The default spec's own value (default-graph.ts): config-unreadable
+      // must not silently turn the judge off.
+      .catch(() => 1);
+    if (Math.random() < sampleRate) {
+      await io
+        .insertWakeup({
+          kind: "judge",
+          threadKey: input.event.threadKey,
+          notBefore: new Date(io.now() + 90_000).toISOString(),
+          payload: {
+            decisionId,
+            nodeId: "spte",
+            tacticId: outcome.move,
+            text: send,
+            kind: outcome.move,
+            userEmail: input.ctx.sender,
+            vendorId: input.ctx.vendorId,
+            vendorName: input.ctx.vendorName,
+          },
+        })
+        .catch(() => {});
+    }
+  }
+
   // THE THREAD REMEMBERS THIS TURN (W4.3 + W4.5).
   //
   // AFTER the send, deliberately, for two reasons. It is three Supabase round

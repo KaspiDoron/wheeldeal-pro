@@ -2064,6 +2064,24 @@ export async function processVendorReply(opts: {
   const { runThreadTurn } = await import("./engine-route");
   const routed = await runThreadTurn(turnInput, io, "inbound");
   if (routed.engine !== "none") {
+    // THE SPEED PANEL'S ONLY WRITER, on the path that actually runs. The two
+    // stampTurnLatency calls below live in the legacy orchestrator block this
+    // return skips, so the WA doctor's turn-latency panel was structurally
+    // empty for every routed (i.e. every real) turn. Outcome vocabulary maps
+    // onto the panel's three buckets: sent stays "sent", queued/held read as
+    // "parked", blocked/failed read as "send-failed"; a deliberate silent turn
+    // is not stamped - there was nothing to deliver, so it has no latency.
+    {
+      const d = routed.spte?.delivered ?? "sent";
+      if (d !== "silent") {
+        stampTurnLatency(ctx.sender, from, {
+          composeMs: Date.now() - turnStartedAt,
+          plannedDelayS: 0,
+          outcome:
+            d === "sent" ? "sent" : d === "queued" || d === "held" ? "parked" : "send-failed",
+        });
+      }
+    }
     // WHAT WE ACTUALLY DID ABOUT THE PHOTO, written next to the photo. The
     // proof panel renders this; with nothing recorded it now claims nothing.
     if (routed.spte) await recordMediaFollowUp(routed.spte.move, routed.spte.delivered);

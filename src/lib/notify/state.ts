@@ -88,3 +88,18 @@ export async function markPushSent(email: string, reason: string): Promise<void>
     { kind: "push-sent", user_email: email, vendor_id: "", vendor_name: "", detail: reason.slice(0, 200) },
   ]).catch(() => {});
 }
+
+/**
+ * Record that the significance gate DECLINED to interrupt, and why. This is the
+ * kind `ops/vitals.pushBreadcrumbs` and the health panel count - both read
+ * `push-skipped` and, until this writer existed, nothing ever wrote it, so the
+ * gate's whole decision layer was invisible (a structural zero rendering as
+ * "nothing was ever suppressed").
+ */
+export async function markPushSkipped(email: string, reason: string): Promise<void> {
+  if (!email) return;
+  const { sbInsert } = await import("../runtime-config");
+  await sbInsert("agent_events", [
+    { kind: "push-skipped", user_email: email, vendor_id: "", vendor_name: "", detail: reason.slice(0, 200) },
+  ]).catch(() => {});
+}
