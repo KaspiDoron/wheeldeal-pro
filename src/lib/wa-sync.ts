@@ -40,6 +40,22 @@ function lastSyncStore() {
  * pool for the scheduler's app-closed inbound-recovery sweep. Cheap single scan.
  */
 export async function recentActiveSenders(hours = 36, scan = 100): Promise<string[]> {
+  const emails = new Set<string>();
+  // THE ROSTER IS THE LINKED FLEET, NOT THE LOUDEST SENDERS. Deriving it only
+  // from the newest N outbound rows meant one busy traveller's sends flooded
+  // the scan and a quiet-but-linked user fell out of the recovery sweep -
+  // exactly the user whose missed replies nothing else would ever recover
+  // (they are quiet BECAUSE the webhook is missing their inbound). Every open
+  // session is a user whose shop replies can arrive at any moment.
+  const sessions = await sbSelect<{ email: string | null }>(
+    "wa_sessions",
+    "select=email&status=eq.open&limit=200"
+  ).catch(() => [] as { email: string | null }[]);
+  for (const r of sessions) {
+    if (typeof r.email === "string" && r.email.includes("@")) emails.add(r.email.toLowerCase());
+  }
+  // Top-up from recent outbound senders: covers a linked user whose session
+  // row lost its status stamp (the pre-roster behavior, kept as the net).
   const since = new Date(Date.now() - hours * 3600_000).toISOString();
   const rows = await sbSelect<{ raw: { sender?: string } | null }>(
     "whatsapp_messages",
@@ -47,7 +63,6 @@ export async function recentActiveSenders(hours = 36, scan = 100): Promise<strin
       since
     )}&order=received_at.desc&limit=${scan}`
   ).catch(() => []);
-  const emails = new Set<string>();
   for (const r of rows) {
     const s = r.raw?.sender;
     if (typeof s === "string" && s.includes("@")) emails.add(s.toLowerCase());

@@ -1994,7 +1994,26 @@ export function liveGraphIO(send: LiveSend): GraphIO {
       // shops never serialize on each other); a cold intro keeps per-sender.
       const sendKind = (meta as { kind?: string } | undefined)?.kind;
       const isReplySend = sendKind !== "rfq" && sendKind !== "custom";
-      const claim = await claimForSend(senderKey, toNumber, verdict.text, true, isReplySend);
+      let claim = await claimForSend(senderKey, toNumber, verdict.text, true, isReplySend);
+      // WAIT, DON'T RE-PARK: the lane a REPLY loses frees in seconds (the
+      // claim says exactly when), and this turn is already in-request with
+      // its own deadline - sleeping to the edge and re-claiming ONCE delivers
+      // the reply now instead of parking it 20-40s out and paying the next
+      // drain's whole pipeline. One wait, bounded to a single lane window;
+      // cold intros never wait (their minute-scale holds are the anti-ban
+      // point, not an artefact).
+      if (
+        !claim.ok &&
+        claim.kind === "pacing" &&
+        isReplySend &&
+        typeof claim.retryAtMs === "number"
+      ) {
+        const waitMs = claim.retryAtMs - Date.now();
+        if (waitMs > 0 && waitMs <= 8_000) {
+          await new Promise((res) => setTimeout(res, waitMs + 120 + Math.random() * 380));
+          claim = await claimForSend(senderKey, toNumber, verdict.text, true, isReplySend);
+        }
+      }
       if (!claim.ok) {
         if (claim.kind === "duplicate") {
           return {
@@ -2011,16 +2030,21 @@ export function liveGraphIO(send: LiveSend): GraphIO {
         const notBefore = isReplySend
           ? new Date(Date.now() + 20_000 + Math.round(Math.random() * 20_000)).toISOString()
           : jitteredHold(Date.now(), 1, 2);
-        await sbInsert("wa_outbox", [
-          {
-            sender_key: senderKey,
-            to_number: toNumber,
-            ...(await outboxToKeyPatch(toNumber)),
-            body: verdict.text,
-            not_before: notBefore,
-            meta: { ...meta, reason: claim.kind === "pacing" ? "human pacing gap" : "sync-retry" },
-          },
-        ]).catch(() => {});
+        // parkOutboxOnce, NOT a raw insert: the partial unique index rejects a
+        // second pending auto row for this (shop, kind), and the bare insert
+        // swallowed that 409 while the caller reported "queued" - a reply that
+        // then never existed anywhere. The park helper dedups against the
+        // existing row, arms the drain, and reports failure durably.
+        const { parkOutboxOnce } = await import("../wa/park");
+        await parkOutboxOnce({
+          senderKey,
+          toNumber,
+          body: verdict.text,
+          notBeforeMs: Date.parse(notBefore),
+          meta: { ...meta, reason: claim.kind === "pacing" ? "human pacing gap" : "sync-retry" },
+          // The text already went through guardOutbound's humanize pass.
+          alreadyHumanized: true,
+        }).catch(() => {});
         return {
           delivered: "queued",
           detail: claim.kind === "pacing" ? "held for human pacing" : "held - retrying sync",

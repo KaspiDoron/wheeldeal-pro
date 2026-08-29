@@ -1094,6 +1094,9 @@ create table if not exists public.wa_send_claims (
   primary key (sender_key, slot_key)
 );
 alter table public.wa_send_claims enable row level security;
+-- The GC's two ranged deletes (gcSendClaims) scan on created_at; without this
+-- index each one is a full table scan on every run.
+create index if not exists wa_send_claims_created_idx on public.wa_send_claims (created_at);
 
 -- Exact ownership scoping for the risk feed (replaces a LIKE substring
 -- filter on detail that could match across users).

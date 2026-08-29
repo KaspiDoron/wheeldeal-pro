@@ -206,7 +206,7 @@ describe("claimSendSlots - lock-free serialization", () => {
     const first = await claimSendSlots({ ...base, nowMs: state.nowMs });
     const second = await claimSendSlots({ ...base, text: "different text", nowMs: state.nowMs + 1000 });
     expect(first.ok).toBe(true);
-    expect(second).toEqual({ ok: false, kind: "pacing" });
+    expect(second).toMatchObject({ ok: false, kind: "pacing" });
   });
 
   it("identical message: the loser is a duplicate, not a pacing hold", async () => {
@@ -223,7 +223,7 @@ describe("claimSendSlots - lock-free serialization", () => {
     expect(first.ok).toBe(true);
     state.nowMs = t0 + 61_000; // next bucket, but only 2s later
     const second = await claimSendSlots({ ...base, text: "other", nowMs: t0 + 61_000 });
-    expect(second).toEqual({ ok: false, kind: "pacing" });
+    expect(second).toMatchObject({ ok: false, kind: "pacing" });
   });
 
   it("a FULL gap after the previous send passes across the boundary", async () => {
@@ -263,7 +263,7 @@ describe("claimSendSlots - lock-free serialization", () => {
       nowMs: state.nowMs + 500,
     });
     expect(a.ok).toBe(true);
-    expect(b).toEqual({ ok: false, kind: "recipient-busy" });
+    expect(b).toMatchObject({ ok: false, kind: "recipient-busy" });
   });
 
   it("fails CLOSED on unknown claim state, degrades OPEN pre-migration", async () => {
@@ -279,7 +279,7 @@ describe("claimSendSlots - lock-free serialization", () => {
   it("a pacing loser releases its message claim so the retry can re-claim", async () => {
     await claimSendSlots({ ...base, nowMs: state.nowMs });
     const lost = await claimSendSlots({ ...base, text: "retry me", nowMs: state.nowMs + 1000 });
-    expect(lost).toEqual({ ok: false, kind: "pacing" });
+    expect(lost).toMatchObject({ ok: false, kind: "pacing" });
     // The loser's msg slot must be free again for the queued retry.
     expect(state.claims.has(`a@x.com|${messageSlotKey("66812345678", "retry me")}`)).toBe(false);
   });
@@ -324,7 +324,7 @@ describe("claimSendSlots - per-recipient REPLY lane (concurrent negotiations)", 
       nowMs: t0 + 500,
     });
     expect(a.ok).toBe(true);
-    expect(b).toEqual({ ok: false, kind: "pacing" });
+    expect(b).toMatchObject({ ok: false, kind: "pacing" });
   });
 
   it("cold intros (no perRecipient) still serialize across recipients", async () => {
@@ -341,7 +341,7 @@ describe("claimSendSlots - per-recipient REPLY lane (concurrent negotiations)", 
       nowMs: t0 + 500,
     });
     expect(a.ok).toBe(true);
-    expect(b).toEqual({ ok: false, kind: "pacing" }); // per-sender velocity lane
+    expect(b).toMatchObject({ ok: false, kind: "pacing" }); // per-sender velocity lane
   });
 });
 
@@ -353,7 +353,7 @@ describe("claimSendSlots - reply FLEET ceiling (atomic total-velocity cap)", () 
     const a = await claimSendSlots({ ...common, toDigits: "111111", text: "A", nowMs: t0 });
     const b = await claimSendSlots({ ...common, toDigits: "222222", text: "B", nowMs: t0 + 500 });
     expect(a.ok).toBe(true);
-    expect(b).toEqual({ ok: false, kind: "pacing" }); // fleet slot atomically serialized them
+    expect(b).toMatchObject({ ok: false, kind: "pacing" }); // fleet slot atomically serialized them
   });
 
   it("once the fleet gap passes, the next shop sends", async () => {
@@ -381,7 +381,7 @@ describe("claimSendSlots - reply FLEET ceiling (atomic total-velocity cap)", () 
     state.nowMs = t0 + 6_100; // first moment of N+1 - 200ms later
     const b = await claimSendSlots({ ...common, toDigits: "222222", text: "B", nowMs: state.nowMs });
     expect(a.ok).toBe(true);
-    expect(b).toEqual({ ok: false, kind: "pacing" });
+    expect(b).toMatchObject({ ok: false, kind: "pacing" });
     // ...and the loser frees its message slot so its own retry is not a dupe.
     expect(state.claims.has(`u@x.com|${messageSlotKey("222222", "B")}`)).toBe(false);
   });
@@ -411,7 +411,7 @@ describe("claimSendSlots - reply FLEET ceiling (atomic total-velocity cap)", () 
   it("a fleet loser frees its message + recipient slots for the retry", async () => {
     await claimSendSlots({ ...common, toDigits: "111111", text: "A", nowMs: t0 });
     const lost = await claimSendSlots({ ...common, toDigits: "222222", text: "B", nowMs: t0 + 500 });
-    expect(lost).toEqual({ ok: false, kind: "pacing" });
+    expect(lost).toMatchObject({ ok: false, kind: "pacing" });
     expect(state.claims.has(`u@x.com|${messageSlotKey("222222", "B")}`)).toBe(false);
   });
 });

@@ -197,16 +197,27 @@ export async function checkRateLimit(
   // Unreadable now means at-limit: hold the send until the count can be
   // trusted. A table that does not exist yet stays fail-open, because a fresh
   // install has genuinely sent nothing.
+  // EXACT HEAD COUNTS, not a 300-row body read. The old read shipped up to
+  // 300 id+timestamp rows per send just to .length them - the largest single
+  // cost inside the serial drain loop - and, being UNORDERED with a limit, it
+  // silently under-counted past 300 rows/day (the cap stopped counting right
+  // when it mattered). Two count=exact HEADs transfer nothing and cannot cap.
+  // Fail direction preserved: sbCountDark answers 0 for a missing table (a
+  // fresh install has genuinely sent nothing) and null for an outage - which
+  // holds the send, exactly as before.
   const hourIso = new Date(now - 3600_000).toISOString();
-  const read = await sbSelectStrict<{ id: number; received_at: string }>(
-    "whatsapp_messages",
-    `select=id,received_at&direction=eq.outbound&to_number=not.in.(session,takeover,cancel)&raw->>sender=eq.${encodeURIComponent(
-      email
-    )}&received_at=gte.${encodeURIComponent(
-      new Date(now - 24 * 3600_000).toISOString()
-    )}${LANE_FILTER[lane]}&limit=300`
-  );
-  if ("error" in read && read.error === "unavailable") {
+  const { sbCountDark } = await import("./runtime-config");
+  const rateBase =
+    `direction=eq.outbound&to_number=not.in.(session,takeover,cancel)` +
+    `&raw->>sender=eq.${encodeURIComponent(email)}${LANE_FILTER[lane]}`;
+  const [dayCount, hourCount] = await Promise.all([
+    sbCountDark(
+      "whatsapp_messages",
+      `${rateBase}&received_at=gte.${encodeURIComponent(new Date(now - 24 * 3600_000).toISOString())}`
+    ),
+    sbCountDark("whatsapp_messages", `${rateBase}&received_at=gte.${encodeURIComponent(hourIso)}`),
+  ]);
+  if (dayCount === null || hourCount === null) {
     return {
       allowed: false,
       reason:
@@ -214,9 +225,8 @@ export async function checkRateLimit(
       waitSeconds: 120,
     };
   }
-  const rows = "rows" in read ? read.rows : [];
-  const lastHour = rows.filter((r) => r.received_at >= hourIso).length;
-  const lastDay = rows.length;
+  const lastHour = hourCount;
+  const lastDay = dayCount;
 
   const { limitFor } = await import("./usage");
   const maxHour = await limitFor(
@@ -755,7 +765,7 @@ export async function webhookDiagnostics(
       null;
   }
   const { tokenState, originMatch } = classifyRegisteredWebhook(registeredUrl, token, origin);
-  const liveState = await connectionState(email).catch(() => null);
+  const liveState = await connectionState(email, { fresh: true }).catch(() => null);
   return { instance, hosts, liveState, webhook: { expectedUrl, registeredUrl, tokenState, originMatch } };
 }
 
@@ -1652,7 +1662,7 @@ export async function connectInstance(
   // the user has connected - return that instead of wiping it (this was the
   // cause of "WhatsApp says linked but the app keeps asking to connect": a
   // re-entry into connect() deleted the fresh session).
-  const existing = await connectionState(email);
+  const existing = await connectionState(email, { fresh: true });
   if (existing === "open") {
     await markOpen(email);
     // RE-ARM the webhook even for an already-open instance: this is the only
@@ -1708,7 +1718,7 @@ export async function connectInstance(
         ? conn.data.code
         : undefined);
     // The state may have flipped to open while we polled - honor it.
-    const nowState = await connectionState(email);
+    const nowState = await connectionState(email, { fresh: true });
     if (nowState === "open") {
       await markOpen(email);
       return { ok: true, state: "open" };
@@ -1961,7 +1971,7 @@ export async function connectInstance(
     qr = qr ?? pickQr(conn.data);
   }
 
-  const state = await connectionState(email);
+  const state = await connectionState(email, { fresh: true });
   // Stamp WHEN this fresh code was minted so retries can tell live from dead
   // (the whole B1 "Invalid code" class). The stamp is the MINT moment, not
   // "now" - the connectionState round trip above already spent part of the
@@ -2495,8 +2505,31 @@ async function stateFromFetchInstances(email: string): Promise<string | null> {
   return s === "connected" ? "open" : s;
 }
 
-/** "open" = paired and ready to send. Cross-checks both Evolution endpoints. */
-export async function connectionState(email: string): Promise<string | null> {
+// A recently-confirmed OPEN socket, per email. Only the "open" verdict is
+// cached, and briefly: a send that races a just-dropped socket already has a
+// retry path (the probe was belt-and-braces), while caching a NON-open state
+// would delay recovery detection - the direction that actually hurts. Before
+// this, every drained row paid one or two live Evolution HTTP probes, the
+// second-largest per-send cost in the serial loop.
+const OPEN_STATE_TTL_MS = 45_000;
+declare global {
+  // eslint-disable-next-line no-var
+  var __wd_open_state__: Map<string, number> | undefined;
+}
+function openStateCache(): Map<string, number> {
+  return (globalThis.__wd_open_state__ ??= new Map());
+}
+
+/** "open" = paired and ready to send. Cross-checks both Evolution endpoints.
+ *  `opts.fresh` bypasses the short open-verdict cache (link/status flows). */
+export async function connectionState(
+  email: string,
+  opts?: { fresh?: boolean }
+): Promise<string | null> {
+  if (!opts?.fresh) {
+    const cachedAt = openStateCache().get(email);
+    if (cachedAt && Date.now() - cachedAt < OPEN_STATE_TTL_MS) return "open";
+  }
   const instance = instanceNameFor(email);
   const res = await evo(email, `/instance/connectionState/${instance}`);
   let state: string | null = res.ok
@@ -2510,7 +2543,12 @@ export async function connectionState(email: string): Promise<string | null> {
     if (alt === "open") state = "open";
     else if (!state && alt) state = alt;
   }
-  if (state === "open") markOpen(email).catch(() => {});
+  if (state === "open") {
+    boundedSet(openStateCache(), email, Date.now(), 2000);
+    markOpen(email).catch(() => {});
+  } else {
+    openStateCache().delete(email);
+  }
   return state;
 }
 

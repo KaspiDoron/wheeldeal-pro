@@ -451,15 +451,18 @@ localize) **inside that webhook request**.
   in `src/lib/wa/inbound-gate.ts`). Without it, `--concurrency 32` would mean
   32 simultaneous LLM chains on one 1 GB container.
 - It is a **smoother, not a limiter**: a waiter past its patience window
-  proceeds ungated, because a gate must never eat a shop's reply.
+  (50s - sized above the p95 turn, so the gate genuinely queues; the old 8s
+  window was shorter than a single 15-45s turn and expired on the FIFTH
+  concurrent turn, buying latency and no protection) proceeds ungated,
+  because a gate must never eat a shop's reply.
 - The work is **bounded, not offloaded**. It still runs inside the webhook.
 
 ### What breaks first
 | Simultaneous users | What happens |
 |---|---|
 | **100** | Fine. Replies arrive spread out. |
-| **300** | Mid-morning bursts (shops open, everyone answers at once) queue behind the gate of 4. Reply latency climbs. |
-| **500** | The gate's patience window starts being exceeded, which means chains run ungated and memory spikes. |
+| **300** | Mid-morning bursts (shops open, everyone answers at once) queue behind the gate of 4. Reply latency climbs (the queue is real now - turns wait their turn instead of running ungated). |
+| **500** | Queued waits regularly exceed the 50s patience window, chains run ungated and memory spikes. In practice bursts bind FAR earlier than this row once claimed - ~5 concurrent turns already queue. |
 
 ### What to buy / flip
 The strongest fix is not on your side of the wire. **Evolution supports

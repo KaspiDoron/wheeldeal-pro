@@ -64,7 +64,9 @@ export async function GET(req: Request) {
   // milliseconds; it is also the ONLY input the "is this linked?" gate needs.
   // The socket probe merely refines live-vs-reconnecting, so when it is slow we
   // publish the durable answer instead of making the traveller wait for it.
-  const socketProbe = connectionState(session.email).catch(() => null);
+  // fresh: the status page is the surface that must show LIVE socket truth -
+  // the short open-verdict cache exists for the send path, not for here.
+  const socketProbe = connectionState(session.email, { fresh: true }).catch(() => null);
   const [storedPaired, state] = await Promise.all([
     isLinkedForUi(session.email).catch(() => false),
     Promise.race([
@@ -110,7 +112,10 @@ export async function GET(req: Request) {
       //
       // fast=true - see the note on the ingest drain: the presence simulation
       // costs 4-12s per row and none of the anti-ban floors depend on it.
-      const DRAIN_BUDGET_MS = 8_000;
+      // 3s, matching /api/replies and /api/activity - this was the 8s the
+      // other two were explicitly lowered FROM, applied twice per poll, so a
+      // status poll could hold a Cloud Run concurrency slot for 16s.
+      const DRAIN_BUDGET_MS = 3_000;
       const bounded = <T,>(p: Promise<T>) =>
         Promise.race([p, new Promise((r) => setTimeout(r, DRAIN_BUDGET_MS))]);
       // SCOPED. The third of three sibling polls that drained GLOBALLY inside

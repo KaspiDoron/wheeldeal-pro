@@ -6,6 +6,11 @@
 
 import "server-only";
 import { getConfig, pgTimestamp } from "./runtime-config";
+
+// AI_RPM_<PROVIDER> override cache (~60s): the owner can raise a paid tier's
+// per-minute ceiling without a deploy, and the hot path pays one vault read
+// per provider per minute, not per call.
+const rpmOverrideCache = new Map<string, { v: number | null; at: number }>();
 import { reserveAiCall } from "./ai-budget";
 
 export type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
@@ -1060,7 +1065,43 @@ export async function chatDetailed(
   // fall back to their deterministic heuristic instead of making people wait.
   const deadline = Date.now() + (opts?.budgetMs ?? 38_000);
 
-  const { tryConsume } = await import("./ai-rpm");
+  const { tryConsume, DEFAULT_RPM } = await import("./ai-rpm");
+  // FLEET-WIDE RPM when REDIS_URL is set; per-instance otherwise (the exact
+  // upgrade path ai-rpm's header promised). One INCR per attempt against a
+  // per-(provider, minute) key - a fixed window, which is all the pre-429
+  // spillover needs. AI_RPM_<PROVIDER> config rows finally let the owner
+  // raise a paid tier without a deploy (cached ~60s). Any Redis hiccup
+  // degrades to the in-process bucket, never to a refusal.
+  const rpmCap = async (name: string): Promise<number | undefined> => {
+    const cached = rpmOverrideCache.get(name);
+    if (cached && Date.now() - cached.at < 60_000) return cached.v ?? DEFAULT_RPM[name];
+    let v: number | null = null;
+    try {
+      const raw = Number(await getConfig(`AI_RPM_${name.toUpperCase()}`));
+      if (Number.isFinite(raw) && raw > 0) v = Math.round(raw);
+    } catch {
+      /* no override */
+    }
+    rpmOverrideCache.set(name, { v, at: Date.now() });
+    return v ?? DEFAULT_RPM[name];
+  };
+  const tryConsumeFleet = async (name: string): Promise<boolean> => {
+    const capacity = await rpmCap(name);
+    if (!capacity) return true;
+    try {
+      const { hotStateClient } = await import("./rival-cache");
+      const r = await hotStateClient();
+      if (r) {
+        const key = `ai-rpm:${name}:${Math.floor(Date.now() / 60_000)}`;
+        const n = await r.incr(key);
+        if (n === 1) await r.expire(key, 90);
+        return n <= capacity;
+      }
+    } catch {
+      /* Redis hiccup -> the per-instance bucket below */
+    }
+    return tryConsume(name, Date.now(), capacity);
+  };
   for (let idx = 0; idx < list.length; idx++) {
     const cfg = list[idx];
     if (Date.now() > deadline) {
@@ -1072,7 +1113,7 @@ export async function chatDetailed(
     // all hammering the first one and paying a wasted round trip on its refusal.
     // The LAST rung is never skipped - better a possible 429 than no attempt at
     // all when every bucket is dry.
-    if (idx < list.length - 1 && !tryConsume(cfg.name)) {
+    if (idx < list.length - 1 && !(await tryConsumeFleet(cfg.name))) {
       errors.push(`${cfg.name}: skipped (rpm budget spent this minute)`);
       continue;
     }

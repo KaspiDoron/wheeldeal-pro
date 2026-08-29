@@ -14,8 +14,22 @@
 // upgrade path; this is the serverless-path floor.
 
 const MAX_INFLIGHT = 4;
-/** A waiter never blocks longer than this before proceeding ungated. */
-const MAX_WAIT_MS = 8_000;
+/**
+ * A waiter never blocks longer than this before proceeding ungated.
+ *
+ * SIZED TO THE WORK - AND TO THE REQUEST CEILING. A full inbound turn is
+ * 15-45s (comprehension 7s + the SPTE pass 9s + up to 10s of human pause +
+ * guard/send round trips), and the old 8s patience meant the 5th concurrent
+ * turn waited 8s for a slot that could not possibly free, then ran ungated
+ * anyway - the gate bought pure latency and zero protection, by
+ * construction. The honest maximum is bounded above by Cloud Run's
+ * `--timeout 90` (the real ceiling; maxDuration is inert on standalone
+ * Next): wait + turn must stay under it, so 20s is the most patience a 45s
+ * worst-case turn can afford. That queues a waiter behind the TAIL of a
+ * median turn (~15-25s) - real smoothing - while the proceed-ungated escape
+ * stays as the never-eat-a-reply floor for genuinely long waits.
+ */
+const MAX_WAIT_MS = 20_000;
 
 let inflight = 0;
 const waiters: Array<() => void> = [];

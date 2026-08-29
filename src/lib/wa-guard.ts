@@ -3563,11 +3563,25 @@ export async function drainOutbox(
   const isCold = (row: OutboxRow) => (row.meta as { kind?: string } | null)?.kind === "rfq";
   const rfqBySender = new Map<string, number>();
   const replySentToRecipient = new Set<string>();
-  // Modest per-invocation reply budget: the ATOMIC fleet gap slot (in
+  // Modest per-invocation reply budgets: the ATOMIC fleet gap slot (in
   // claimSendSlots) is the real velocity ceiling now, so a high budget here just
   // churns doomed claims. Frequent invocations (polls + the self-chaining tick)
   // supply the throughput; each drains a few and the fleet gap paces the total.
-  let replyBudget = 6;
+  //
+  // PER SENDER, like the cold lane's rfqBySender - the old single global
+  // counter meant one busy traveller consumed the whole fleet's reply
+  // allowance in the cron drain, and everyone else's replies waited a full
+  // cadence for a queueing artefact. A small global ceiling still bounds the
+  // invocation's total work.
+  const replyBySender = new Map<string, number>();
+  const REPLY_PER_SENDER = 3;
+  let replyGlobalBudget = 8;
+  // The wait-not-repark allowance (see the claim block below): how much of
+  // this invocation may be spent SLEEPING to a lane's bucket edge instead of
+  // re-parking. Bounded so a burst of contended replies cannot hold the
+  // request slot indefinitely; per-loss the ceiling is one lane window.
+  const REPLY_WAIT_CEILING_MS = 8_000;
+  let waitAllowanceMs = 15_000;
   for (const cand of candidates) {
     // TOO OLD TO SEND. `not_before <= now` is a floor, not a ceiling: a row
     // overdue by three days passed it exactly as well as one overdue by three
@@ -3610,7 +3624,9 @@ export async function drainOutbox(
     const rcptKey = `${cand.sender_key}|${digitsOnly(cand.to_number)}`;
     const overCap = cold
       ? (rfqBySender.get(cand.sender_key) ?? 0) >= 2
-      : replyBudget <= 0 || replySentToRecipient.has(rcptKey);
+      : replyGlobalBudget <= 0 ||
+        (replyBySender.get(cand.sender_key) ?? 0) >= REPLY_PER_SENDER ||
+        replySentToRecipient.has(rcptKey);
     if (overCap) {
       // SMOOTH the remainder so the NEXT drain doesn't instantly fire it either
       // (a slow-motion burst). Cold intros are held 2-4 min - velocity to new
@@ -3836,7 +3852,7 @@ export async function drainOutbox(
     // per-sender velocity lane the other two put it on. One row, three
     // different opinions about which budget it draws from.
     const isReplyRow = rowKind !== "rfq" && rowKind !== "custom" && rowKind !== "human-manual";
-    const claim = await claimSendSlots({
+    const claimArgs = {
       senderKey: row.sender_key,
       toDigits: row.to_number,
       text: verdict.text,
@@ -3850,7 +3866,34 @@ export async function drainOutbox(
       // the atomic ceiling that keeps the fleet a trickle, not a burst.
       perRecipient: isReplyRow,
       fleetGapSeconds: isReplyRow ? replyFleetGapSeconds(p) : undefined,
-    });
+    };
+    let claim = await claimSendSlots(claimArgs);
+    // WAIT, DON'T RE-PARK (the fairness fix that killed the penalty stack).
+    //
+    // The lanes a reply loses are measured in SECONDS - the 5s per-shop gap,
+    // the 6s fleet slot, the 8s recipient mutex - and every loss used to cost
+    // a 10-14s re-park PLUS the wait for the next drain invocation to pick the
+    // row back up. claimSendSlots now says exactly when the refusing lane
+    // frees (retryAtMs); when that edge is seconds away and this invocation's
+    // wait allowance still has room, sleeping to it and re-claiming ONCE beats
+    // re-running the entire guard pipeline later. Bounded twice: per-loss by
+    // REPLY_WAIT_CEILING_MS, per-invocation by the shared wait allowance, so
+    // one contended lane cannot stall the rest of the batch for long. Cold
+    // intros never wait - velocity to new numbers is the ban vector, and their
+    // minute-scale holds are the point.
+    if (
+      !claim.ok &&
+      claim.kind === "pacing" &&
+      isReplyRow &&
+      typeof claim.retryAtMs === "number"
+    ) {
+      const waitMs = claim.retryAtMs - Date.now();
+      if (waitMs > 0 && waitMs <= REPLY_WAIT_CEILING_MS && waitMs <= waitAllowanceMs) {
+        waitAllowanceMs -= waitMs;
+        await new Promise((res) => setTimeout(res, waitMs + 120 + Math.random() * 380));
+        claim = await claimSendSlots(claimArgs);
+      }
+    }
     if (!claim.ok) {
       if (claim.kind === "duplicate") {
         // Another invocation holds this message's idempotency slot. Usually it
@@ -3950,7 +3993,8 @@ export async function drainOutbox(
         rfqBySender.set(row.sender_key, (rfqBySender.get(row.sender_key) ?? 0) + 1);
       } else {
         replySentToRecipient.add(rcptKey);
-        replyBudget--;
+        replyBySender.set(row.sender_key, (replyBySender.get(row.sender_key) ?? 0) + 1);
+        replyGlobalBudget--;
       }
       await afterSend(row.sender_key, row.to_number);
       await sbInsert("whatsapp_messages", [

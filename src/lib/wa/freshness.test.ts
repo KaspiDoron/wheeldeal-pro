@@ -135,7 +135,9 @@ describe("the wiring", () => {
   it("the gate runs in the drain, after cancellation and BEFORE the send claim", () => {
     const cancel = guard.indexOf("isCancelled");
     const stale = guard.indexOf("if (await staleDraftDropped(row, rowKind)) continue;");
-    const claim = guard.indexOf("const claim = await claimSendSlots({");
+    // Wave 8: the claim call became re-claimable (wait-not-repark), so the
+    // args build first and the claim reads `claimSendSlots(claimArgs)`.
+    const claim = guard.indexOf("let claim = await claimSendSlots(claimArgs)");
     expect(cancel).toBeGreaterThan(0);
     expect(stale).toBeGreaterThan(cancel);
     expect(claim).toBeGreaterThan(stale);

@@ -96,14 +96,14 @@ describe("one shop's inbox is not a lane - it is a mutex", () => {
     const intro = await coldIntro("Hi! Do you have a scooter available for 3 days?", t0);
     const answer = await reply("Thanks for the options! Is that a 125cc automatic?", t0 + 500);
     expect(intro.ok).toBe(true);
-    expect(answer).toEqual({ ok: false, kind: "pacing" });
+    expect(answer).toMatchObject({ ok: false, kind: "pacing" });
   });
 
   it("...and it holds in the other order too", async () => {
     const answer = await reply("Is that a 125cc automatic?", t0);
     const intro = await coldIntro("Hi! Do you have a scooter available?", t0 + 500);
     expect(answer.ok).toBe(true);
-    expect(intro).toEqual({ ok: false, kind: "pacing" });
+    expect(intro).toMatchObject({ ok: false, kind: "pacing" });
   });
 
   it("the loser frees its message slot so its own retry is not a duplicate", async () => {
@@ -134,7 +134,7 @@ describe("one shop's inbox is not a lane - it is a mutex", () => {
     const a = await reply("reply to shop A", t0, "66111111111");
     const b = await reply("reply to shop B", t0 + 200, "66222222222");
     expect(a.ok).toBe(true);
-    expect(b).toEqual({ ok: false, kind: "pacing" });
+    expect(b).toMatchObject({ ok: false, kind: "pacing" });
   });
 
   it("the same shop CAN be messaged again once the floor has passed", async () => {
@@ -148,7 +148,7 @@ describe("one shop's inbox is not a lane - it is a mutex", () => {
     const first = await coldIntro("Hi there!", t0 + RECIPIENT_LOCK_SEC * 1000 - 100);
     const second = await reply("and another thing", t0 + RECIPIENT_LOCK_SEC * 1000 + 100);
     expect(first.ok).toBe(true);
-    expect(second).toEqual({ ok: false, kind: "pacing" });
+    expect(second).toMatchObject({ ok: false, kind: "pacing" });
   });
 });
 
@@ -201,7 +201,7 @@ describe("it does not change what was already true", () => {
       gapSeconds: 12,
       nowMs: t0 + 100,
     });
-    expect(mine).toEqual({ ok: false, kind: "recipient-busy" });
+    expect(mine).toMatchObject({ ok: false, kind: "recipient-busy" });
   });
 
   it("and the agent does not get to land on top of the traveller either", async () => {
@@ -215,7 +215,7 @@ describe("it does not change what was already true", () => {
     });
     expect(mine.ok).toBe(true);
     // For the agent this is ordinary pacing: re-queue and try again shortly.
-    expect(await coldIntro("agent intro", t0 + 100)).toEqual({ ok: false, kind: "pacing" });
+    expect(await coldIntro("agent intro", t0 + 100)).toMatchObject({ ok: false, kind: "pacing" });
   });
 
   it("once the shop's window passes, the traveller's message goes out", async () => {

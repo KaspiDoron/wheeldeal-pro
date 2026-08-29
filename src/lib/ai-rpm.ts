@@ -73,8 +73,14 @@ export function resetRpmBuckets(): void {
  * it does. `now` is injectable for tests. A provider with no known ceiling
  * always fits (returns true, consumes nothing).
  */
-export function tryConsume(provider: string, now: number = Date.now()): boolean {
-  const capacity = DEFAULT_RPM[provider];
+export function tryConsume(
+  provider: string,
+  now: number = Date.now(),
+  /** Owner override (AI_RPM_<PROVIDER>) resolved by the caller; falls back to
+   *  the published-tier defaults below. */
+  capacityOverride?: number
+): boolean {
+  const capacity = capacityOverride ?? DEFAULT_RPM[provider];
   if (!capacity) return true; // unknown ceiling -> never our place to refuse
   const prev = buckets.get(provider) ?? { tokens: capacity, updatedAt: now, capacity };
   const b = refill(prev, now);
