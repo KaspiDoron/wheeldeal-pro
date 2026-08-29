@@ -39,6 +39,10 @@ export interface KeyInfo {
    */
   testable?: boolean;
   docUrl?: string; // where to generate this key (shown when it is missing)
+  /** False for SETTINGS (flags, thresholds, model ids) - the panel renders a
+   *  readable input for those instead of a password field, because a value
+   *  typed blind into a masked box cannot be read back or corrected. */
+  secret?: boolean;
 }
 
 /**
@@ -182,29 +186,29 @@ const KEYS: {
   // tightened against real cohort data without a redeploy. The number that says
   // whether they are right is p90 time-to-unlock on Admin -> money; if that
   // exceeds a typical trip, the gate is too tight.
-  { name: "WARMUP_GATE", label: "Warm-up gate ('off' = anyone may buy immediately; default on)", scope: "billing", editable: true },
-  { name: "WARMUP_MIN_SEARCHES", label: "Warm-up: searches required (default 1)", scope: "billing", editable: true },
-  { name: "WARMUP_MIN_ENGAGED", label: "Warm-up: distinct shops reached (default 3)", scope: "billing", editable: true },
-  { name: "WARMUP_MIN_REPLIES", label: "Warm-up: shops that replied (default 1)", scope: "billing", editable: true },
+  { name: "WARMUP_GATE", label: "Warm-up gate ('off' = anyone may buy immediately; default on)", scope: "billing", editable: true, secret: false },
+  { name: "WARMUP_MIN_SEARCHES", label: "Warm-up: searches required (default 1)", scope: "billing", editable: true, secret: false },
+  { name: "WARMUP_MIN_ENGAGED", label: "Warm-up: distinct shops reached (default 3)", scope: "billing", editable: true, secret: false },
+  { name: "WARMUP_MIN_REPLIES", label: "Warm-up: shops that replied (default 1)", scope: "billing", editable: true, secret: false },
   // The holdout is a MEASUREMENT INSTRUMENT. Without a slice that can buy
   // immediately, "the gate improves conversion" is unfalsifiable forever.
   // Ships at 0 - turn it on deliberately when you want the comparison.
-  { name: "WARMUP_HOLDOUT_PCT", label: "Warm-up holdout % (0-100) - this slice may buy without warming up", scope: "billing", editable: true },
-  { name: "WARMUP_HOLDOUT_LIST", label: "Warm-up holdout: specific emails (comma or newline separated)", scope: "billing", editable: true },
-  { name: "HUMAN_TAKEOVER", label: "Human takeover detection ('off' = ignore user-typed WhatsApp messages)", scope: "messaging", editable: true },
+  { name: "WARMUP_HOLDOUT_PCT", label: "Warm-up holdout % (0-100) - this slice may buy without warming up", scope: "billing", editable: true, secret: false },
+  { name: "WARMUP_HOLDOUT_LIST", label: "Warm-up holdout: specific emails (comma or newline separated)", scope: "billing", editable: true, secret: false },
+  { name: "HUMAN_TAKEOVER", label: "Human takeover detection ('off' = ignore user-typed WhatsApp messages)", scope: "messaging", editable: true, secret: false },
   // WHICH WIRE CARRIES FIRST CONTACT (src/lib/wa/transports). Per-thread
   // stamps always outrank this; a WABA mode with no ready WABA config
   // degrades to evolution, never to dead air.
   { name: "TRANSPORT_MODE", label: "Transport mode ('evolution' default; 'waba-first' / 'waba-fallback' = company-number lead handoff for first contact)", scope: "messaging", editable: true, secret: false },
-  { name: "FAST_DISPATCH", label: "Fast dispatch ('off' = cold intros wait for shop opening hours; default on - batches fire within their 15-min window)", scope: "messaging", editable: true },
-  { name: "CANCEL_GUARD", label: "Cancellation enforcement ('off' = removed shops may be messaged again; default on)", scope: "messaging", editable: true },
+  { name: "FAST_DISPATCH", label: "Fast dispatch ('off' = cold intros wait for shop opening hours; default on - batches fire within their 15-min window)", scope: "messaging", editable: true, secret: false },
+  { name: "CANCEL_GUARD", label: "Cancellation enforcement ('off' = removed shops may be messaged again; default on)", scope: "messaging", editable: true, secret: false },
   { name: "EVOLUTION_HOSTS", label: "Evolution host pool (url|key per line)", scope: "messaging", editable: true },
-  { name: "EVOLUTION_MAX_PER_HOST", label: "Max WhatsApp users per host", scope: "messaging", editable: true },
+  { name: "EVOLUTION_MAX_PER_HOST", label: "Max WhatsApp users per host", scope: "messaging", editable: true, secret: false },
   { name: "EVOLUTION_PROXY", label: "Residential proxy URL (anti-ban - socks5://user:pass@host:port)", scope: "messaging", editable: true },
   { name: "EVOLUTION_PROXY_POOL", label: "Residential proxy POOL (DEPRECATED - use EVOLUTION_PROXY_TEMPLATE; the mod-hash pin remaps users on any pool edit)", scope: "messaging", editable: true },
   { name: "EVOLUTION_PROXY_TEMPLATE", label: "Residential gateway template - one URL with {session} (required) and {country} (optional), e.g. socks5://USER:PASS_country-{country}_session-{session}@gateway:port", scope: "messaging", editable: true },
-  { name: "EVOLUTION_PROXY_COUNTRY_DEFAULT", label: "Default exit country (two letters, e.g. th) when a lead has none", scope: "messaging", editable: true },
-  { name: "EVOLUTION_PROXY_COUNTRY_ALLOW", label: "Allowed exit countries (comma-separated two-letter codes; empty = any)", scope: "messaging", editable: true },
+  { name: "EVOLUTION_PROXY_COUNTRY_DEFAULT", label: "Default exit country (two letters, e.g. th) when a lead has none", scope: "messaging", editable: true, secret: false },
+  { name: "EVOLUTION_PROXY_COUNTRY_ALLOW", label: "Allowed exit countries (comma-separated two-letter codes; empty = any)", scope: "messaging", editable: true, secret: false },
   { name: "EVOLUTION_API_URL", label: "Evolution API URL (single-host fallback)", scope: "messaging", editable: true },
   { name: "EVOLUTION_API_KEY", label: "Evolution API Key (single-host fallback)", scope: "messaging", editable: true },
   // ---- The business-number handoff (plan Part 12) --------------------------
@@ -217,24 +221,24 @@ const KEYS: {
   // WABA_DRY_RUN ships ON: the whole pipeline renders the exact wire text and
   // sends nothing, so the template and its button can be verified without
   // spending quality rating on a rented account.
-  { name: "WABA_ENABLED", label: "Business-number handoff ('on' = our official number makes first contact; default OFF)", scope: "messaging", editable: true },
-  { name: "WABA_DRY_RUN", label: "Business-number DRY RUN ('off' = really send; default ON - renders text, sends nothing)", scope: "messaging", editable: true },
-  { name: "WABA_PROVIDER", label: "Business API provider ('meta' direct or 'reseller')", scope: "messaging", editable: true },
-  { name: "WABA_BASE_URL", label: "Business API base URL (provider host, no trailing slash)", scope: "messaging", editable: true },
+  { name: "WABA_ENABLED", label: "Business-number handoff ('on' = our official number makes first contact; default OFF)", scope: "messaging", editable: true, secret: false },
+  { name: "WABA_DRY_RUN", label: "Business-number DRY RUN ('off' = really send; default ON - renders text, sends nothing)", scope: "messaging", editable: true, secret: false },
+  { name: "WABA_PROVIDER", label: "Business API provider ('meta' direct or 'reseller')", scope: "messaging", editable: true, secret: false },
+  { name: "WABA_BASE_URL", label: "Business API base URL (provider host, no trailing slash)", scope: "messaging", editable: true, secret: false },
   { name: "WABA_API_KEY", label: "Business API key", scope: "messaging", editable: true },
   { name: "WABA_SENDER_ID", label: "Business API sender / phone-number id", scope: "messaging", editable: true },
   { name: "WABA_WEBHOOK_SECRET", label: "Business API webhook shared secret (resellers usually do not sign)", scope: "messaging", editable: true },
-  { name: "WABA_TEMPLATE_FIRST_CONTACT", label: "Approved first-contact template name", scope: "messaging", editable: true },
-  { name: "WABA_TEMPLATE_REENGAGE", label: "Approved re-engagement template name (agency quiet past 24h)", scope: "messaging", editable: true },
-  { name: "WABA_LINK_BASE", label: "Handoff link base - MUST match the approved template button URL", scope: "messaging", editable: true },
-  { name: "WABA_AGENCY_COOLDOWN_HOURS", label: "Min hours between templates to one agency (default 24 - error 131049 guard)", scope: "messaging", editable: true },
-  { name: "WABA_HOLD_TIMEOUT_MINUTES", label: "How long a lead waits for the agency to open the window (default 25)", scope: "messaging", editable: true },
-  { name: "WABA_EXPECTATION_TTL_HOURS", label: "How long a dispatched handoff authorises inbound from that agency (default 72)", scope: "messaging", editable: true },
-  { name: "WABA_DAILY_SPEND_CEILING_USD", label: "Daily spend ceiling on the official number", scope: "messaging", editable: true },
-  { name: "WABA_KILL", label: "Business-number EMERGENCY STOP ('on' = halt all first contact immediately)", scope: "messaging", editable: true },
-  { name: "WABA_QUALITY_RATING", label: "Quality rating as last reported (GREEN/YELLOW/RED) - RED pauses first contact", scope: "messaging", editable: true },
-  { name: "WABA_TIER_UNIQUE_PER_DAY", label: "Messaging tier: unique recipients per 24h (250 unverified, 1000 after verification)", scope: "messaging", editable: true },
-  { name: "WABA_TEMPLATE_COST_USD", label: "Cost per template, for the spend estimate (default 0.05)", scope: "messaging", editable: true },
+  { name: "WABA_TEMPLATE_FIRST_CONTACT", label: "Approved first-contact template name", scope: "messaging", editable: true, secret: false },
+  { name: "WABA_TEMPLATE_REENGAGE", label: "Approved re-engagement template name (agency quiet past 24h)", scope: "messaging", editable: true, secret: false },
+  { name: "WABA_LINK_BASE", label: "Handoff link base - MUST match the approved template button URL", scope: "messaging", editable: true, secret: false },
+  { name: "WABA_AGENCY_COOLDOWN_HOURS", label: "Min hours between templates to one agency (default 24 - error 131049 guard)", scope: "messaging", editable: true, secret: false },
+  { name: "WABA_HOLD_TIMEOUT_MINUTES", label: "How long a lead waits for the agency to open the window (default 25)", scope: "messaging", editable: true, secret: false },
+  { name: "WABA_EXPECTATION_TTL_HOURS", label: "How long a dispatched handoff authorises inbound from that agency (default 72)", scope: "messaging", editable: true, secret: false },
+  { name: "WABA_DAILY_SPEND_CEILING_USD", label: "Daily spend ceiling on the official number", scope: "messaging", editable: true, secret: false },
+  { name: "WABA_KILL", label: "Business-number EMERGENCY STOP ('on' = halt all first contact immediately)", scope: "messaging", editable: true, secret: false },
+  { name: "WABA_QUALITY_RATING", label: "Quality rating as last reported (GREEN/YELLOW/RED) - RED pauses first contact", scope: "messaging", editable: true, secret: false },
+  { name: "WABA_TIER_UNIQUE_PER_DAY", label: "Messaging tier: unique recipients per 24h (250 unverified, 1000 after verification)", scope: "messaging", editable: true, secret: false },
+  { name: "WABA_TEMPLATE_COST_USD", label: "Cost per template, for the spend estimate (default 0.05)", scope: "messaging", editable: true, secret: false },
   // The LEGACY Cloud sender's own switch (lib/whatsapp.ts). Deliberately NOT
   // WABA_ENABLED: rehearsing the governed handoff lane (WABA_ENABLED on,
   // WABA_DRY_RUN on) must never arm this ungoverned sender as a side effect.
@@ -258,25 +262,25 @@ const KEYS: {
   { name: "PAYPAL_PLAN_PRO", label: "PayPal Billing Plan ID - Pro", scope: "billing", editable: true },
   { name: "PAYPAL_PLAN_ULTRA", label: "PayPal Billing Plan ID - Ultra", scope: "billing", editable: true },
   { name: "PAYPAL_WEBHOOK_ID", label: "PayPal Webhook ID (verifies webhook signatures)", scope: "billing", editable: true },
-  { name: "PAYPAL_ENV", label: "PayPal environment ('live' | 'sandbox'; blank = live)", scope: "billing", editable: true },
-  { name: "ADSENSE_CLIENT", label: "Google AdSense Client (ca-pub-...)", scope: "billing", editable: true },
+  { name: "PAYPAL_ENV", label: "PayPal environment ('live' | 'sandbox'; blank = live)", scope: "billing", editable: true, secret: false },
+  { name: "ADSENSE_CLIENT", label: "Google AdSense Client (ca-pub-...)", scope: "billing", editable: true, secret: false },
   // WITHOUT THIS, NO BANNER CAN EVER FILL. The client id says whose account
   // this is; the slot id says which ad unit to serve into. AdBanner rendered
   // data-ad-slot only when a caller passed one and none ever did, so the free
   // tier reserved its ad space, showed its placeholder, and earned nothing.
-  { name: "ADSENSE_SLOT", label: "Google AdSense Ad Unit ID (numeric, from a Display unit)", scope: "billing", editable: true },
-  { name: "TWITTER_HANDLE", label: "X (Twitter) handle (@wheeldeal)", scope: "auth", editable: true },
+  { name: "ADSENSE_SLOT", label: "Google AdSense Ad Unit ID (numeric, from a Display unit)", scope: "billing", editable: true, secret: false },
+  { name: "TWITTER_HANDLE", label: "X (Twitter) handle (@wheeldeal)", scope: "auth", editable: true, secret: false },
   // The legal entity the Terms, the Privacy Policy and every indemnity clause
   // protect. It was a placeholder constant with a TODO on it, so registering a
   // company meant a code change - the one value in the legal text that names
   // WHO is protected, and the only one that could not be set.
-  { name: "OPERATOR_NAME", label: "Legal entity name in the Terms (e.g. 'WheelDeal Ltd.')", scope: "auth", editable: true },
+  { name: "OPERATOR_NAME", label: "Legal entity name in the Terms (e.g. 'WheelDeal Ltd.')", scope: "auth", editable: true, secret: false },
   // Will's ACTING half. "off" keeps every answer (status, why, compare, help)
   // and turns his hands-on commands into directions to the real control - for
   // when part of the action path is mid-rebuild and a confident "Done" that
   // changes nothing would be worse than a refusal.
-  { name: "WILL_ACTIONS", label: "Will can operate the app ('off' = guidance only, answers still work)", scope: "auth", editable: true },
-  { name: "APP_DOMAIN", label: "Public app domain (https://... - drives share links, SEO & sender identity)", scope: "auth", editable: true },
+  { name: "WILL_ACTIONS", label: "Will can operate the app ('off' = guidance only, answers still work)", scope: "auth", editable: true, secret: false },
+  { name: "APP_DOMAIN", label: "Public app domain (https://... - drives share links, SEO & sender identity)", scope: "auth", editable: true, secret: false },
   // The allow-list for `x-forwarded-host`. Not a secret - it is a list of the
   // owner's own hostnames, and masking it would mean never being able to read
   // back what was set. APP_DOMAIN is always trusted; this is for the extra
@@ -285,9 +289,9 @@ const KEYS: {
   // cannot choose the URL we fetch, the webhook URL we register, or where a
   // payer lands after checkout.
   { name: "TRUSTED_HOSTS", label: "Extra hostnames this app answers on (comma-separated; APP_DOMAIN is always trusted)", scope: "auth", editable: true, secret: false },
-  { name: "TEST_MODE", label: "Test Mode ('on' = flagged testers ride Ultra free + sandbox billing + banner)", scope: "auth", editable: true },
-  { name: "SCALE_MODE", label: "Scale Mode ('on' = 3x per-user limits + relaxed polling for high load)", scope: "data", editable: true },
-  { name: "PACING_MODE", label: "Pacing Mode (WhatsApp speed vs ban-safety dial: 'fast' | 'balanced' | 'cautious'; blank = balanced)", scope: "data", editable: true },
+  { name: "TEST_MODE", label: "Test Mode ('on' = flagged testers ride Ultra free + sandbox billing + banner)", scope: "auth", editable: true, secret: false },
+  { name: "SCALE_MODE", label: "Scale Mode ('on' = 3x per-user limits + relaxed polling for high load)", scope: "data", editable: true, secret: false },
+  { name: "PACING_MODE", label: "Pacing Mode (WhatsApp speed vs ban-safety dial: 'fast' | 'balanced' | 'cautious'; blank = balanced)", scope: "data", editable: true, secret: false },
   // Not a secret - it is a duration, and masking it would mean the owner could
   // never read back what they set. `secret: false` shows the live value.
   { name: "SEARCH_SESSION_TTL_HOURS", label: "How long a search stays the live hunt, in hours (blank = 3; older hunts move to Trips)", scope: "data", editable: true, secret: false },
@@ -352,6 +356,7 @@ export async function listKeys(): Promise<KeyInfo[]> {
         configured: Boolean(v),
         masked: displayValue(v, k.secret),
         docUrl: DOC_URLS[k.name],
+        secret: k.secret !== false,
       };
     })
   );
@@ -375,6 +380,11 @@ export async function setKey(
       testable: meta.editable || TESTABLE_READ_ONLY.has(name),
       configured: Boolean(v),
       masked: displayValue(v, meta.secret),
+      // Carried on the write response too: the client replaces the whole row
+      // with this object, and dropping either field cost the row its "Get
+      // this key" link and flipped a setting's input back to a password box.
+      docUrl: DOC_URLS[name],
+      secret: meta.secret !== false,
     },
     warning: result.error,
   };

@@ -57,7 +57,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Say why - it goes in the audit." }, { status: 400 });
   }
 
-  await decideCase({
+  const recorded = await decideCase({
     email,
     action,
     minutes: Number(body.minutes) || 0,
@@ -65,6 +65,14 @@ export async function POST(req: Request) {
     note,
     by: session.email,
   });
+  if (!recorded) {
+    // The audit event is what closes the case - without it the queue shows
+    // the same case open next load, so say that now rather than then.
+    return NextResponse.json(
+      { ok: false, error: "The decision was NOT recorded - the case stays open. Retry." },
+      { status: 502 }
+    );
+  }
 
   return NextResponse.json({ ok: true });
 }

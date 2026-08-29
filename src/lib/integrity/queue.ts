@@ -134,10 +134,13 @@ export async function decideCase(opts: {
   restrictAccount: boolean;
   note: string;
   by: string;
-}): Promise<void> {
+}): Promise<boolean> {
   const email = opts.email.trim().toLowerCase();
   const { sbInsert } = await import("../runtime-config");
-  await sbInsert("agent_events", [
+  // The decision EVENT is the durable record the queue reads back - a case
+  // whose event never stored is a case still open, whatever else happened, so
+  // its boolean is the function's answer (sbInsert returns false, not throw).
+  const recorded = await sbInsert("agent_events", [
     {
       kind: DECISION_EVENT,
       user_email: email,
@@ -164,7 +167,7 @@ export async function decideCase(opts: {
       `owner review: ${String(opts.note ?? "").slice(0, 200)}`
     );
     if (opts.restrictAccount) await setUserStatus(email, "blocked");
-    return;
+    return recorded;
   }
 
   // Reject and lift both END any restriction in force. "Reject" is the owner
@@ -173,6 +176,7 @@ export async function decideCase(opts: {
   await clearCooldown(email, BLOCK_KIND);
   await setUserStatus(email, "active").catch(() => {});
   if (opts.action === "lift") await clearSignals(email);
+  return recorded;
 }
 
 /**

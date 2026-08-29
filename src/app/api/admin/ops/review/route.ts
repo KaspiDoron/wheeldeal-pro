@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireOwner } from "@/lib/session";
-import { sbSelect, sbInsert, sbInsertReturning, sbUpdate } from "@/lib/runtime-config";
+import { sbSelect, sbSelectDark, sbInsert, sbInsertReturning, sbUpdate } from "@/lib/runtime-config";
 import type { ReviewInput, ReviewVerdict, OutcomeImpact, ReviewStatus } from "@/lib/ops/types";
 import {
   compileMisreadLesson,
@@ -26,21 +26,31 @@ export async function GET(req: Request) {
   const session = await requireOwner();
   if (!session) return NextResponse.json({ error: "Owner only." }, { status: 403 });
   const url = new URL(req.url);
+  // FAIL DARK: an unreadable queue must not answer 200 with an empty list -
+  // that is how the inbox rendered a celebratory "Nothing needs review" over
+  // a dead database. `degraded` rides the payload; the panel renders a red
+  // could-not-be-read card instead of the party emoji.
   if (url.searchParams.get("queue") === "inbox") {
-    const rows = await sbSelect<Record<string, unknown>>(
+    const rows = await sbSelectDark<Record<string, unknown>>(
       "agent_reviews",
       "select=*&status=in.(open,flagged,auto_flagged)&order=created_at.desc&limit=100"
-    ).catch(() => []);
-    return NextResponse.json({ reviews: rows });
+    );
+    return NextResponse.json({
+      reviews: rows ?? [],
+      degraded: rows === null ? ["review queue"] : [],
+    });
   }
   const threadKey = url.searchParams.get("threadKey") ?? "";
   const rows = threadKey
-    ? await sbSelect<Record<string, unknown>>(
+    ? await sbSelectDark<Record<string, unknown>>(
         "agent_reviews",
         `select=*&thread_key=eq.${encodeURIComponent(threadKey)}&order=created_at.desc&limit=60`
-      ).catch(() => [])
+      )
     : [];
-  return NextResponse.json({ reviews: rows });
+  return NextResponse.json({
+    reviews: rows ?? [],
+    degraded: rows === null ? ["reviews"] : [],
+  });
 }
 
 export async function POST(req: Request) {
@@ -109,8 +119,12 @@ export async function POST(req: Request) {
   }>("agent_reviews", `select=id,bookmark,better_response&${filter}&limit=1`).catch(() => []);
 
   let reviewId = existing[0]?.id ?? null;
+  // HONEST WRITE: the review IS the owner's teaching - a rating that silently
+  // failed to store is a lesson the agents never receive, painted as "Saved -
+  // the agents learn from this." The write's boolean travels to the response.
+  let reviewWrote = false;
   if (reviewId) {
-    await sbUpdate("agent_reviews", `id=eq.${reviewId}`, patch).catch(() => false);
+    reviewWrote = await sbUpdate("agent_reviews", `id=eq.${reviewId}`, patch).catch(() => false);
   } else {
     // Denormalize vendor + chosen node/edge so priors and heatmaps never
     // need to re-join agent_traces at read time.
@@ -143,6 +157,16 @@ export async function POST(req: Request) {
       },
     ]).catch(() => []);
     reviewId = rows[0]?.id ?? null;
+    reviewWrote = reviewId != null;
+  }
+  if (!reviewWrote) {
+    // Refused BEFORE the learning side effects: a correction or bookmark
+    // hanging off a review row that does not exist would be half-learned state
+    // no later read can reconcile.
+    return NextResponse.json(
+      { ok: false, error: "The review was NOT stored - nothing was learned. Check Supabase and retry." },
+      { status: 502 }
+    );
   }
 
   // ---- learning side effects (only on TRANSITIONS, never duplicated) ----------

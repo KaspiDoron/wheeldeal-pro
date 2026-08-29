@@ -150,7 +150,16 @@ export async function POST(req: Request) {
     if (isOwner(String(email)) && action === "demote") {
       return NextResponse.json({ error: "The owner cannot be demoted." }, { status: 400 });
     }
-    await setAdmin(String(email), action === "promote");
+    // Read-back-and-verify, exactly like the status branch below: a role
+    // change whose vault write failed must answer 500, not fall through to a
+    // success payload that repaints the old role as the new one.
+    const roleWrote = await setAdmin(String(email), action === "promote");
+    if (!roleWrote) {
+      return NextResponse.json(
+        { error: "The role change did not persist. Check Supabase and retry." },
+        { status: 500 }
+      );
+    }
   } else if (status === "active" || status === "blocked") {
     if (isOwner(String(email))) {
       return NextResponse.json({ error: "The owner cannot be blocked." }, { status: 400 });

@@ -106,9 +106,9 @@ export async function roleFor(email: string): Promise<Role> {
  * issued moments after a promotion could rebuild the list from a stale snapshot
  * and hand the admin right back.
  */
-export async function setAdmin(email: string, admin: boolean): Promise<void> {
+export async function setAdmin(email: string, admin: boolean): Promise<boolean> {
   const e = email.trim().toLowerCase();
-  if (isOwner(e)) return;
+  if (isOwner(e)) return true;
   const current = await getConfigFresh("ADMIN_EMAILS_EXTRA").catch(() => ({
     error: "unavailable" as const,
   }));
@@ -120,7 +120,13 @@ export async function setAdmin(email: string, admin: boolean): Promise<void> {
   );
   if (admin) extra.add(e);
   else extra.delete(e);
-  await setConfig("ADMIN_EMAILS_EXTRA", Array.from(extra).join(","));
+  // The write's outcome IS the answer - a role change that did not persist is
+  // a role change that did not happen, and the caller must be able to say so
+  // (the status branch of admin/users already does exactly this).
+  const wrote = await setConfig("ADMIN_EMAILS_EXTRA", Array.from(extra).join(",")).catch(
+    () => ({ ok: false, persistent: false }) as { ok: boolean; persistent: boolean }
+  );
+  return wrote.ok;
 }
 
 // ---- cookie plumbing --------------------------------------------------------

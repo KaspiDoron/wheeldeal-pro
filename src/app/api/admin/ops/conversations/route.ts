@@ -1,11 +1,23 @@
 import { NextResponse } from "next/server";
 import { requireOwner } from "@/lib/session";
-import { sbSelect } from "@/lib/runtime-config";
+import { sbSelectDark } from "@/lib/runtime-config";
+import { quotedInList } from "@/lib/wa/inbound-claim";
 
 // Ops Center: every negotiation across ALL users, as a reviewable list.
 // Owner-only - this is the internal quality-improvement surface, never a
 // customer feature. Merges thread state + owner reviews + chief-judge
-// verdicts + the latest message snippet, all app-side over capped selects.
+// verdicts + the latest message snippet.
+//
+// TWO HONESTY RULES this route used to break:
+//   - FAIL DARK. Every read was the permissive sbSelect, so an outage
+//     answered 200 with an empty list and the panel rendered "No
+//     conversations yet" over a dead database. `degraded` now rides the
+//     payload and the panel renders the shared banner.
+//   - SEARCH THE DATABASE, NOT A WINDOW. q and the flagged/bookmarked
+//     filters ran app-side over the newest 120 threads, so a match older
+//     than the window was unreachable through any UI. The search is in the
+//     query now, the filters drive from agent_reviews first, and
+//     offset/hasMore page through the full set.
 
 interface ThreadRow {
   thread_key: string;
@@ -54,36 +66,85 @@ export async function GET(req: Request) {
   const onlyFlagged = url.searchParams.get("flagged") === "1";
   const onlyBookmarked = url.searchParams.get("bookmarked") === "1";
   const limit = Math.min(120, Math.max(1, Number(url.searchParams.get("limit") ?? 60)));
+  const offset = Math.max(0, Math.round(Number(url.searchParams.get("offset") ?? 0)) || 0);
 
-  const [threads, reviews, chiefs, msgs] = await Promise.all([
-    sbSelect<ThreadRow>(
-      "negotiation_threads",
-      "select=thread_key,user_email,vendor_id,vendor_name,to_number,phase,fields,updated_at&order=updated_at.desc&limit=120"
-    ).catch(() => []),
-    sbSelect<ReviewRow>(
+  const degraded: string[] = [];
+  const threadSelect =
+    "select=thread_key,user_email,vendor_id,vendor_name,to_number,phase,fields,updated_at";
+  // The search, IN the query. Sanitized to characters that cannot break the
+  // or=() grammar - a search term is a needle, not a filter expression.
+  const needle = q.replace(/[,()."'\\%*]/g, "").slice(0, 60);
+  const qFilter = needle
+    ? `&or=(vendor_name.ilike.${encodeURIComponent(`*${needle}*`)},user_email.ilike.${encodeURIComponent(
+        `*${needle}*`
+      )},phase.ilike.${encodeURIComponent(`*${needle}*`)})`
+    : "";
+
+  // Flagged/bookmarked drive from agent_reviews FIRST: the review is the fact
+  // being filtered on, so the thread window can never hide it.
+  let keyScope: string[] | null = null;
+  if (onlyFlagged || onlyBookmarked) {
+    const marks = await sbSelectDark<{ thread_key: string }>(
       "agent_reviews",
-      "select=thread_key,decision_id,rating,status,bookmark,source,auto_reason,created_at&order=created_at.desc&limit=400"
-    ).catch(() => []),
-    sbSelect<ChiefRow>(
-      "agent_scores",
-      "select=thread_key,scores,verdict,created_at&scorer=eq.chief-judge&order=created_at.desc&limit=200"
-    ).catch(() => []),
-    sbSelect<MsgRow>(
-      "whatsapp_messages",
-      "select=to_number,from_number,body,direction,received_at,raw&order=received_at.desc&limit=400"
-    ).catch(() => []),
-  ]);
+      `select=thread_key&${
+        onlyFlagged ? "status=in.(open,flagged,auto_flagged)" : "bookmark=is.true"
+      }&order=created_at.desc&limit=400`
+    );
+    if (marks === null) degraded.push("review marks");
+    keyScope = [...new Set((marks ?? []).map((r) => r.thread_key))].slice(0, 150);
+    if (keyScope.length === 0) {
+      return NextResponse.json({ threads: [], hasMore: false, nextOffset: 0, degraded });
+    }
+  }
+
+  // Page the thread read itself (limit+1 answers hasMore without a count).
+  const threads =
+    (await sbSelectDark<ThreadRow>(
+      "negotiation_threads",
+      keyScope
+        ? `${threadSelect}&thread_key=in.(${quotedInList(keyScope)})${qFilter}&order=updated_at.desc&limit=${limit + 1}&offset=${offset}`
+        : `${threadSelect}${qFilter}&order=updated_at.desc&limit=${limit + 1}&offset=${offset}`
+    )) ?? null;
+  if (threads === null) degraded.push("threads");
+  const page = (threads ?? []).slice(0, limit);
+  const hasMore = (threads ?? []).length > limit;
+
+  // The joins are scoped to the visible page - a global newest-400 slice made
+  // avgRating and the snippet drift as fleet volume grew past the cap.
+  const pageKeys = page.map((t) => t.thread_key);
+  const pageDigits = [...new Set(page.map((t) => t.to_number).filter(Boolean))];
+  const keyList = pageKeys.length ? quotedInList(pageKeys) : "";
+  const digitList = pageDigits.length ? quotedInList(pageDigits) : "";
+  const [reviews, chiefs, msgs] = pageKeys.length
+    ? await Promise.all([
+        sbSelectDark<ReviewRow>(
+          "agent_reviews",
+          `select=thread_key,decision_id,rating,status,bookmark,source,auto_reason,created_at&thread_key=in.(${keyList})&order=created_at.desc&limit=400`
+        ),
+        sbSelectDark<ChiefRow>(
+          "agent_scores",
+          `select=thread_key,scores,verdict,created_at&scorer=eq.chief-judge&thread_key=in.(${keyList})&order=created_at.desc&limit=200`
+        ),
+        sbSelectDark<MsgRow>(
+          "whatsapp_messages",
+          `select=to_number,from_number,body,direction,received_at,raw&or=(to_number.in.(${digitList}),from_number.in.(${digitList}))&order=received_at.desc&limit=400`
+        ),
+      ])
+    : [[], [], []];
+  if (reviews === null) degraded.push("reviews");
+  if (chiefs === null) degraded.push("judge verdicts");
+  if (msgs === null) degraded.push("message snippets");
 
   // Newest chief verdict per thread.
   const chiefBy = new Map<string, ChiefRow>();
-  for (const c of chiefs) if (!chiefBy.has(c.thread_key)) chiefBy.set(c.thread_key, c);
+  for (const c of chiefs ?? []) if (!chiefBy.has(c.thread_key)) chiefBy.set(c.thread_key, c);
 
   // Review aggregate per thread.
   const revBy = new Map<
     string,
     { ratings: number[]; open: number; bookmark: boolean; autoReasons: string[]; count: number }
   >();
-  for (const r of reviews) {
+  for (const r of reviews ?? []) {
     const agg =
       revBy.get(r.thread_key) ??
       ({ ratings: [], open: 0, bookmark: false, autoReasons: [], count: 0 } as {
@@ -106,7 +167,7 @@ export async function GET(req: Request) {
   // two users on the same shop number (or a drill number) must never see each
   // other's snippets. Legacy rows without an owner stamp are dropped.
   const lastMsg = new Map<string, MsgRow>();
-  for (const m of msgs) {
+  for (const m of msgs ?? []) {
     const digits = m.direction === "inbound" ? m.from_number ?? "" : m.to_number;
     const owner = m.direction === "inbound" ? m.raw?.receiver : m.raw?.sender;
     if (!digits || !owner) continue;
@@ -114,7 +175,7 @@ export async function GET(req: Request) {
     if (!lastMsg.has(key)) lastMsg.set(key, m);
   }
 
-  const out = threads
+  const out = page
     .map((t) => {
       const f = (t.fields ?? {}) as {
         rounds?: number;
@@ -163,18 +224,22 @@ export async function GET(req: Request) {
           : null,
       };
     })
+    // The q/flag predicates live in the QUERY now (see the reads above). This
+    // residual pass only re-asserts the flagged/bookmarked semantics against
+    // the page's own scoped review read, so a stale mark cannot show a row the
+    // filter's meaning excludes.
     .filter((t) => {
-      if (onlyFlagged && t.openFlags === 0) return false;
-      if (onlyBookmarked && !t.bookmark) return false;
-      if (q) {
-        const hay = `${t.vendorName} ${t.userEmail} ${t.phase}`.toLowerCase();
-        if (!hay.includes(q)) return false;
-      }
+      if (onlyFlagged && t.openFlags === 0 && !degraded.includes("reviews")) return false;
+      if (onlyBookmarked && !t.bookmark && !degraded.includes("reviews")) return false;
       return true;
-    })
-    .slice(0, limit);
+    });
 
-  return NextResponse.json({ threads: out });
+  return NextResponse.json({
+    threads: out,
+    hasMore,
+    nextOffset: offset + page.length,
+    degraded,
+  });
 }
 
 export const maxDuration = 60;

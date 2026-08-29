@@ -57,7 +57,18 @@ export function OpsCenter() {
 
   // Opportunistic detection sweep (same piggyback pattern as outbox draining):
   // the system pre-fills the inbox with its own weakest conversations.
+  // DEBOUNCED across mounts: the panel remounts on every return to the Ops
+  // tab, and each sweep is seven selects (up to ~1,600 rows) plus inserts -
+  // tab-hopping must not multiply that. sessionStorage survives the remount;
+  // 10 minutes matches how often new weak conversations can plausibly appear.
   useEffect(() => {
+    try {
+      const last = Number(sessionStorage.getItem("wd_ops_detect_at") ?? 0);
+      if (Date.now() - last < 10 * 60_000) return;
+      sessionStorage.setItem("wd_ops_detect_at", String(Date.now()));
+    } catch {
+      /* storage unavailable - sweep anyway */
+    }
     fetch("/api/admin/ops/detect", { method: "POST" })
       .then((r) => r.json())
       .then((d) => setDetected(typeof d?.flagged === "number" ? d.flagged : null))
@@ -132,14 +143,53 @@ export function OpsCenter() {
 
 function InboxPanel({ onOpen }: { onOpen: (threadKey: string, vendorName: string) => void }) {
   const [rows, setRows] = useState<InboxRow[] | null>(null);
+  const [err, setErr] = useState(false);
 
-  useEffect(() => {
+  // TRI-STATE, not fail-green: a failed fetch used to land in `[]`, and an
+  // empty inbox renders the celebration card - so an outage read as "🎉
+  // Nothing needs review". Unknown is an error card with a retry, never a
+  // party emoji (the same conversion the Command tab already went through).
+  const load = useCallback(() => {
+    setErr(false);
+    setRows(null);
     fetch("/api/admin/ops/review?queue=inbox")
-      .then((r) => r.json())
-      .then((d) => setRows(Array.isArray(d?.reviews) ? d.reviews : []))
-      .catch(() => setRows([]));
+      .then((r) => {
+        if (!r.ok) throw new Error(String(r.status));
+        return r.json();
+      })
+      .then((d) => {
+        if (!Array.isArray(d?.reviews)) throw new Error("bad payload");
+        if (Array.isArray(d?.degraded) && d.degraded.length > 0) {
+          setErr(true);
+          setRows([]);
+          return;
+        }
+        setRows(d.reviews);
+      })
+      .catch(() => {
+        setErr(true);
+        setRows([]);
+      });
   }, []);
+  useEffect(() => {
+    load();
+  }, [load]);
 
+  if (err) {
+    return (
+      <div className="rounded-blob border-2 border-brandred/40 bg-brandred-soft p-4 text-center">
+        <p className="text-[13px] font-extrabold text-brandred">
+          The review queue could not be read - that is unknown, not empty.
+        </p>
+        <button
+          onClick={load}
+          className="btn btn-sm mt-2 rounded-xl border-2 border-brandred/40 px-3 text-[11px] font-extrabold text-brandred"
+        >
+          ↻ Retry
+        </button>
+      </div>
+    );
+  }
   if (rows === null) return <LoadingDots label="Loading the review queue" />;
   if (rows.length === 0) {
     return (
@@ -198,17 +248,46 @@ function ThreadsPanel({ onOpen }: { onOpen: (threadKey: string, vendorName: stri
   const [threads, setThreads] = useState<ThreadCard[] | null>(null);
   const [q, setQ] = useState("");
   const [filter, setFilter] = useState<"all" | "flagged" | "bookmarked">("all");
+  const [err, setErr] = useState(false);
+  const [degraded, setDegraded] = useState<string[]>([]);
+  const [hasMore, setHasMore] = useState(false);
+  const [nextOffset, setNextOffset] = useState(0);
+  const [loadingMore, setLoadingMore] = useState(false);
 
+  const query = useCallback(
+    (offset: number) => {
+      const params = new URLSearchParams();
+      if (q.trim()) params.set("q", q.trim());
+      if (filter === "flagged") params.set("flagged", "1");
+      if (filter === "bookmarked") params.set("bookmarked", "1");
+      if (offset > 0) params.set("offset", String(offset));
+      return fetch(`/api/admin/ops/conversations?${params}`).then((r) => {
+        if (!r.ok) throw new Error(String(r.status));
+        return r.json();
+      });
+    },
+    [q, filter]
+  );
+
+  // TRI-STATE: an outage renders a red retry card, never "No conversations
+  // yet" - and the search/filters run in the database now, so a match beyond
+  // the first page is one Load-more away instead of unreachable.
   const load = useCallback(() => {
-    const params = new URLSearchParams();
-    if (q.trim()) params.set("q", q.trim());
-    if (filter === "flagged") params.set("flagged", "1");
-    if (filter === "bookmarked") params.set("bookmarked", "1");
-    fetch(`/api/admin/ops/conversations?${params}`)
-      .then((r) => r.json())
-      .then((d) => setThreads(Array.isArray(d?.threads) ? d.threads : []))
-      .catch(() => setThreads([]));
-  }, [q, filter]);
+    setErr(false);
+    setThreads(null);
+    query(0)
+      .then((d) => {
+        if (!Array.isArray(d?.threads)) throw new Error("bad payload");
+        setThreads(d.threads);
+        setDegraded(Array.isArray(d?.degraded) ? d.degraded : []);
+        setHasMore(Boolean(d?.hasMore));
+        setNextOffset(Number(d?.nextOffset) || 0);
+      })
+      .catch(() => {
+        setErr(true);
+        setThreads([]);
+      });
+  }, [query]);
 
   useEffect(() => {
     const t = setTimeout(load, q ? 350 : 0);
@@ -237,8 +316,26 @@ function ThreadsPanel({ onOpen }: { onOpen: (threadKey: string, vendorName: stri
         ))}
       </div>
 
-      {threads === null && <LoadingDots label="Loading conversations" />}
-      {threads?.length === 0 && (
+      {err && (
+        <div className="rounded-blob border-2 border-brandred/40 bg-brandred-soft p-4 text-center">
+          <p className="text-[13px] font-extrabold text-brandred">
+            Conversations could not be read - that is unknown, not empty.
+          </p>
+          <button
+            onClick={load}
+            className="btn btn-sm mt-2 rounded-xl border-2 border-brandred/40 px-3 text-[11px] font-extrabold text-brandred"
+          >
+            ↻ Retry
+          </button>
+        </div>
+      )}
+      {!err && degraded.length > 0 && (
+        <div className="rounded-blob border-2 border-brandred/40 bg-brandred-soft p-3 text-[12px] font-extrabold text-brandred">
+          Could not read: {degraded.join(", ")}. Missing pieces are unknown, not zero.
+        </div>
+      )}
+      {threads === null && !err && <LoadingDots label="Loading conversations" />}
+      {!err && threads?.length === 0 && (
         <div className="surface rounded-blob p-5 text-center">
           <p className="text-[13px] font-extrabold text-strong">No conversations yet</p>
           <p className="mt-1 text-[11px] text-soft">
@@ -296,6 +393,31 @@ function ThreadsPanel({ onOpen }: { onOpen: (threadKey: string, vendorName: stri
           )}
         </button>
       ))}
+      {/* THE REST OF THEM - a conversation beyond the first page used to be
+          unreachable through any UI (the route capped at the newest 120). */}
+      {hasMore && !err && (
+        <button
+          onClick={async () => {
+            setLoadingMore(true);
+            try {
+              const d = await query(nextOffset);
+              if (Array.isArray(d?.threads)) {
+                setThreads((cur) => [...(cur ?? []), ...d.threads]);
+                setHasMore(Boolean(d?.hasMore));
+                setNextOffset(Number(d?.nextOffset) || 0);
+              }
+            } catch {
+              /* leave the button so it can simply be pressed again */
+            } finally {
+              setLoadingMore(false);
+            }
+          }}
+          disabled={loadingMore}
+          className="btn btn-sm w-full rounded-xl border-2 border-line py-2 text-[11px] font-extrabold text-soft disabled:opacity-60"
+        >
+          {loadingMore ? <LoadingDots label="Loading" /> : "Load more conversations"}
+        </button>
+      )}
     </div>
   );
 }

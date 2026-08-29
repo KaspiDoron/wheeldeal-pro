@@ -165,8 +165,10 @@ export async function saveBetaAllowlist(
 // ---------------------------------------------------------------------------
 
 export async function testModeOn(): Promise<boolean> {
-  const v = ((await getConfig("TEST_MODE")) ?? "").trim().toLowerCase();
-  return v === "on" || v === "1" || v === "true";
+  // The ONE flag dialect (config-flags): "yes"/"enabled" written by an owner
+  // mean what they meant, instead of silently meaning "off" only here.
+  const { parseFlag } = await import("./config-flags");
+  return parseFlag(await getConfig("TEST_MODE"), false);
 }
 
 /** Is this email a flagged test user WHILE test mode is on? */

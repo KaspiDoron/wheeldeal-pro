@@ -82,6 +82,14 @@ interface Transcript {
     created_at: string;
   }[];
   queued: { text: string; at: string; reason?: string }[];
+  /** Legs the transcript route could not read - unknown, never empty. */
+  degraded?: string[];
+}
+
+interface PathStep {
+  at: string;
+  stage: string;
+  detail: string;
 }
 
 export function ConversationPanel({
@@ -164,9 +172,19 @@ export function ConversationPanel({
     data.reviews.find((r) => r.decision_id === decisionId) ?? null;
   const scoresFor = (decisionId: string) =>
     data.scores.filter((s) => s.decision_id === decisionId);
+  // The thread's wire (wa/transport-stamp) - stamped at first delivered
+  // contact, immutable, and worth a chip: "which sender is this shop talking
+  // to" is the first question of any WABA-era investigation.
+  const transport = (data.thread?.fields as { transport?: string } | undefined)?.transport;
 
   return (
     <div className="space-y-3">
+      {(data.degraded?.length ?? 0) > 0 && (
+        <div className="rounded-blob border-2 border-brandred/40 bg-brandred-soft p-3 text-[12px] font-extrabold text-brandred">
+          Could not read: {data.degraded!.join(", ")}. Anything missing below is unknown, not
+          absent.
+        </div>
+      )}
       {/* Header */}
       <div className="surface rounded-blob p-3.5">
         <div className="flex items-start justify-between gap-2">
@@ -186,6 +204,11 @@ export function ConversationPanel({
             </button>
           </div>
           <div className="flex flex-wrap justify-end gap-1">
+            {transport && (
+              <span className="rounded-full bg-card2 px-2 py-0.5 text-[10px] font-extrabold text-soft">
+                📡 {transport}
+              </span>
+            )}
             {f.pricePerDay ? (
               <span className="rounded-full bg-savings-soft px-2 py-0.5 text-[10px] font-extrabold text-savings">
                 {f.currency ?? ""} {f.pricePerDay}/day
@@ -235,6 +258,15 @@ export function ConversationPanel({
                     </span>
                   )}
                   {o.round != null && <span className="text-faint">r{o.round}</span>}
+                  {/* Verification status, per the fail-dark contract: fetched
+                      since day one and never rendered - ✓ verified against
+                      the shop's own words, ? unverified/unknown. */}
+                  <span
+                    title={o.verified === true ? "verified against the shop's message" : "not verified"}
+                    className={o.verified === true ? "text-savings" : "text-faint"}
+                  >
+                    {o.verified === true ? "✓" : "?"}
+                  </span>
                 </span>
               );
             })}
@@ -331,6 +363,14 @@ export function ConversationPanel({
           ))}
         </div>
       </div>
+
+      {/* THE DELIVERY TRAIL - /api/admin/ops/message-path finally has a UI.
+          The endpoint that answers "where did this message actually go" (holds,
+          attempts, drops, unconfirmed sends, funnel moves, takeovers, wakeups)
+          existed with zero consumers; the owner's wishlist item was this exact
+          panel. Fetched lazily on expand - it is an investigation view, not a
+          default cost. */}
+      <DeliveryTrail threadKey={data.threadKey} />
 
       {/* Thread-level review */}
       <div className="surface rounded-blob p-3.5">
@@ -528,7 +568,7 @@ function RuleForm({ decisionId }: { decisionId: string }) {
     <div className="space-y-1.5">
       <p className="text-[10px] text-soft">
         New director edge, born from this exact situation. It must pass validation AND the
-        golden suite before it goes live; fine-tune it later in the Pipeline Studio.
+        golden suite before it goes live; fine-tune it later under Policy &amp; versions.
       </p>
       <div className="flex gap-1.5">
         <label className="min-w-0 flex-1">
@@ -573,6 +613,142 @@ function RuleForm({ decisionId }: { decisionId: string }) {
         </button>
         {note && <p className="text-[10px] font-bold text-soft">{note}</p>}
       </div>
+    </div>
+  );
+}
+
+// The stage vocabulary is message-path's own; anything unmapped renders as
+// itself so a NEW stage is visible the day it ships rather than invisible
+// until someone updates a lookup table.
+const TRAIL_LABELS: Record<string, { icon: string; tone: "ok" | "warn" | "bad" | "dim" }> = {
+  inbound: { icon: "📥", tone: "ok" },
+  outbound: { icon: "📤", tone: "ok" },
+  queued: { icon: "⏳", tone: "dim" },
+  hold: { icon: "✋", tone: "warn" },
+  "send-attempt": { icon: "📡", tone: "dim" },
+  "send-dropped": { icon: "🛑", tone: "bad" },
+  "send-failed": { icon: "🛑", tone: "bad" },
+  "send-unconfirmed": { icon: "❔", tone: "warn" },
+  "send-expired": { icon: "⌛", tone: "bad" },
+  "send-stale": { icon: "🗑", tone: "warn" },
+  "claim-lost": { icon: "🔒", tone: "dim" },
+  "claim-error": { icon: "🔒", tone: "warn" },
+  "park-failed": { icon: "🅿️", tone: "bad" },
+  "inbound-dropped": { icon: "🚫", tone: "bad" },
+  drift: { icon: "↔️", tone: "warn" },
+  vision: { icon: "👁", tone: "dim" },
+  media: { icon: "🖼", tone: "warn" },
+  localize: { icon: "🌐", tone: "warn" },
+  "engine-turn": { icon: "🧠", tone: "dim" },
+  transport: { icon: "📶", tone: "warn" },
+  wakeup: { icon: "⏰", tone: "dim" },
+  funnel: { icon: "🪜", tone: "ok" },
+  takeover: { icon: "🙋", tone: "warn" },
+};
+
+function DeliveryTrail({ threadKey }: { threadKey: string }) {
+  const [open, setOpen] = useState(false);
+  const [steps, setSteps] = useState<PathStep[] | null>(null);
+  const [trailDegraded, setTrailDegraded] = useState(false);
+  const [err, setErr] = useState(false);
+
+  const load = useCallback(() => {
+    const idx = threadKey.lastIndexOf(":");
+    if (idx <= 0) {
+      setErr(true);
+      return;
+    }
+    setErr(false);
+    setSteps(null);
+    fetch(
+      `/api/admin/ops/message-path?sender=${encodeURIComponent(
+        threadKey.slice(0, idx)
+      )}&to=${encodeURIComponent(threadKey.slice(idx + 1))}`
+    )
+      .then((r) => {
+        if (!r.ok) throw new Error(String(r.status));
+        return r.json();
+      })
+      .then((d) => {
+        if (!Array.isArray(d?.steps)) throw new Error("bad payload");
+        setSteps(d.steps as PathStep[]);
+        setTrailDegraded(Boolean(d?.degraded));
+      })
+      .catch(() => setErr(true));
+  }, [threadKey]);
+
+  return (
+    <div className="surface rounded-blob p-3.5">
+      <button
+        onClick={() => {
+          const next = !open;
+          setOpen(next);
+          if (next && steps === null && !err) load();
+        }}
+        className="flex w-full items-center justify-between text-left"
+      >
+        <h4 className="text-[13px] font-extrabold text-strong">🛤 Delivery trail</h4>
+        <span className="text-[11px] font-extrabold text-brandblue">{open ? "Hide" : "Show"}</span>
+      </button>
+      {open && (
+        <div className="mt-2">
+          {err && (
+            <div className="rounded-xl border-2 border-brandred/40 bg-brandred-soft p-2.5 text-center">
+              <p className="text-[11px] font-extrabold text-brandred">
+                The trail could not be read - that is unknown, not empty.
+              </p>
+              <button
+                onClick={load}
+                className="btn btn-sm mt-1.5 rounded-xl border-2 border-brandred/40 px-3 text-[10px] font-extrabold text-brandred"
+              >
+                ↻ Retry
+              </button>
+            </div>
+          )}
+          {!err && steps === null && <LoadingDots label="Tracing every hop" />}
+          {!err && steps !== null && (
+            <>
+              {trailDegraded && (
+                <p className="mb-1.5 rounded-xl bg-brandred-soft p-2 text-[10px] font-extrabold text-brandred">
+                  Part of the trail could not be read - steps may be missing.
+                </p>
+              )}
+              {steps.length === 0 && (
+                <p className="py-2 text-center text-[11px] text-faint">
+                  No recorded hops for this thread yet.
+                </p>
+              )}
+              <div className="max-h-80 space-y-1 overflow-y-auto">
+                {steps.map((s, i) => {
+                  const meta = TRAIL_LABELS[s.stage] ?? { icon: "•", tone: "dim" as const };
+                  return (
+                    <div key={`${s.at}${i}`} className="flex items-start gap-1.5 text-[11px]">
+                      <span className="shrink-0">{meta.icon}</span>
+                      <span
+                        className={`shrink-0 font-extrabold ${
+                          meta.tone === "bad"
+                            ? "text-brandred"
+                            : meta.tone === "warn"
+                              ? "text-warn"
+                              : meta.tone === "ok"
+                                ? "text-strong"
+                                : "text-faint"
+                        }`}
+                      >
+                        {s.stage}
+                      </span>
+                      <span className="min-w-0 flex-1 break-words text-soft">{s.detail}</span>
+                      <span className="shrink-0 text-[9px] text-faint">
+                        {new Date(s.at).toLocaleTimeString()}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }

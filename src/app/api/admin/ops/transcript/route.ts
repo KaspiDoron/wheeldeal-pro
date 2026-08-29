@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireOwner } from "@/lib/session";
-import { sbSelect } from "@/lib/runtime-config";
+import { sbSelectDark } from "@/lib/runtime-config";
 
 // Ops Center: ONE negotiation exactly as it happened, cross-user (owner only).
 // The bilingual transcript is joined app-side to the decisions that produced
@@ -56,8 +56,13 @@ export async function GET(req: Request) {
   const userEmail = threadKey.slice(0, idx);
   const digits = threadKey.slice(idx + 1);
 
+  // FAIL DARK: every read here used the permissive sbSelect, whose [] means
+  // "missing connection", "non-2xx" and "threw" alike - so an outage rendered
+  // an EMPTY conversation with a 200 and the panel's error card never showed.
+  // null now means unreadable; each failed leg lands in `degraded` and the
+  // panel renders the shared banner over whatever could still be read.
   const [outs, ins, thread, scores, reviews, queued] = await Promise.all([
-    sbSelect<WaRow>(
+    sbSelectDark<WaRow>(
       "whatsapp_messages",
       // NEWEST first (then causally re-sorted below): asc&limit took the
       // OLDEST 80, so a long negotiation's live tail - the part the owner
@@ -65,16 +70,16 @@ export async function GET(req: Request) {
       `select=id,body,received_at,raw&direction=eq.outbound&to_number=eq.${encodeURIComponent(
         digits
       )}&raw->>sender=eq.${encodeURIComponent(userEmail)}&order=received_at.desc&limit=80`
-    ).catch(() => []),
-    sbSelect<WaRow>(
+    ),
+    sbSelectDark<WaRow>(
       "whatsapp_messages",
       // PRIVACY: only the inbound THIS thread's user received - a drill or a
       // second user on the same shop number must never bleed in.
       `select=id,body,received_at,raw&direction=eq.inbound&from_number=eq.${encodeURIComponent(
         digits
       )}&raw->>receiver=eq.${encodeURIComponent(userEmail)}&order=received_at.desc&limit=80`
-    ).catch(() => []),
-    sbSelect<{
+    ),
+    sbSelectDark<{
       phase: string;
       stage: string | null;
       vendor_id: string | null;
@@ -87,8 +92,8 @@ export async function GET(req: Request) {
       `select=phase,stage,vendor_id,fields,last_decision_id,waiting_until,updated_at&thread_key=eq.${encodeURIComponent(
         threadKey
       )}&limit=1`
-    ).catch(() => []),
-    sbSelect<{
+    ),
+    sbSelectDark<{
       decision_id: string | null;
       node_id: string | null;
       scorer: string;
@@ -101,18 +106,26 @@ export async function GET(req: Request) {
       `select=decision_id,node_id,scorer,scores,verdict,spec_rev,created_at&thread_key=eq.${encodeURIComponent(
         threadKey
       )}&order=created_at.desc&limit=40`
-    ).catch(() => []),
-    sbSelect<Record<string, unknown>>(
+    ),
+    sbSelectDark<Record<string, unknown>>(
       "agent_reviews",
       `select=*&thread_key=eq.${encodeURIComponent(threadKey)}&order=created_at.desc&limit=60`
-    ).catch(() => []),
-    sbSelect<{ body: string; not_before: string; meta: { reason?: string } | null }>(
+    ),
+    sbSelectDark<{ body: string; not_before: string; meta: { reason?: string } | null }>(
       "wa_outbox",
       `select=body,not_before,meta&sender_key=eq.${encodeURIComponent(
         userEmail
       )}&to_number=eq.${encodeURIComponent(digits)}&order=not_before.asc&limit=5`
-    ).catch(() => []),
+    ),
   ]);
+
+  const degraded: string[] = [];
+  if (outs === null) degraded.push("outbound messages");
+  if (ins === null) degraded.push("inbound messages");
+  if (thread === null) degraded.push("thread state");
+  if (scores === null) degraded.push("judge scores");
+  if (reviews === null) degraded.push("reviews");
+  if (queued === null) degraded.push("queued sends");
 
   // OFFERS JOIN ON THE REAL KEY. offers.vendor_id is the discovery vendor id,
   // never the shop's phone - `vendor_id=eq.<digits>` matched only threads
@@ -120,8 +133,8 @@ export async function GET(req: Request) {
   // read empty on almost every healthy thread. The thread row carries the
   // real id; digits stay as the fallback for a vendor-less row (where the
   // old behavior was the only behavior). Dependent read, so it runs after.
-  const offerVendorId = thread[0]?.vendor_id || digits;
-  const offers = await sbSelect<{
+  const offerVendorId = (thread ?? [])[0]?.vendor_id || digits;
+  const offers = await sbSelectDark<{
     price_per_day: number;
     list_price_per_day: number | null;
     currency: string;
@@ -133,10 +146,11 @@ export async function GET(req: Request) {
     `select=price_per_day,list_price_per_day,currency,round,verified,created_at&user_email=eq.${encodeURIComponent(
       userEmail
     )}&vendor_id=eq.${encodeURIComponent(offerVendorId)}&order=created_at.asc&limit=20`
-  ).catch(() => []);
+  );
+  if (offers === null) degraded.push("offers");
 
   const messages = [
-    ...outs.map((m) => ({
+    ...(outs ?? []).map((m) => ({
       id: `o${m.id}`,
       dir: "out" as const,
       text: m.body ?? "",
@@ -147,7 +161,7 @@ export async function GET(req: Request) {
       round: m.raw?.round ?? null,
       at: m.received_at,
     })),
-    ...ins.map((m) => ({
+    ...(ins ?? []).map((m) => ({
       id: `i${m.id}`,
       dir: "in" as const,
       text: m.body ?? "",
@@ -168,20 +182,22 @@ export async function GET(req: Request) {
   // its full trace: stages in order, the parsed director ladder, latency.
   const decisionIds = Array.from(
     new Set(
-      [...ordered.map((m) => m.decisionId), thread[0]?.last_decision_id].filter(
+      [...ordered.map((m) => m.decisionId), (thread ?? [])[0]?.last_decision_id].filter(
         (x): x is string => Boolean(x)
       )
     )
   ).slice(-40);
 
-  const traceRows: TraceDbRow[] = decisionIds.length
-    ? await sbSelect<TraceDbRow>(
+  const traceRaw = decisionIds.length
+    ? await sbSelectDark<TraceDbRow>(
         "agent_traces",
         `select=decision_id,stage,input,reasoning,output,verdict,node_id,edge_id,ms,spec_rev,created_at&decision_id=in.(${decisionIds
           .map((d) => encodeURIComponent(d))
           .join(",")})&order=created_at.asc&limit=400`
-      ).catch(() => [])
+      )
     : [];
+  if (traceRaw === null) degraded.push("decision traces");
+  const traceRows: TraceDbRow[] = traceRaw ?? [];
 
   const decisions: Record<
     string,
@@ -230,27 +246,29 @@ export async function GET(req: Request) {
     });
   }
 
+  const threadRow = (thread ?? [])[0];
   return NextResponse.json({
     threadKey,
     userEmail,
     digits,
-    thread: thread[0]
+    degraded,
+    thread: threadRow
       ? {
-          phase: thread[0].phase,
+          phase: threadRow.phase,
           // The funnel LEDGER stage - the vocabulary the owner's console
           // shares with the traveller tracker (funnel/stages.ts).
-          stage: thread[0].stage ?? null,
-          fields: thread[0].fields ?? {},
-          waitingUntil: thread[0].waiting_until,
-          updatedAt: thread[0].updated_at,
+          stage: threadRow.stage ?? null,
+          fields: threadRow.fields ?? {},
+          waitingUntil: threadRow.waiting_until,
+          updatedAt: threadRow.updated_at,
         }
       : null,
     messages: ordered,
     decisions,
-    scores,
-    reviews,
-    offers,
-    queued: queued.map((q) => ({ text: q.body, at: q.not_before, reason: q.meta?.reason })),
+    scores: scores ?? [],
+    reviews: reviews ?? [],
+    offers: offers ?? [],
+    queued: (queued ?? []).map((q) => ({ text: q.body, at: q.not_before, reason: q.meta?.reason })),
   });
 }
 

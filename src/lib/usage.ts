@@ -194,8 +194,10 @@ export async function limitFor(name: keyof typeof LIMIT_DEFAULTS): Promise<numbe
   // backend plans have been upgraded to carry the load. Explicit per-limit
   // overrides above still win (they are read first).
   try {
-    const scale = ((await getConfig("SCALE_MODE")) ?? "").trim().toLowerCase();
-    if (scale === "on" || scale === "1" || scale === "true") return base * 3;
+    // The ONE flag dialect (config-flags) - "yes"/"enabled" count as on here
+    // exactly as they do everywhere else.
+    const { parseFlag } = await import("./config-flags");
+    if (parseFlag(await getConfig("SCALE_MODE"), false)) return base * 3;
   } catch {
     /* scale lookup is best-effort */
   }

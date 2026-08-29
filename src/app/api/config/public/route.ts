@@ -32,8 +32,10 @@ export async function GET() {
     getConfig("ADSENSE_SLOT"),
   ]);
   const clientId = methodById(methods, "google")?.config?.clientId;
-  const on = (v: string | undefined | null) =>
-    ["on", "1", "true"].includes((v ?? "").trim().toLowerCase());
+  // The ONE flag dialect (config-flags) - this route used to hand-roll a third
+  // copy of on|1|true, so "yes" meant off here and on elsewhere.
+  const { parseFlag } = await import("@/lib/config-flags");
+  const on = (v: string | undefined | null) => parseFlag(v, false);
   const scaled = on(scaleMode);
   return NextResponse.json({
     // Kept for back-compat with any client still reading this field. New code

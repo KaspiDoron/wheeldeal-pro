@@ -123,6 +123,10 @@ interface KeyInfo {
    *  payload just falls back to the editable rule. */
   testable?: boolean;
   docUrl?: string;
+  /** False for SETTINGS (flags, thresholds, model ids): rendered as a
+   *  readable input, and as an on/off toggle when the label says it is one.
+   *  Optional so an older cached payload just keeps the password box. */
+  secret?: boolean;
 }
 interface UserRecord {
   email: string;
@@ -638,8 +642,11 @@ export default function AdminPage() {
   const [diag, setDiag] = useState<{ kind: string; text: string; ok: boolean } | null>(null);
   const [diagBusy, setDiagBusy] = useState<string | null>(null);
   const [costs, setCosts] = useState<any>(null);
+  // The kill switch's write outcome (502 / fleet warning) - see the onClick.
+  const [killSwitchMsg, setKillSwitchMsg] = useState<string | null>(null);
   const [limitEdit, setLimitEdit] = useState<Record<string, string>>({});
   const [limitsBusy, setLimitsBusy] = useState(false);
+  const [limitsMsg, setLimitsMsg] = useState<string | null>(null);
   const [keyTests, setKeyTests] = useState<Record<string, { ok: boolean; detail: string }>>({});
   const [keyTestBusy, setKeyTestBusy] = useState<string | null>(null);
   const [waHosts, setWaHosts] = useState<
@@ -863,8 +870,10 @@ export default function AdminPage() {
     }
   }
 
-  async function saveKey(name: string) {
-    const value = editing[name] ?? "";
+  async function saveKey(name: string, valueOverride?: string) {
+    // valueOverride: the flag on/off shortcut passes its value directly -
+    // setEditing is async, so reading the state here would race the click.
+    const value = valueOverride ?? editing[name] ?? "";
     setSavingKey(name);
     try {
       const res = await fetch("/api/admin/config", {
@@ -1674,11 +1683,28 @@ export default function AdminPage() {
                 {isOwner && (
                   <button
                     onClick={async () => {
-                      await fetch("/api/admin/costs", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ killSwitch: !costs.killSwitch }),
-                      });
+                      // HONEST WRITE (OR11 D2.4 finally reaches a pixel): the
+                      // route answers 502 "it is UNCHANGED" on a failed
+                      // persist and a fleet warning on a memory-only one -
+                      // this handler used to throw both away, so the one
+                      // control labelled "for every user" was unverifiable
+                      // from the screen it lives on.
+                      setKillSwitchMsg(null);
+                      try {
+                        const res = await fetch("/api/admin/costs", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ killSwitch: !costs.killSwitch }),
+                        });
+                        const data = await res.json().catch(() => ({}) as { error?: string; warning?: string });
+                        if (!res.ok) {
+                          setKillSwitchMsg(data.error ?? "The switch did NOT change - the write failed.");
+                        } else if (data.warning) {
+                          setKillSwitchMsg(data.warning);
+                        }
+                      } catch {
+                        setKillSwitchMsg("Could not reach the server - the switch is UNCHANGED.");
+                      }
                       await refreshCosts();
                     }}
                     className={`btn btn-sm chip rounded-xl px-3 text-[11px] font-extrabold ${
@@ -1689,6 +1715,11 @@ export default function AdminPage() {
                   </button>
                 )}
               </div>
+              {killSwitchMsg && (
+                <p className="mt-1 rounded-xl border-2 border-brandyellow/50 bg-brandyellow-soft p-2 text-[11px] font-extrabold text-warn">
+                  {killSwitchMsg}
+                </p>
+              )}
               {costs.killSwitch && (
                 <p className="mt-1 rounded-xl bg-brandred-soft p-2 text-[11px] font-bold text-brandred">
                   All paid services and payments are PAUSED for every user.
@@ -1752,8 +1783,11 @@ export default function AdminPage() {
                 <button
                   onClick={async () => {
                     setLimitsBusy(true);
+                    setLimitsMsg(null);
+                    // Same honesty as the kill switch: a failed persist must
+                    // not repaint as saved.
                     try {
-                      await fetch("/api/admin/costs", {
+                      const res = await fetch("/api/admin/costs", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({
@@ -1762,7 +1796,12 @@ export default function AdminPage() {
                           ),
                         }),
                       });
+                      const data = await res.json().catch(() => ({}) as { error?: string; warning?: string });
+                      if (!res.ok) setLimitsMsg(data.error ?? "The limits did NOT save - the write failed.");
+                      else if (data.warning) setLimitsMsg(data.warning);
                       await refreshCosts();
+                    } catch {
+                      setLimitsMsg("Could not reach the server - the limits are UNCHANGED.");
                     } finally {
                       setLimitsBusy(false);
                     }
@@ -1772,6 +1811,11 @@ export default function AdminPage() {
                 >
                   {limitsBusy ? <LoadingDots light label="Saving" /> : "Save limits"}
                 </button>
+                {limitsMsg && (
+                  <p className="mt-1 rounded-xl border-2 border-brandyellow/50 bg-brandyellow-soft p-2 text-[11px] font-extrabold text-warn">
+                    {limitsMsg}
+                  </p>
+                )}
               </div>
             </div>
           )}
@@ -2389,9 +2433,13 @@ export default function AdminPage() {
                   </div>
                 ) : (
                   <div className="mt-2 flex gap-2">
+                    {/* A SETTING is typed in the clear - a value entered blind
+                        into a password box cannot be read back or corrected,
+                        and for a flag that meant 'on' and 'off' were the same
+                        four dots. Credentials keep the password field. */}
                     <input
-                      type="password"
-                      placeholder="Set / rotate value"
+                      type={k.secret === false ? "text" : "password"}
+                      placeholder={k.secret === false ? "Set value (shown in the clear - it is a setting)" : "Set / rotate value"}
                       value={editing[k.name] ?? ""}
                       onChange={(e) => setEditing((ed) => ({ ...ed, [k.name]: e.target.value }))}
                       className="flex-1 rounded-xl border-2 border-line bg-card p-2 text-[12px] text-strong focus:border-brandblue focus:outline-none"
@@ -2409,6 +2457,26 @@ export default function AdminPage() {
                         "Apply"
                       )}
                     </button>
+                    {/* Every flag's label spells its dialect ('on' = ...), so
+                        the two states are one tap instead of typed prose. The
+                        saveKey path still verifies the write like any other. */}
+                    {k.secret === false && /'(on|off)'/.test(k.label) && (
+                      <>
+                        {(["on", "off"] as const).map((v) => (
+                          <button
+                            key={v}
+                            onClick={() => {
+                              setEditing((ed) => ({ ...ed, [k.name]: v }));
+                              void saveKey(k.name, v);
+                            }}
+                            disabled={savingKey === k.name}
+                            className="btn btn-sm rounded-xl border-2 border-line px-2.5 text-[11px] font-extrabold text-soft disabled:opacity-60"
+                          >
+                            {v}
+                          </button>
+                        ))}
+                      </>
+                    )}
                   </div>
                 )
                     ) : (
@@ -2814,11 +2882,17 @@ export default function AdminPage() {
                     <button
                       key={st}
                       onClick={async () => {
-                        await fetch("/api/admin/feedback", {
+                        // AdminReplyThread's lesson, applied to its neighbours:
+                        // paint only what the server confirmed landed.
+                        const res = await fetch("/api/admin/feedback", {
                           method: "PATCH",
                           headers: { "Content-Type": "application/json" },
                           body: JSON.stringify({ id: f.id, status: st }),
-                        });
+                        }).catch(() => null);
+                        if (!res?.ok) {
+                          alert("The status change did NOT save - try again.");
+                          return;
+                        }
                         setFeedbackRows((rows) =>
                           rows.map((r) => (r.id === f.id ? { ...r, status: st } : r))
                         );
@@ -2847,11 +2921,15 @@ export default function AdminPage() {
                 onBlur={async (e) => {
                   const note = e.target.value.trim();
                   if (note !== (f.owner_note ?? "")) {
-                    await fetch("/api/admin/feedback", {
+                    const res = await fetch("/api/admin/feedback", {
                       method: "PATCH",
                       headers: { "Content-Type": "application/json" },
                       body: JSON.stringify({ id: f.id, note }),
-                    });
+                    }).catch(() => null);
+                    if (!res?.ok) {
+                      alert("The note did NOT save - it is shown in the box but not stored.");
+                      return;
+                    }
                     setFeedbackRows((rows) =>
                       rows.map((r) => (r.id === f.id ? { ...r, owner_note: note } : r))
                     );
@@ -3156,13 +3234,26 @@ function BetaManager() {
 
   async function toggleTestMode() {
     setTestBusy(true);
+    setMsg(null);
+    // A money-affecting switch may not paint optimistically: verify the write,
+    // then repaint from the EFFECTIVE value the public config actually serves -
+    // never from the assumption that the flip landed.
     try {
-      await fetch("/api/admin/config", {
+      const res = await fetch("/api/admin/config", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: "TEST_MODE", value: testMode ? "off" : "on" }),
       });
-      setTestMode((v) => !v);
+      const data = await res.json().catch(() => ({}) as { error?: string; warning?: string });
+      if (!res.ok || data.error) {
+        setMsg(data.error ?? "Test Mode did NOT change - the write failed.");
+      } else if (data.warning) {
+        setMsg(data.warning);
+      }
+      const p = await fetch("/api/config/public").then((r) => r.json()).catch(() => null);
+      if (p) setTestMode(Boolean(p.testMode));
+    } catch {
+      setMsg("Could not reach the server - Test Mode is UNCHANGED.");
     } finally {
       setTestBusy(false);
     }
