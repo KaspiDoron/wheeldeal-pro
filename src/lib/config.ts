@@ -192,6 +192,10 @@ const KEYS: {
   { name: "WARMUP_HOLDOUT_PCT", label: "Warm-up holdout % (0-100) - this slice may buy without warming up", scope: "billing", editable: true },
   { name: "WARMUP_HOLDOUT_LIST", label: "Warm-up holdout: specific emails (comma or newline separated)", scope: "billing", editable: true },
   { name: "HUMAN_TAKEOVER", label: "Human takeover detection ('off' = ignore user-typed WhatsApp messages)", scope: "messaging", editable: true },
+  // WHICH WIRE CARRIES FIRST CONTACT (src/lib/wa/transports). Per-thread
+  // stamps always outrank this; a WABA mode with no ready WABA config
+  // degrades to evolution, never to dead air.
+  { name: "TRANSPORT_MODE", label: "Transport mode ('evolution' default; 'waba-first' / 'waba-fallback' = company-number lead handoff for first contact)", scope: "messaging", editable: true, secret: false },
   { name: "FAST_DISPATCH", label: "Fast dispatch ('off' = cold intros wait for shop opening hours; default on - batches fire within their 15-min window)", scope: "messaging", editable: true },
   { name: "CANCEL_GUARD", label: "Cancellation enforcement ('off' = removed shops may be messaged again; default on)", scope: "messaging", editable: true },
   { name: "EVOLUTION_HOSTS", label: "Evolution host pool (url|key per line)", scope: "messaging", editable: true },
