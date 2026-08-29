@@ -1976,6 +1976,40 @@ export default function Home() {
             return v;
           })
         );
+        // FACTS PASS (owner problem #8). The priced merge below still gates on
+        // a price - but a reply with no readable price is NOT a reply with
+        // nothing in it: the server computed the deposit, the delivery offer,
+        // the call request, the location question and the alternativeOffer for
+        // that same row, and skipping it dropped them all (the blank card, and
+        // the substitution Yes/No UI that had never rendered while the agent
+        // held the thread silent waiting for an answer the traveller was never
+        // shown). Apply the newest row's FACTS for every vendor in the window,
+        // price or no price - the pure merge lives in lib/client/reply-facts so
+        // it is executable under test.
+        {
+          const { applyReplyFacts } = await import("@/lib/client/reply-facts");
+          type FactsRow = Parameters<typeof applyReplyFacts>[1];
+          const newestAnyByVendor = new Map<string, FactsRow>();
+          for (const r of (d.replies ?? []) as FactsRow[]) {
+            if (searchEpoch && r.createdAt && Date.parse(r.createdAt) < epochOnServerClock())
+              continue;
+            const cur = newestAnyByVendor.get(r.vendorId);
+            if (
+              !cur ||
+              Date.parse(String(r.createdAt ?? 0)) > Date.parse(String(cur.createdAt ?? 0))
+            ) {
+              newestAnyByVendor.set(r.vendorId, r);
+            }
+          }
+          if (newestAnyByVendor.size) {
+            setVendors((vs) =>
+              vs.map((v) => {
+                const r = newestAnyByVendor.get(v.id);
+                return r ? applyReplyFacts(v, r) : v;
+              })
+            );
+          }
+        }
         // NEWEST ROW PER VENDOR WINS. The feed arrives newest-first; applying
         // every row would make the OLDEST functional update win (React applies
         // them in order), silently reverting a fresher negotiated price to an
@@ -2092,6 +2126,13 @@ export default function Home() {
                       // the vendor object because VendorCard is memo'd - a
                       // sibling prop would not re-render the card.
                       options: r.options ?? v.offer?.options,
+                      // The shop's counter-proposal of a DIFFERENT vehicle, and
+                      // the per-extra verdicts. The old literal omitted both,
+                      // so a priced row silently wiped what the facts pass (or
+                      // an earlier row) had established - and the substitution
+                      // Yes/No UI could never survive to render.
+                      alternativeOffer: r.alternativeOffer ?? v.offer?.alternativeOffer,
+                      accessories: r.accessories ?? v.offer?.accessories,
                       // K7: the shop asked to talk by phone - the model read
                       // it, the thread stored it, the card wears the chip.
                       wantsCall: r.wantsCall ?? v.offer?.wantsCall,

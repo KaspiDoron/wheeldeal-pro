@@ -241,6 +241,10 @@ describe("asking once, and answering once", () => {
     expect(card).toMatch(/This shop offered a different vehicle/);
     expect(card).toMatch(/decideAlternative\(true\)/);
     expect(card).toMatch(/decideAlternative\(false\)/);
-    expect(card).toMatch(/offer\.alternativeOffer\.reason/);
+    // The choice renders off the offer OR the facts pass - a shop that
+    // counter-offered a different bike has no priced offer yet by definition,
+    // which is exactly why the offer-only read left this UI unreachable.
+    expect(card).toMatch(/offer\?\.alternativeOffer \?\? facts\?\.alternativeOffer/);
+    expect(card).toMatch(/altOffer\.reason/);
   });
 });

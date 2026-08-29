@@ -26,10 +26,13 @@ interface ThreadRow {
 // returned null on EVERY call since it was written: persistAlternativeOffer has
 // never stored a single offer, and resolveAlternativeOffer has never found one.
 //
-// That is the whole of "M12 is BROKEN". The accept UI in VendorCard is wired
-// correctly end to end - /api/replies already returns `alternativeOffer` from
-// these very fields and the card renders it - it has simply never had anything
-// to show. One wrong column name, one dead feature.
+// That was the first of TWO breaks in "M12 is BROKEN". The second sat one hop
+// downstream: /api/replies returned `alternativeOffer`, but the page merge
+// skipped every row without a price and its offer literal never listed the
+// field - so even a stored offer could not reach the card. Both are fixed:
+// the column here, and the facts pass + literal in the page merge (see
+// lib/client/reply-facts.ts, which carries the choice through price or no
+// price). If this feature ever goes quiet again, check BOTH hops.
 //
 // sbSelectStrict, not sbSelect: turning a schema error into "no such thread" is
 // what let this survive a full audit round.

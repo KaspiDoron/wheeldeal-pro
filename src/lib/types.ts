@@ -197,6 +197,41 @@ export interface Offer {
   priceSourceVehicle?: string;
 }
 
+/**
+ * WHAT THE SHOP'S REPLY ESTABLISHED, independent of whether a price was read
+ * (owner problem #8). The replies merge used to drop a no-price row whole, so
+ * the deposit, the delivery offer, the call request, the location question and
+ * the alternativeOffer all vanished and the card went blank. These facts land
+ * here for every reply row; when an offer exists they are ALSO merged onto it,
+ * so existing offer-driven surfaces keep working unchanged.
+ */
+export interface ThreadFacts {
+  alternativeOffer?: import("./vehicle/substitution").AlternativeOffer | null;
+  wantsCall?: CallIntentFact | null;
+  askedLocationQuote?: string | null;
+  deposit?: string | null;
+  depositType?: string | null;
+  depositAmount?: number | null;
+  depositCurrency?: string | null;
+  delivers?: boolean | null;
+  insuranceIncluded?: boolean | null;
+  deliveryFee?: number | null;
+  fulfillment?: "pickup" | "delivery" | "on-shop" | null;
+  accessories?: import("./thread/accessories").AccessoryStatus[] | null;
+  /**
+   * The shop replied and the agent could not read a price - and no other state
+   * the card already explains (declined / out of stock / alternative offered /
+   * double-checking) applies. The card renders an explicit "replied, but the
+   * price is unclear" state with the shop's own words instead of a blank.
+   */
+  replyUnparsed?: boolean;
+  /** The shop's line (and its English gloss) backing the unparsed state. */
+  replyText?: string | null;
+  replyEnglish?: string | null;
+  /** When the newest fact-bearing row landed (server clock). */
+  at?: string;
+}
+
 export interface Vendor {
   id: string;
   name: string;
@@ -235,6 +270,9 @@ export interface Vendor {
   // live state (client-side)
   stage?: TrackerStage;
   offer?: Offer;
+  /** What the shop's replies established even when no price was read - the
+   *  facts pass writes it for every reply row (see lib/client/reply-facts). */
+  threadFacts?: ThreadFacts;
   sentiment?: number; // 0..1 from the Sentiment agent
   // Status-panel detail (client-side): the EXACT text we sent, its faithful
   // English gloss, when the last state change happened, and - when the shop was
