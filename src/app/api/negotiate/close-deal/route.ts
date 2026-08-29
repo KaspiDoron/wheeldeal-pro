@@ -204,6 +204,25 @@ export async function POST(req: Request) {
     },
   ]).catch(() => {});
 
+  // FUNNEL LEDGER: the winning thread reached `booked` (the traveller just
+  // locked this deal - explicit evidence, so it may leave out_of_stock too).
+  // The /api/bookings insert stamps the same thing; whichever lands first
+  // wins and the other short-circuits.
+  {
+    const { advanceThreadStage } = await import("@/lib/funnel/stages");
+    await advanceThreadStage(
+      {
+        userEmail: session.email,
+        toNumber: digits,
+        vendorId: body.vendorId ? String(body.vendorId) : undefined,
+        transport: "evolution",
+      },
+      "booked",
+      "traveller locked the deal",
+      { overridesOutOfStock: true }
+    ).catch(() => {});
+  }
+
   // SELF-IMPROVEMENT LOOP (V2-4): bank the price actually achieved so future
   // sessions in this market start from a real prior. Best-effort, never blocks
   // the close. Resolves the region + vehicle from the user's most recent search.

@@ -898,6 +898,20 @@ export async function processEvolutionWebhook(
       const { recordResponseTime } = await import("@/lib/stats");
       recordResponseTime(from).catch(() => {});
 
+      // FUNNEL LEDGER: any stored inbound is `replied` - deliberately honest
+      // about content-free replies (a sticker IS a reply; whether it was
+      // UNDERSTOOD is a separate stage stamped where extraction runs). Deduped
+      // inside advanceThreadStage, so the second message of a burst costs one
+      // cheap select and writes nothing.
+      if (email) {
+        const { advanceThreadStage } = await import("@/lib/funnel/stages");
+        await advanceThreadStage(
+          { userEmail: email, toNumber: from, transport: "evolution" },
+          "replied",
+          "inbound message stored"
+        ).catch(() => {});
+      }
+
       // BLUE TICK ON A HUMAN'S CLOCK (owner report 4, anti-ban A1). A real
       // linked device reads the message before it answers; ours never did,
       // presenting a never-reads-then-replies pattern to every shop. Collected

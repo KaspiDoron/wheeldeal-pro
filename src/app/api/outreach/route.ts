@@ -427,6 +427,22 @@ async function handlePost(req: Request) {
     }
   }
 
+  // FUNNEL LEDGER: the traveller explicitly asked THIS shop - intent, not
+  // delivery (delivery stamps `contacted` below / in the drain). restart:true
+  // because a fresh Ask on a shop from an earlier hunt genuinely restarts the
+  // funnel; the ledger still refuses to resurrect a hard terminal. Stamped
+  // AFTER the admission checks so a refused request records nothing, and
+  // BEFORE the guard so a queued send still shows the shop as selected.
+  if (kind === "rfq") {
+    const { advanceThreadStage } = await import("@/lib/funnel/stages");
+    await advanceThreadStage(
+      { userEmail: session.email, toNumber: digits, vendorId, vendorName, transport: "evolution" },
+      "selected",
+      "traveller asked this shop for a price",
+      { restart: true }
+    ).catch(() => {});
+  }
+
   const { guardOutbound, afterSend } = await import("@/lib/wa-guard");
   const guard = await guardOutbound({
     senderKey: session.email,
@@ -460,6 +476,16 @@ async function handlePost(req: Request) {
   if (!guard.allow) {
     // A refusal with nothing queued means no move happened - give it back.
     if (!guard.queuedUntil) await releaseMove();
+    // FUNNEL LEDGER: the guard parked the RFQ - the shop is queued, not
+    // contacted (the drain stamps `contacted` when the row actually delivers).
+    if (guard.queuedUntil && kind === "rfq") {
+      const { advanceThreadStage } = await import("@/lib/funnel/stages");
+      await advanceThreadStage(
+        { userEmail: session.email, toNumber: digits, vendorId, vendorName, transport: "evolution" },
+        "contact_queued",
+        `RFQ parked: ${(guard.reason ?? "guard hold").slice(0, 80)}`
+      ).catch(() => {});
+    }
     const halted =
       (guard.reason ?? "").startsWith("engagement-halt") ||
       (guard.reason ?? "").startsWith("rfq-dedup");
@@ -555,6 +581,15 @@ async function handlePost(req: Request) {
           },
         },
       ]).catch(() => {});
+      // FUNNEL LEDGER: parked on a pacing/sync hold - queued, not contacted.
+      if (kind === "rfq") {
+        const { advanceThreadStage } = await import("@/lib/funnel/stages");
+        await advanceThreadStage(
+          { userEmail: session.email, toNumber: digits, vendorId, vendorName, transport: "evolution" },
+          "contact_queued",
+          claim.kind === "pacing" ? "RFQ parked: human pacing gap" : "RFQ parked: sync-retry"
+        ).catch(() => {});
+      }
       return NextResponse.json({
         allowed: true,
         sent: false,
@@ -700,6 +735,16 @@ async function handlePost(req: Request) {
           }).slice(0, 800),
         },
       ]).catch(() => {});
+    }
+    // FUNNEL LEDGER: the message reached the shop (the TRUTH RULE row above is
+    // the evidence) - an RFQ is the contact, a bargain is the negotiation.
+    if (kind === "rfq" || kind === "bargain") {
+      const { advanceThreadStage } = await import("@/lib/funnel/stages");
+      await advanceThreadStage(
+        { userEmail: session.email, toNumber: digits, vendorId, vendorName, transport: "evolution" },
+        kind === "rfq" ? "contacted" : "negotiating",
+        kind === "rfq" ? "RFQ delivered to the shop" : "traveller-sent bargain delivered"
+      ).catch(() => {});
     }
   } else {
     // Keep the failure observable without polluting the "sent" record. Stamp the

@@ -20,17 +20,45 @@ let selectResult: { stage: string | null }[] = [];
 let updateResult: Record<string, unknown>[] = [];
 let insertOk = true;
 
+/**
+ * When set, the mock becomes a MINIMAL POSTGREST: sbSelect serves db.stage,
+ * and sbUpdateReturning actually EVALUATES the PATCH filter's
+ * `or=(stage.is.null,stage.in.(...))` clause against it before applying. This
+ * is what proves the filter STRINGS encode the rules - the pure eligibleFrom
+ * tests alone could pass while the filter builder dropped the set entirely.
+ */
+let db: { exists: boolean; stage: string | null } | undefined;
+
+function filterMatches(filter: string, stage: string | null): boolean {
+  const m = filter.match(/or=\(stage\.is\.null,stage\.in\.\(([^)]*)\)\)/);
+  if (!m) return false;
+  if (stage === null) return true;
+  return m[1].split(",").includes(stage);
+}
+
 vi.mock("../runtime-config", () => ({
   sbSelect: async (table: string, query: string) => {
     calls.selects.push({ table, query });
+    if (db) return db.exists ? [{ stage: db.stage }] : [];
     return selectResult;
   },
   sbUpdateReturning: async (table: string, filter: string, values: Record<string, unknown>) => {
     calls.updates.push({ table, filter, values });
+    if (db) {
+      if (!db.exists || !filterMatches(filter, db.stage)) return [];
+      db.stage = String(values.stage);
+      return [{ thread_key: "walk" }];
+    }
     return updateResult;
   },
   sbInsert: async (table: string, rows: Record<string, unknown>[]) => {
     calls.inserts.push({ table, rows });
+    if (db && table === "negotiation_threads") {
+      if (db.exists) return false; // PK conflict - the creation race
+      db.exists = true;
+      db.stage = String((rows[0] as { stage?: string }).stage ?? "") || null;
+      return true;
+    }
     return insertOk;
   },
 }));
@@ -42,6 +70,7 @@ beforeEach(() => {
   selectResult = [];
   updateResult = [];
   insertOk = true;
+  db = undefined;
 });
 
 const ARGS = { userEmail: "t@x.com", toNumber: "+66 81 234 5678", vendorId: "v1", vendorName: "Krabi Bikes" };
@@ -206,5 +235,72 @@ describe("advanceThreadStage - write discipline", () => {
     const res = await advanceThreadStage({ userEmail: "", toNumber: "123" }, "selected", "x");
     expect(res).toEqual({ advanced: false, reason: "noop" });
     expect(calls.selects).toHaveLength(0);
+  });
+});
+
+describe("the funnel walk - the whole ledger against a real filter evaluator", () => {
+  it("a thread walks the owner's funnel in evidence order, one event per rung", async () => {
+    const { advanceThreadStage } = await import("./stages");
+    db = { exists: false, stage: null };
+    const walk = [
+      ["selected", "traveller tapped Ask"],
+      ["contact_queued", "RFQ parked"],
+      ["contacted", "RFQ delivered"],
+      ["replied", "inbound stored"],
+      ["understood", "actionable fact"],
+      ["price_received", "shop quoted"],
+      ["negotiating", "bargain round 1"],
+      ["terms_collected", "deposit and handover known"],
+      ["booked", "booking stored"],
+    ] as const;
+    for (const [stage, evidence] of walk) {
+      const res = await advanceThreadStage(ARGS, stage, evidence);
+      expect(res.advanced, `${stage} should advance`).toBe(true);
+      expect(db.stage).toBe(stage);
+    }
+    const events = calls.inserts.filter((c) => c.table === "agent_events");
+    expect(events).toHaveLength(walk.length);
+    // The history is a chain: each event's `from` is the previous event's `to`.
+    const seq = events.map((e) => JSON.parse(String(e.rows![0].detail)));
+    for (let i = 1; i < seq.length; i++) expect(seq[i].from).toBe(seq[i - 1].to);
+    expect(seq[0].from).toBeNull();
+  });
+
+  it("a sticker after understanding adds nothing: replied is behind and writes no event", async () => {
+    const { advanceThreadStage } = await import("./stages");
+    db = { exists: true, stage: "price_received" };
+    const res = await advanceThreadStage(ARGS, "replied", "sticker stored");
+    expect(res).toEqual({ advanced: false, reason: "already" });
+    expect(calls.inserts).toHaveLength(0);
+    expect(db.stage).toBe("price_received");
+  });
+
+  it("out_of_stock traps the thread until explicit availability, then a price frees it", async () => {
+    const { advanceThreadStage } = await import("./stages");
+    db = { exists: true, stage: "understood" };
+    expect((await advanceThreadStage(ARGS, "out_of_stock", "no bikes")).advanced).toBe(true);
+    // A plain reply cannot restock the shop...
+    expect((await advanceThreadStage(ARGS, "price_received", "quoted anyway")).advanced).toBe(false);
+    expect(db.stage).toBe("out_of_stock");
+    // ...but the shop saying it IS available can.
+    expect(
+      (await advanceThreadStage(ARGS, "price_received", "back in stock, 250/day", { overridesOutOfStock: true }))
+        .advanced
+    ).toBe(true);
+    expect(db.stage).toBe("price_received");
+  });
+
+  it("a new hunt restarts a mid-funnel thread; the dead one stays dead", async () => {
+    const { advanceThreadStage } = await import("./stages");
+    db = { exists: true, stage: "negotiating" };
+    expect(
+      (await advanceThreadStage(ARGS, "selected", "fresh Ask", { restart: true })).advanced
+    ).toBe(true);
+    expect(db.stage).toBe("selected");
+    db = { exists: true, stage: "dead" };
+    expect(
+      (await advanceThreadStage(ARGS, "selected", "fresh Ask", { restart: true })).advanced
+    ).toBe(false);
+    expect(db.stage).toBe("dead");
   });
 });

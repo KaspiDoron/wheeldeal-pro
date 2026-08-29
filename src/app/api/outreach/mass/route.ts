@@ -620,6 +620,18 @@ export async function POST(req: Request) {
       continue;
     }
 
+    // FUNNEL LEDGER: this shop made the batch - intent, not delivery. No
+    // restart flag (unlike the single Ask): a mass run may sweep shops already
+    // mid-conversation, and forward-only keeps their real stage.
+    {
+      const { advanceThreadStage } = await import("@/lib/funnel/stages");
+      await advanceThreadStage(
+        { userEmail: session.email, toNumber: digits, vendorId: String(v.id), vendorName: v.name, transport: "evolution" },
+        "selected",
+        "mass outreach included this shop"
+      ).catch(() => {});
+    }
+
     // Shop 1: the immediate, fully-guarded send.
     const guard = await guardOutbound({
       senderKey: session.email,
@@ -634,6 +646,16 @@ export async function POST(req: Request) {
       meta: rowMeta,
     });
     if (!guard.allow) {
+      // FUNNEL LEDGER: parked by the guard - queued, not contacted (the drain
+      // stamps `contacted` when the row delivers).
+      if (guard.queuedUntil) {
+        const { advanceThreadStage } = await import("@/lib/funnel/stages");
+        await advanceThreadStage(
+          { userEmail: session.email, toNumber: digits, vendorId: String(v.id), vendorName: v.name, transport: "evolution" },
+          "contact_queued",
+          `RFQ parked: ${(guard.reason ?? "guard hold").slice(0, 80)}`
+        ).catch(() => {});
+      }
       results.push({
         id: v.id,
         sent: false,
@@ -659,6 +681,15 @@ export async function POST(req: Request) {
           meta: { ...rowMeta, reason: claim.kind === "duplicate" ? "batch-spacing" : "human pacing gap" },
         },
       ]).catch(() => {});
+      // FUNNEL LEDGER: parked on the batch's pacing spacing.
+      {
+        const { advanceThreadStage } = await import("@/lib/funnel/stages");
+        await advanceThreadStage(
+          { userEmail: session.email, toNumber: digits, vendorId: String(v.id), vendorName: v.name, transport: "evolution" },
+          "contact_queued",
+          "RFQ parked: batch spacing"
+        ).catch(() => {});
+      }
       results.push({
         id: v.id,
         sent: false,
@@ -709,6 +740,21 @@ export async function POST(req: Request) {
           },
         },
       ]);
+      // FUNNEL LEDGER: the RFQ reached the shop (TRUTH RULE row above).
+      {
+        const { advanceThreadStage } = await import("@/lib/funnel/stages");
+        await advanceThreadStage(
+          {
+            userEmail: session.email,
+            toNumber: digits,
+            vendorId: String(v.id),
+            vendorName: v.name,
+            transport: personal ? "evolution" : "cloud",
+          },
+          "contacted",
+          "RFQ delivered to the shop"
+        ).catch(() => {});
+      }
     } else if (!ambiguous) {
       await releaseSendClaim(session.email, digits, guard.text).catch(() => {});
     }

@@ -101,9 +101,10 @@ export async function closeSearchSession(
       thread_key: string;
       fields: Record<string, unknown> | null;
       phase: string | null;
+      stage: string | null;
     }>(
       "negotiation_threads",
-      `select=thread_key,fields,phase&user_email=eq.${enc}&updated_at=gte.${encodeURIComponent(
+      `select=thread_key,fields,phase,stage&user_email=eq.${enc}&updated_at=gte.${encodeURIComponent(
         fromIso
       )}&limit=200`
     ).catch(() => []);
@@ -165,6 +166,36 @@ export async function closeSearchSession(
         // new search against a 'closing'/'dead' thread would be born stuck.
         if (t.phase && t.phase !== "opening") patch.phase = "opening";
         patch.waiting_until = null;
+        // FUNNEL LEDGER: the funnel this stage belonged to just ended. The
+        // HISTORY records the death (one funnel-stage event, to:'dead'); the
+        // ROW resets to null exactly like phase does, because the thread is
+        // reused by the next hunt and a sticky 'dead' would refuse its
+        // `selected` forever (dead is a hard terminal by design). A thread
+        // that reached booked/completed did not die - it won; its stage still
+        // clears (per-hunt state) but no death event is written over it.
+        if (t.stage != null) {
+          patch.stage = null;
+          patch.stage_at = null;
+          if (t.stage !== "booked" && t.stage !== "completed") {
+            const tail = t.thread_key.slice(t.thread_key.lastIndexOf(":") + 1);
+            await sbInsert("agent_events", [
+              {
+                kind: "funnel-stage",
+                user_email: email,
+                to_number: tail,
+                vendor_id: "",
+                vendor_name: "",
+                detail: JSON.stringify({
+                  from: t.stage,
+                  to: "dead",
+                  evidence:
+                    opts.reason === "ttl-expired" ? "search session expired" : "search session closed",
+                  entry: new Date().toISOString(),
+                }),
+              },
+            ]).catch(() => {});
+          }
+        }
         if (Object.keys(patch).length) {
           await sbUpdate(
             "negotiation_threads",

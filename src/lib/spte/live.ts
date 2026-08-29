@@ -1275,6 +1275,54 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
     language: langOutcome.language,
   });
 
+  // ---- FUNNEL LEDGER: what this TURN proved (src/lib/funnel/stages.ts) -------
+  //
+  // The comprehension stamps (replied/understood/price_received and the
+  // laterals) happen upstream where the reply was read; the ENGINE's moves are
+  // the evidence for the negotiation rungs, so they stamp here. One progression
+  // stamp per turn - the highest stage the turn supports - and all three rungs
+  // are gated on a standing quote, because negotiating/terms without a price on
+  // the table would overstate the funnel (terms can be learned pre-price; the
+  // ladder claims them only once the money conversation exists). Best-effort
+  // and deduped inside advanceThreadStage; never on the throw path.
+  {
+    const quoted = (outcome.digest.quotedPricePerDay ?? 0) > 0;
+    const askedTerms =
+      outcome.move === "deposit-probe" ||
+      outcome.move === "fulfillment-probe" ||
+      outcome.move === "pickup-location";
+    const stage = !quoted
+      ? undefined
+      : outcome.digest.depositKnown && outcome.digest.fulfillmentKnown
+        ? ("terms_collected" as const)
+        : askedTerms
+          ? ("terms_pending" as const)
+          : outcome.move === "bargain" || (outcome.digest.round ?? 0) > 0
+            ? ("negotiating" as const)
+            : undefined;
+    if (stage) {
+      const { advanceThreadStage } = await import("../funnel/stages");
+      await advanceThreadStage(
+        {
+          userEmail: input.ctx.sender ?? "",
+          toNumber: input.event.toDigits,
+          vendorId: input.ctx.vendorId,
+          vendorName: input.ctx.vendorName,
+          decisionId,
+          transport: "evolution",
+          engine: "v3",
+        },
+        stage,
+        stage === "terms_collected"
+          ? "deposit and handover both known"
+          : stage === "terms_pending"
+            ? `asked the shop (${outcome.move})`
+            : `bargaining (round ${outcome.digest.round ?? 0})`,
+        { overridesOutOfStock: tc.inbound.verified.shopUnavailable === false }
+      ).catch(() => {});
+    }
+  }
+
   // Strategic wait (deliberate patience) -> a wakeup re-enters this thread later.
   // Clamped AGAIN here: this is the last gate before a durable not_before, and a
   // wait measured in hours is never a tactic, only a bug (the "until 08:28 AM"

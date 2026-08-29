@@ -1392,6 +1392,16 @@ export async function processVendorReply(opts: {
             }).slice(0, 500),
           },
         ]).catch(() => {});
+        // FUNNEL LEDGER: a typed price agreeing with the price we read off the
+        // shop's own photo is the strongest verification the funnel has.
+        if (verdict.agreement === "confirmed" && extraction.matchesSpec !== false) {
+          const { advanceThreadStage } = await import("./funnel/stages");
+          await advanceThreadStage(
+            { userEmail: ctx.sender ?? "", toNumber: from, vendorId: ctx.vendorId, vendorName: ctx.vendorName, transport: "evolution" },
+            "price_verified",
+            "typed price matches the price sheet photo"
+          ).catch(() => {});
+        }
       }
     } catch {
       /* the reconciliation is telemetry - it must never break a turn */
@@ -1435,6 +1445,51 @@ export async function processVendorReply(opts: {
       { ...replyBase, currency: cur, deposit: extraction.deposit ?? null, delivers: extraction.delivers ?? null },
     ]);
     if (!okBasic) await sbInsert("vendor_replies", [replyBase]);
+  }
+  // ---- FUNNEL LEDGER: what this reply proved (src/lib/funnel/stages.ts) ------
+  //
+  // `replied` was stamped at ingest when the frame was stored; HERE is where the
+  // reply becomes understanding, so here is where the ledger learns it. One
+  // progression stamp (the highest stage this reply's facts support) plus at
+  // most one lateral - each internally deduped, so a repeat costs one select.
+  // matchesSpec===false keeps a substitute's price out of price_received for
+  // the same reason it never becomes an offers row: the REQUESTED vehicle has
+  // no price yet.
+  {
+    const { advanceThreadStage } = await import("./funnel/stages");
+    const stageArgs = {
+      userEmail: ctx.sender ?? "",
+      toNumber: from,
+      vendorId: ctx.vendorId,
+      vendorName: ctx.vendorName,
+      transport: "evolution",
+    };
+    // The shop explicitly said the vehicle IS available - the one evidence
+    // class allowed to pull a thread back out of out_of_stock.
+    const stageOpts = { overridesOutOfStock: extraction.shopUnavailable === false };
+    const priced = Boolean(usablePrice) && extraction.matchesSpec !== false;
+    const understood =
+      priced ||
+      extraction.found ||
+      (extraction.options?.length ?? 0) > 0 ||
+      Boolean(extraction.deposit || extraction.depositType) ||
+      extraction.delivers != null ||
+      extraction.insuranceIncluded != null ||
+      extraction.deliveryFee != null ||
+      extraction.pickupOffered != null ||
+      extraction.onShopOnly != null ||
+      typeof extraction.shopUnavailable === "boolean" ||
+      extraction.shopDeclined === true;
+    if (priced) {
+      await advanceThreadStage(stageArgs, "price_received", "shop quoted a grounded price", stageOpts);
+    } else if (understood) {
+      await advanceThreadStage(stageArgs, "understood", "reply carried an actionable fact", stageOpts);
+    }
+    if (extraction.shopDeclined === true) {
+      await advanceThreadStage(stageArgs, "declined", "shop walked away");
+    } else if (extraction.shopUnavailable === true) {
+      await advanceThreadStage(stageArgs, "out_of_stock", "shop said the vehicle is not available");
+    }
   }
   // Verified shop tags (item #13): record what this reply explicitly stated.
   // A tag only ever SHOWS after >= 2 distinct replies confirm it.

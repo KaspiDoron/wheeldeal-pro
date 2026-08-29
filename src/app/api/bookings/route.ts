@@ -156,6 +156,25 @@ export async function POST(req: Request) {
     if (!stored) stored = await sbInsert("bookings", [bookingBase]);
   }
 
+  // FUNNEL LEDGER: a stored booking is the funnel reaching `booked`. The
+  // traveller committing to this shop is explicit availability evidence, so it
+  // may pull the thread out of out_of_stock. No-op when the sheet carried no
+  // shop number (the ledger needs the thread key).
+  if (stored) {
+    const { advanceThreadStage } = await import("@/lib/funnel/stages");
+    await advanceThreadStage(
+      {
+        userEmail: session.email,
+        toNumber: typeof b.whatsapp === "string" ? b.whatsapp : "",
+        vendorId: String(b.vendorId ?? "") || undefined,
+        vendorName: String(b.vendorName),
+      },
+      "booked",
+      "booking stored",
+      { overridesOutOfStock: true }
+    ).catch(() => {});
+  }
+
   if (!stored && supabaseConfigured()) {
     // Demo mode (no Supabase) is a supported configuration and must still
     // answer ok - hence the `supabaseConfigured()` guard. A CONFIGURED database

@@ -3835,6 +3835,10 @@ export async function drainOutbox(
           await sbInsert("agent_events", [
             {
               kind: "wa-send-dropped",
+              // Join columns as COLUMNS - same fix as the give-up dropEvent
+              // below; without them this event was invisible to messagePath.
+              user_email: row.sender_key,
+              to_number: row.to_number,
               vendor_id: String((row.meta as { vendorId?: string } | null)?.vendorId ?? ""),
               vendor_name: String(
                 (row.meta as { vendorName?: string } | null)?.vendorName ?? row.to_number
@@ -3958,6 +3962,28 @@ export async function drainOutbox(
       // briefly in both tables (every surface prefers "sent"), and never in
       // neither - which is what made it disappear mid-send.
       await completeOutboxRow(row.id);
+      // FUNNEL LEDGER: a drained RFQ reaching the shop IS the contact (the
+      // TRUTH RULE - the outbound row above is the evidence); a drained bargain
+      // is the negotiation moving. Keyed on the row's own meta.kind so a
+      // mid-thread answer or follow-up stamps nothing. Best-effort, deduped
+      // inside advanceThreadStage.
+      {
+        const mk = (row.meta as { kind?: string } | null)?.kind;
+        if (mk === "rfq" || mk === "bargain") {
+          const { advanceThreadStage } = await import("./funnel/stages");
+          await advanceThreadStage(
+            {
+              userEmail: row.sender_key,
+              toNumber: row.to_number,
+              vendorId: String((row.meta as { vendorId?: string } | null)?.vendorId ?? "") || undefined,
+              vendorName: String((row.meta as { vendorName?: string } | null)?.vendorName ?? "") || undefined,
+              transport: "evolution",
+            },
+            mk === "rfq" ? "contacted" : "negotiating",
+            mk === "rfq" ? "queued RFQ delivered to the shop" : "queued bargain delivered to the shop"
+          ).catch(() => {});
+        }
+      }
       // THE NUMBER THE PROMISE IS MADE OF: inbound -> wire, wall clock. The
       // turn-latency stamp measures compose time plus the PLANNED delay, which
       // is the latency we intended - not the latency that happened. Every hold,
@@ -3985,6 +4011,11 @@ export async function drainOutbox(
         await sbInsert("agent_events", [
           {
             kind: "wa-send-unconfirmed",
+            // Join columns as COLUMNS - without user_email/to_number this event
+            // was invisible to messagePath and every per-user surface (the
+            // wa-send-dropped lesson).
+            user_email: row.sender_key,
+            to_number: row.to_number,
             vendor_id: String((row.meta as { vendorId?: string } | null)?.vendorId ?? ""),
             vendor_name: String((row.meta as { vendorName?: string } | null)?.vendorName ?? row.to_number),
             detail: `Sent to +${row.to_number} (sender ${row.sender_key}) but WhatsApp returned no delivery receipt - shown as unverified.`,
@@ -4042,15 +4073,32 @@ export async function drainOutbox(
                 : "recipient",
         });
       }
-      const dropEvent = (detail: string) =>
-        sbInsert("agent_events", [
+      const dropEvent = async (detail: string) => {
+        await sbInsert("agent_events", [
           {
             kind: "wa-send-dropped",
+            // Join columns as COLUMNS (same fix as wa-send-unconfirmed above).
+            user_email: row.sender_key,
+            to_number: row.to_number,
             vendor_id: String((row.meta as { vendorId?: string } | null)?.vendorId ?? ""),
             vendor_name: String((row.meta as { vendorName?: string } | null)?.vendorName ?? row.to_number),
             detail,
           },
         ]).catch(() => {});
+        // FUNNEL LEDGER: a dropped RFQ is a shop the funnel never reached.
+        // Only the RFQ - a dropped mid-thread message is that message's
+        // problem - and the ledger itself additionally refuses `unreachable`
+        // once the shop has ever replied, so this can never mislabel a live
+        // thread even on a stale meta.kind.
+        if ((row.meta as { kind?: string } | null)?.kind === "rfq") {
+          const { advanceThreadStage } = await import("./funnel/stages");
+          await advanceThreadStage(
+            { userEmail: row.sender_key, toNumber: row.to_number, transport: "evolution" },
+            "unreachable",
+            "gave up delivering the RFQ"
+          ).catch(() => {});
+        }
+      };
 
       // A CAP IS NOT A FAULT, AND IT MUST BE TESTED FIRST.
       //
