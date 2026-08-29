@@ -32,9 +32,13 @@ import { digitsOnly } from "../phone";
 // already is exactly that, which is why this needs no migration and no new
 // table. Its GC already sweeps non-`msg:` slots.
 
-/** A full compose is bounded by the turn deadline (~45s), so a minute of
- *  exclusivity covers one turn without stranding the next. */
-export const TURN_WINDOW_SEC = 60;
+/** A full compose is bounded by the turn deadline (~45s) - but the turn is
+ *  more than the compose: comprehension, localization, the guard and the
+ *  paced send ride the same invocation, and a 60s window let a slow-but-alive
+ *  turn's sibling claim the NEXT bucket and run concurrently anyway. Two
+ *  minutes covers the whole envelope; the straddle rule still frees the
+ *  thread the moment the window rolls past a finished turn. */
+export const TURN_WINDOW_SEC = 120;
 
 /**
  * THE OTHER RACE, SAME PRIMITIVE: the traveller's own taps.

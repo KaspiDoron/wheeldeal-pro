@@ -10,7 +10,7 @@ import { describe, it, expect } from "vitest";
 import type { ThreadDigest, TurnArtifact, TurnContext, VerifiedExtraction } from "./types";
 import { legalMovesFor } from "./policy";
 import { templateFor } from "./pass";
-import { advanceConfirmState, mergeDigest, emptyDigest, CONFIRM_WAIT_MS, persistableDigest, digestFromStored } from "./digest";
+import { advanceConfirmState, mergeDigest, emptyDigest, CONFIRM_WAIT_MS, persistableDigest, digestFromStored, mergeStoredDigests } from "./digest";
 
 function ctx(partial: {
   digest?: Partial<ThreadDigest>;
@@ -217,6 +217,59 @@ describe("mergeDigest carries the step 7-8 state - and the once-flags it used to
     expect(back.recapAmended).toBe(true);
     expect(back.oweWatchArmed).toBe(true);
     expect(back.pending?.[0].at).toBe(789);
+  });
+});
+
+describe("the lost-race digest union - what a version race may no longer erase", () => {
+  it("the loser's freshly-learned facts, quote, doubts and once-flags all survive", () => {
+    // The reproduction: a tick turn (winner - knows little) races an inbound
+    // turn (ours - just read the deposit and the quote). The old merge kept
+    // `...winner.fields` and OUR digest vanished; the next turn re-asked.
+    const winner = persistableDigest({
+      ...emptyDigest(),
+      facts: ["shop is friendly"],
+      round: 1,
+      priceWatchArmed: true,
+    });
+    const ours = persistableDigest({
+      ...emptyDigest(),
+      facts: ["deposit stated: 3000 cash"],
+      quotedPricePerDay: 250,
+      round: 2,
+      comprehension: { depositStated: true, depositKind: "cash", firmTurns: 1 },
+      pending: [{ subject: "deposit", question: "cash or passport?", state: "waiting", turns: 1, at: 5 }],
+      confirmAsked: ["deposit"],
+      recapSent: true,
+      recapSentAt: 123,
+    });
+    const merged = digestFromStored(mergeStoredDigests(winner, ours));
+    expect(merged.facts).toContain("shop is friendly");
+    expect(merged.facts).toContain("deposit stated: 3000 cash");
+    expect(merged.quotedPricePerDay).toBe(250);
+    expect(merged.round).toBe(2);
+    expect(merged.comprehension?.depositStated).toBe(true);
+    expect(merged.pending?.[0].subject).toBe("deposit");
+    expect(merged.pending?.[0].at).toBe(5);
+    expect(merged.confirmAsked).toContain("deposit");
+    expect(merged.priceWatchArmed).toBe(true);
+    expect(merged.recapSent).toBe(true);
+    expect(merged.recapSentAt).toBe(123);
+  });
+
+  it("latches OR across both sides; events take the max", () => {
+    const a = persistableDigest({ ...emptyDigest(), comprehension: { firmTurns: 2, closed: true } });
+    const b = persistableDigest({ ...emptyDigest(), comprehension: { firmTurns: 1, handoverCostKnown: true } });
+    const merged = digestFromStored(mergeStoredDigests(a, b));
+    expect(merged.comprehension?.firmTurns).toBe(2);
+    expect(merged.comprehension?.closed).toBe(true);
+    expect(merged.comprehension?.handoverCostKnown).toBe(true);
+  });
+
+  it("the state layer actually calls it on the lost race", () => {
+    const { readFileSync } = require("fs") as typeof import("fs");
+    const state = readFileSync(`${process.cwd()}/src/lib/graph/state.ts`, "utf8");
+    expect(state).toContain("mergeStoredDigests(");
+    expect(state).toMatch(/winner\.fields\.digest,\s*\n\s*next\.fields\.digest/);
   });
 });
 

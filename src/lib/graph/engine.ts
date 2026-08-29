@@ -2182,7 +2182,12 @@ export async function drainGraphWakeups(
     // The heartbeat still calls this with no scope - draining everyone is a
     // worker's job, not a poll's.
     const ownerFilter = opts?.userEmail
-      ? `&thread_key=like.${encodeURIComponent(`${opts.userEmail}:*`)}`
+      ? // LIKE-ESCAPED: '_' in an email is a single-char wildcard, so
+        // "a_b@x.com" scoped-drained "aXb@x.com"'s wakeups too - a cross-user
+        // reach the exact-match purges were already fixed for.
+        `&thread_key=like.${encodeURIComponent(
+          `${opts.userEmail.replace(/([\\%_])/g, "\\$1")}:*`
+        )}`
       : "";
     const due = await sbSelect<WakeupRowDb>(
       "graph_wakeups",
@@ -2227,6 +2232,26 @@ export async function drainGraphWakeups(
         if (row.kind === "tick") {
           const input = await buildTurnFromThread(row.thread_key, "tick");
           if (input) {
+            // PER-THREAD MUTUAL EXCLUSION - the same lock the inbound path
+            // takes (agent-loop claimThreadTurn). Without it a tick and an
+            // inbound reply on the SAME thread genuinely raced: two composes,
+            // two sends, and the lost-race state merge dropping one side's
+            // digest - the exact double-send class the turn lock was built to
+            // stop, reachable through the one entry point that skipped it.
+            // A lost claim re-parks the wakeup ~90s out (no retry burned -
+            // the sibling turn IS the thread advancing).
+            const sep = row.thread_key.lastIndexOf(":");
+            const lockOwner = sep > 0 ? row.thread_key.slice(0, sep) : "";
+            const lockDigits = sep > 0 ? row.thread_key.slice(sep + 1) : row.thread_key;
+            const { claimThreadTurn, releaseThreadTurn } = await import("../wa/turn-lock");
+            const turnClaimedAt = Date.now();
+            const turn = await claimThreadTurn(lockOwner, lockDigits, turnClaimedAt);
+            if (turn === "lost") {
+              await sbUpdate("graph_wakeups", `id=eq.${row.id}`, {
+                not_before: new Date(Date.now() + 90_000).toISOString(),
+              }).catch(() => {});
+              return;
+            }
             // THE SAME BRAIN THE INBOUND PATH USES. This drain used to call
             // runGraphTurn directly, so every scheduled follow-up - the quiet-
             // thread return, the strategic wait - ran the engine that has none
@@ -2242,9 +2267,20 @@ export async function drainGraphWakeups(
             // hunt with forty threads keeps composing forever. `input.ctx.sender`
             // is the same identity the inbound turn uses.
             const { runWithAiBudget } = await import("../ai-budget");
-            await runWithAiBudget(input.ctx.sender ?? "", () =>
-              runThreadTurn(input, liveGraphIO(send), "wakeup")
-            );
+            try {
+              const routed = await runWithAiBudget(input.ctx.sender ?? "", () =>
+                runThreadTurn(input, liveGraphIO(send), "wakeup")
+              );
+              // A tick that sent nothing gives the thread back early, exactly
+              // like the inbound path - a silent wakeup must not freeze the
+              // shop's next message for the rest of the window.
+              if (routed.spte?.delivered === "silent" || routed.engine === "none") {
+                await releaseThreadTurn(lockOwner, lockDigits, turnClaimedAt).catch(() => {});
+              }
+            } catch (e) {
+              await releaseThreadTurn(lockOwner, lockDigits, turnClaimedAt).catch(() => {});
+              throw e;
+            }
             ran++;
           }
           // input === null -> the thread was cancelled / taken over / closed:
@@ -2296,7 +2332,20 @@ export async function drainGraphWakeups(
       // SUCCESS (or a dead/cancelled thread that yielded no input): the follow-up
       // is done, so retire the leased row. A mid-run death never reaches here,
       // which is the whole point - the row survives to be reclaimed.
-      await sbDelete("graph_wakeups", `id=eq.${row.id}`).catch(() => {});
+      //
+      // RETRIED, because a delete that quietly fails leaves a COMPLETED turn's
+      // lease to elapse and re-fire it - a duplicate follow-up message to a
+      // real shop. One retry; if the store still refuses, park the row far
+      // out with a done marker instead of leaving a live time bomb.
+      const retired =
+        (await sbDelete("graph_wakeups", `id=eq.${row.id}`).catch(() => false)) ||
+        (await sbDelete("graph_wakeups", `id=eq.${row.id}`).catch(() => false));
+      if (!retired) {
+        await sbUpdate("graph_wakeups", `id=eq.${row.id}`, {
+          not_before: new Date(Date.now() + 365 * 24 * 3600_000).toISOString(),
+          payload: { ...(row.payload ?? {}), done: true },
+        }).catch(() => {});
+      }
     };
     // Bounded pool: at most CONCURRENCY composes in flight at once.
     const CONCURRENCY = 6;

@@ -146,7 +146,7 @@ describe("the verbatim half of the basis", () => {
 describe("the user-move window", () => {
   it("is one human conversational beat, distinct from the engine's turn lock", () => {
     expect(USER_MOVE_WINDOW_SEC).toBe(180);
-    expect(TURN_WINDOW_SEC).toBe(60);
+    expect(TURN_WINDOW_SEC).toBe(120);
   });
 
   it("slots are per (shop, bucket) and never collide with turn slots", () => {

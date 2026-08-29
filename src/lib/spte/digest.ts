@@ -356,6 +356,70 @@ export function advanceConfirmState(
 }
 
 /**
+ * THE LOST-RACE UNION (graph/state.ts saveThreadState). When an inbound turn
+ * and a tick turn race on the optimistic version, the loser's re-merge used to
+ * keep only six counters and take `...winner.fields` for everything else -
+ * dropping the loser's WHOLE digest: the standing quote, the pending confirms,
+ * the model's durable comprehension, the once-flags. The tick turn wins the
+ * version; the inbound turn's freshly-read "deposit stated: 3000 cash"
+ * vanishes and the next turn re-asks.
+ *
+ * Union rules by what a wrong answer costs (mergeComprehension's own logic,
+ * one level up): facts union (capped), counters max, latches OR, the quote and
+ * states prefer OURS (the losing write just processed the newest event),
+ * pending doubts union by subject preferring ours.
+ */
+export function mergeStoredDigests(winnerRaw: unknown, oursRaw: unknown): Partial<ThreadDigest> {
+  const w = digestFromStored(winnerRaw);
+  const o = digestFromStored(oursRaw);
+  const facts = [...w.facts];
+  for (const f of o.facts) {
+    if (!facts.some((x) => x.toLowerCase() === f.toLowerCase())) facts.push(f);
+  }
+  const pending: PendingConfirm[] = [...(o.pending ?? [])];
+  for (const p of w.pending ?? []) {
+    if (!pending.some((x) => x.subject === p.subject)) pending.push(p);
+  }
+  const waiting = pending.find((p) => p.state === "waiting");
+  const comp: DurableComprehension | undefined =
+    w.comprehension || o.comprehension
+      ? {
+          ...(w.comprehension ?? {}),
+          ...(o.comprehension ?? {}),
+          // Events accumulate and latches only go true, whoever holds them.
+          ...(Math.max(w.comprehension?.firmTurns ?? 0, o.comprehension?.firmTurns ?? 0) > 0
+            ? { firmTurns: Math.max(w.comprehension?.firmTurns ?? 0, o.comprehension?.firmTurns ?? 0) }
+            : {}),
+          ...(w.comprehension?.depositStated || o.comprehension?.depositStated
+            ? { depositStated: true }
+            : {}),
+          ...(w.comprehension?.handoverCostKnown || o.comprehension?.handoverCostKnown
+            ? { handoverCostKnown: true }
+            : {}),
+          ...(w.comprehension?.closed || o.comprehension?.closed ? { closed: true } : {}),
+        }
+      : undefined;
+  return persistableDigest({
+    facts: facts.slice(Math.max(0, facts.length - MAX_FACTS)),
+    quotedPricePerDay: o.quotedPricePerDay ?? w.quotedPricePerDay,
+    round: Math.max(w.round, o.round),
+    tone: o.tone ?? w.tone,
+    comprehension: comp,
+    confirmAsked: [...new Set([...(w.confirmAsked ?? []), ...(o.confirmAsked ?? [])])],
+    awaitingConfirmation: waiting
+      ? { subject: waiting.subject, question: waiting.question }
+      : null,
+    pending: pending.length ? pending : undefined,
+    priceWatchArmed: w.priceWatchArmed || o.priceWatchArmed || undefined,
+    oweWatchArmed: w.oweWatchArmed || o.oweWatchArmed || undefined,
+    recapSent: w.recapSent || o.recapSent || undefined,
+    recapSentAt: o.recapSentAt ?? w.recapSentAt,
+    recapConfirmedAt: o.recapConfirmedAt ?? w.recapConfirmedAt,
+    recapAmended: w.recapAmended || o.recapAmended || undefined,
+  });
+}
+
+/**
  * Merge a turn's outcome into the durable digest: append the model's fact patch,
  * fold in verified price/decline signals deterministically (never trust the LLM
  * for numbers), bump the round when we bargained, cap + evict oldest.
