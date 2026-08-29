@@ -75,9 +75,19 @@ function mapVerified(input: GraphTurnInput): VerifiedExtraction {
   const text = input.event.kind === "inbound-text" || input.event.kind === "inbound-image"
     ? input.event.shopMessage ?? ""
     : "";
+  // GLOSS BEFORE DETECTORS. Every deterministic detector below is an English
+  // phrase test, and it used to read only the raw local-language text - so a
+  // Thai "คุณอยู่ที่ไหน" (where are you?) matched no location ask and a
+  // localized license request was never seen. The English gloss (threaded from
+  // the agent loop) is CONCATENATED, never substituted: a raw text that
+  // happens to carry English words keeps every hit it had.
+  const gloss = (input.inboundEnglish ?? "").trim();
+  const detText = gloss && text && gloss.toLowerCase() !== text.trim().toLowerCase()
+    ? `${text}\n${gloss}`
+    : text || gloss;
   // WHAT THE SHOP DID, before anything decides how to answer it.
   const acts = classifyActs({
-    text,
+    text: detText,
     hadImage: input.event.kind === "inbound-image" || Boolean(ex?.imageKind),
     imageKind: ex?.imageKind,
     pricePerDay: input.usablePrice,
@@ -86,8 +96,8 @@ function mapVerified(input: GraphTurnInput): VerifiedExtraction {
   // The legacy phrase list still widens the ask - it recognises real questions
   // the classifier's grammar test can miss ("you mean the 125?") - but it can
   // no longer promote a bare "?" or an automated greeting.
-  if (acts.ask === "none" && !acts.autoReply && text && shopAskedQuestion(text) && /\?/.test(text)) {
-    const stripped = text.replace(/\?/g, "");
+  if (acts.ask === "none" && !acts.autoReply && detText && shopAskedQuestion(detText) && /\?/.test(detText)) {
+    const stripped = detText.replace(/\?/g, "");
     if (shopAskedQuestion(stripped)) acts.ask = "substantive";
   }
   return {
@@ -113,8 +123,8 @@ function mapVerified(input: GraphTurnInput): VerifiedExtraction {
     // tell "I have two bikes at different prices" from "here is my price", and
     // read the ambiguity as "wrong vehicle" - closing a live negotiation.
     options: Array.isArray(ex?.options) ? ex.options : undefined,
-    variance: text ? signalsVariance(text) : false,
-    askedLocation: text ? shopAskedLocation(text) : false,
+    variance: detText ? signalsVariance(detText) : false,
+    askedLocation: detText ? shopAskedLocation(detText) : false,
     // A QUESTION MARK IS NOT A QUESTION. `shopAskedQuestion` is `/\?/` plus a
     // phrase list, so a price board captioned "...which model would you like?"
     // and an auto-reply's rhetorical "How many days rental?" both counted as
@@ -124,8 +134,8 @@ function mapVerified(input: GraphTurnInput): VerifiedExtraction {
     // the phrase list it recognises, never for bare punctuation.
     askedQuestion: acts.ask !== "none",
     acts,
-    askedLicense: text ? shopAskedLicense(text) : false,
-    askedLicensePhoto: text ? shopAskedLicensePhoto(text) : false,
+    askedLicense: detText ? shopAskedLicense(detText) : false,
+    askedLicensePhoto: detText ? shopAskedLicensePhoto(detText) : false,
     // The shop refused to lower ("last price") - the deterministic extractor
     // read it (agents.ts FIRM_RX) and it USED to be dropped on the floor here.
     firm: Boolean((ex as { shopFirm?: boolean } | null)?.shopFirm),
@@ -207,10 +217,19 @@ function buildDigest(
   // (from the extractor) is OR-ed in so "last price" counts on the turn it lands.
   const inbound = input.priorInbound ?? [];
   const outbound = input.priorOutbound ?? [];
-  const curInbound =
+  // GLOSS BEFORE THE SCANNERS (same doctrine as mapVerified): thread-facts,
+  // the claim ledger and the options accumulator are all English phrase tests,
+  // and the current message used to reach them raw. Concatenated, never
+  // substituted, so English words in the raw text keep their hits.
+  const curRaw =
     input.event.kind === "inbound-text" || input.event.kind === "inbound-image"
       ? input.event.shopMessage ?? ""
       : "";
+  const curGloss = (input.inboundEnglish ?? "").trim();
+  const curInbound =
+    curGloss && curRaw && curGloss.toLowerCase() !== curRaw.trim().toLowerCase()
+      ? `${curRaw}\n${curGloss}`
+      : curRaw || curGloss;
   const facts = deriveThreadFacts({
     outbound,
     outboundKinds: input.priorOutboundKinds,

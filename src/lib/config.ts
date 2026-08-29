@@ -170,7 +170,12 @@ const KEYS: {
   { name: "GEMINI_VISION_MODEL", label: "Gemini vision model id (blank = default)", scope: "ai", editable: true, secret: false },
   { name: "GROQ_VISION_MODEL", label: "Groq vision model id (blank = default)", scope: "ai", editable: true, secret: false },
   { name: "ANTHROPIC_VISION_MODEL", label: "Anthropic vision model id (blank = default)", scope: "ai", editable: true, secret: false },
-  { name: "GRAPH_ENGINE", label: "Negotiation engine ('off' = legacy pipeline)", scope: "ai", editable: true },
+  // THE ENGINE SWITCHES, honestly labelled. The legacy pipeline the old
+  // GRAPH_ENGINE label pointed at is DELETED - 'off' now means "no failover
+  // net behind SPTE", which is an emergency lever, not a mode.
+  { name: "NEGOTIATION_ENGINE", label: "Negotiation engine ('spte' = default primary; 'graph' = run every turn on the failover engine)", scope: "ai", editable: true, secret: false },
+  { name: "ENGINE_V3", label: "SPTE kill switch ('off' = same as NEGOTIATION_ENGINE=graph; historical spelling)", scope: "ai", editable: true, secret: false },
+  { name: "GRAPH_ENGINE", label: "Failover engine ('off' = NO net behind SPTE - replies stop if SPTE throws)", scope: "ai", editable: true, secret: false },
   // ---- Monetization: the warm-up gate and its measurement holdout ----------
   //
   // The thresholds are here rather than hardcoded so the gate can be loosened or

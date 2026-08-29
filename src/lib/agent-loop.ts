@@ -2094,7 +2094,13 @@ export async function processVendorReply(opts: {
       .map((m) => m.raw?.move ?? m.raw?.kind ?? undefined),
     priorInbound: thread
       .filter((m) => m.direction === "inbound")
-      .map((m) => m.body ?? "")
+      // THE GLOSS, NOT THE RAW THAI, when one exists. Every deterministic
+      // scanner downstream (the claim ledger, thread-facts, the options
+      // accumulator) is written in English; feeding it raw local-language
+      // priors made every prior message invisible to all of them - the
+      // engine "forgot" facts stated two messages ago on localized threads.
+      // Digits survive translation, so prices are unaffected.
+      .map((m) => (m.raw as { english?: string } | null)?.english ?? m.body ?? "")
       .filter(Boolean),
     legacyCounts: {
       clarify: autoClarifies,

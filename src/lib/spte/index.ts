@@ -19,6 +19,13 @@ export { runTurn, type TurnOutcome } from "./orchestrator";
 export async function engineV3Enabled(): Promise<boolean> {
   try {
     const { getConfig } = await import("../runtime-config");
+    // THE ONE OWNER SWITCH, tri-state: unset/"spte" -> SPTE primary (the
+    // default); "graph" -> the graph engine takes every turn (a deliberate,
+    // reversible rollback with a name, instead of remembering which legacy
+    // boolean spelled it). ENGINE_V3=off stays honoured as the historical
+    // spelling of the same rollback.
+    const mode = ((await getConfig("NEGOTIATION_ENGINE")) ?? "").trim().toLowerCase();
+    if (mode === "graph") return false;
     const v = ((await getConfig("ENGINE_V3")) ?? "").trim().toLowerCase();
     return v !== "off" && v !== "0" && v !== "false";
   } catch {
