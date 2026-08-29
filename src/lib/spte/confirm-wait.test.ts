@@ -126,10 +126,13 @@ describe("an unconfirmed deposit does not read as known - from ANY source", () =
     });
     const legal = legalMovesFor(withDoubt);
     expect(legal).not.toContain("present");
-    // ...while the very same thread WITHOUT the carried doubt presents happily,
-    // so this test cannot pass by accident on a thread that was never complete.
+    expect(legal).not.toContain("verify-recap");
+    // ...while the very same thread WITHOUT the carried doubt moves to step 7
+    // (the shop-facing recap - `present` itself comes only after the shop
+    // confirms it), so this test cannot pass by accident on a thread that was
+    // never complete.
     expect(legalMovesFor(ctx({ digest: completeDigest(), verified: { found: false } }))).toContain(
-      "present"
+      "verify-recap"
     );
   });
 
@@ -259,8 +262,11 @@ describe("once we have asked, the thread waits", () => {
     expect(answered.pending).toBeUndefined();
     expect(answered.awaitingConfirmation).toBeNull();
     // The thread moves again - and only now. This deal is complete once the
-    // deposit is settled, so the move it was being held back from is `present`.
-    expect(legalMovesFor(ctx({ digest: answered, verified: { found: false } }))).toContain("present");
+    // deposit is settled, so the move it was held back from is step 7: the
+    // shop-facing verify-recap (`present` comes only after the shop confirms).
+    expect(legalMovesFor(ctx({ digest: answered, verified: { found: false } }))).toContain(
+      "verify-recap"
+    );
   });
 
   it("...and a shop that NEVER answers cannot freeze the thread forever", () => {

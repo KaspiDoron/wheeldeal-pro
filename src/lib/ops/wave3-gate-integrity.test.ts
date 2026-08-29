@@ -574,7 +574,9 @@ describe("defect 11: the replayed context carries what live derives", () => {
       rfq: RFQ,
       floor: FLOOR,
     });
-    expect(r.turns[0].legalMoves).toContain("present");
+    // A complete deal goes to the shop for confirmation FIRST (step 7 -
+    // verify-recap); `present` is state-only and comes after the shop's yes.
+    expect(r.turns[0].legalMoves).toContain("verify-recap");
     expect(r.turns[0].legalMoves).not.toContain("bargain");
   });
 

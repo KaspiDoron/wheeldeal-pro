@@ -166,10 +166,21 @@ describe("SPTE policy rails (legal move computation)", () => {
     expect(legal).toContain("deposit-probe");
   });
 
-  it("deposit + fulfillment known + price -> present the deal", () => {
+  it("deposit + fulfillment known + price -> step 7: recap first, present only after the shop confirms", () => {
     const c = ctx({ verified: { found: true, pricePerDay: 300 } });
     c.thread.digest = { ...emptyDigest(), firmCount: 2, depositKnown: true, fulfillmentKnown: true, quotedPricePerDay: 300 };
+    // A complete deal goes to the SHOP for confirmation first...
+    expect(legalMovesFor(c)).toContain("verify-recap");
+    expect(legalMovesFor(c)).not.toContain("present");
+    // ...the recap never repeats (the once latch)...
+    c.thread.digest.recapSent = true;
+    expect(legalMovesFor(c)).not.toContain("verify-recap");
+    // ...and once the shop confirmed it, `present` (state-only) becomes legal.
+    c.thread.digest.recapConfirmedAt = 1_700_000_000_000;
     expect(legalMovesFor(c)).toContain("present");
+    // Presented once, it never re-marks.
+    c.thread.presented = true;
+    expect(legalMovesFor(c)).not.toContain("present");
   });
 });
 

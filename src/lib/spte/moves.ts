@@ -19,6 +19,11 @@ const MEANING: Record<MoveKind, string> = {
   answer: "answer what the shop just asked, and nothing more",
   clarify: "ask for the daily price - we still do not have one",
   present: "state the deal as it stands so the traveller can decide",
+  "verify-recap":
+    "recap the agreed terms back to the shop in one short message - the daily " +
+    "price, the length, the deposit and how the vehicle is collected - and ask " +
+    "them to confirm it is all correct. If a term is still unknown, ask it " +
+    "inside the recap instead of guessing. Never change any number",
   farewell:
     "a warm goodbye ONLY - thank them and end the conversation. This is NOT " +
     "an agreement: never state a price, never accept one, never confirm a booking",

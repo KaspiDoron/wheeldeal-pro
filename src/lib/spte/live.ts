@@ -461,6 +461,10 @@ function metaKindFor(move: MoveKind): string {
     // round counter, and it must not be paced as a cold intro either.
     case "confirm":
       return "auto-confirm";
+    // The step-7 recap: its own kind, so the transcript can say "final
+    // verification" instead of filing it as a generic reply.
+    case "verify-recap":
+      return "auto-recap";
     case "answer":
     case "deposit-probe":
     case "fulfillment-probe":
@@ -654,7 +658,13 @@ async function buildTurnContext(
       vendorId: input.ctx.vendorId ?? "",
       shop: input.ctx.vendorName ?? input.ctx.vendorId ?? "shop",
       digest,
+      // The once-latch that stops `present` re-marking an already-presented
+      // deal on every later inbound (fields.presented is the durable truth).
+      presented: Boolean((state?.fields as { presented?: boolean } | undefined)?.presented),
     },
+    // Wall clock for the confirm-wait and recap-answer bounds. Live only -
+    // replays leave it unset and keep pure turn arithmetic.
+    nowMs: io.now(),
     tail: buildTail(input),
     inbound: { text, verified },
     legalMoves: [], // computed deterministically inside runTurn (legalMovesFor)
@@ -785,8 +795,11 @@ async function persistThreadOutcome(args: {
     // the two sources so a projection can never walk them backwards.
     fields.rounds = Math.max(fields.rounds ?? 0, digest.round ?? 0);
     fields.firmCount = Math.max(fields.firmCount ?? 0, digest.firmCount ?? 0);
-    // A deal the agent PRESENTED to the traveller is past negotiation.
-    if (move === "present") fields.presented = true;
+    // A deal the agent PRESENTED to the traveller is past negotiation - and a
+    // recap the SHOP has confirmed is presented by definition (step 8): the
+    // confirm turn already marked the offer presentable, so the phase and the
+    // UI flip together off the same digest fact.
+    if (move === "present" || digest.recapConfirmedAt != null) fields.presented = true;
     fields.digest = persistableDigest(digest);
     // The vehicle this thread negotiates (owner report 6 C4): the thread key
     // is user:number with no vehicle dimension, so the sessionTable's rival
@@ -991,6 +1004,76 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
     }).catch(() => null);
   }
 
+  // ---- STEP 8: DID THE SHOP CONFIRM THE RECAP? (funnel: shop_confirmed) -----
+  //
+  // Runs BEFORE the turn so the policy sees the confirmation when it decides
+  // the move. Two readers, in order of trust:
+  //   - DETERMINISTIC correction: a fresh verified quote that differs from the
+  //     standing one on an unconfirmed recap is the shop amending the terms -
+  //     the latch re-opens for ONE amended recap (recapAmended bounds it) and
+  //     the new number flows through the ordinary digest merge.
+  //   - The ConfirmAnswer read (the same schema-validated judgement the
+  //     confirm-wait uses): "yes correct", "ok see you", a thumbs-up sentence
+  //     all confirm; talking about something else does not. On yes: the clock
+  //     stamps, the funnel reaches shop_confirmed, and the offer is marked
+  //     presentable - fields.presented flips in persistThreadOutcome off the
+  //     same digest fact, so every surface agrees.
+  // Internally total: an outage reads as "not confirmed yet" and the recap
+  // wall-clock bound (policy) eventually presents with the honest caveat.
+  if (
+    tc.thread.digest.recapSent &&
+    tc.thread.digest.recapConfirmedAt == null &&
+    tc.event === "shop-message" &&
+    tc.inbound.text.trim()
+  ) {
+    try {
+      const dg = tc.thread.digest;
+      const freshQuote = tc.inbound.verified.found ? tc.inbound.verified.pricePerDay : undefined;
+      const priceCorrected =
+        typeof freshQuote === "number" &&
+        typeof dg.quotedPricePerDay === "number" &&
+        freshQuote !== dg.quotedPricePerDay;
+      if (priceCorrected && !dg.recapAmended) {
+        dg.recapSent = undefined;
+        dg.recapSentAt = undefined;
+        dg.recapAmended = true;
+      } else if (!priceCorrected) {
+        const { readConfirmAnswer } = await import("../semantic/classifiers");
+        const read = await readConfirmAnswer(
+          "We recapped the agreed rental terms (price, length, deposit, handover) and asked the shop to confirm they are all correct.",
+          tc.inbound.text,
+          undefined,
+          { budgetMs: 6_000 }
+        ).catch(() => null);
+        if (read?.value?.answered && !read.value.stillUnclear) {
+          dg.recapConfirmedAt = io.now();
+          const { advanceThreadStage } = await import("../funnel/stages");
+          await advanceThreadStage(
+            {
+              userEmail: input.ctx.sender ?? "",
+              toNumber: input.event.toDigits,
+              vendorId: input.ctx.vendorId,
+              vendorName: input.ctx.vendorName,
+              transport: "evolution",
+              engine: "v3",
+            },
+            "shop_confirmed",
+            "shop confirmed the recap"
+          ).catch(() => {});
+          await io
+            .markPresentable({
+              userEmail: input.ctx.sender,
+              vendorId: input.ctx.vendorId,
+              fulfillment: priorState?.fields.fulfillment ?? null,
+            })
+            .catch(() => {});
+        }
+      }
+    } catch {
+      /* not confirmed yet - the wall-clock bound is the net */
+    }
+  }
+
   const outcome = await runTurn(tc); // never throws, never silent on a composable move
 
   // ---- from here we OWN the turn: never throw (would risk a double send) -----
@@ -1116,7 +1199,25 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
     now: io.now(),
   });
 
-  let send = outcome.text && outcome.move !== "silent" ? outcome.text : undefined;
+  // PRESENT IS STATE-ONLY (the graph node's own rule, finally on the live
+  // path): it marks the deal presentable to the TRAVELLER and sends NOTHING.
+  // Its composed text used to go out through guardAndSend to the SHOP - an
+  // internal "state the deal so the traveller can decide" note, transmitted to
+  // the counterparty under a haggling prompt. The shop-facing half of the
+  // presentation family is `verify-recap`, which has its own template.
+  let send =
+    outcome.text && outcome.move !== "silent" && outcome.move !== "present"
+      ? outcome.text
+      : undefined;
+  if (outcome.move === "present") {
+    await io
+      .markPresentable({
+        userEmail: input.ctx.sender,
+        vendorId: input.ctx.vendorId,
+        fulfillment: priorState?.fields.fulfillment ?? null,
+      })
+      .catch(() => {});
+  }
 
   if (send) {
     // THE PRIMARY ENGINE LOCALIZES (W4.6). Before the human pause, so the pause
@@ -1171,6 +1272,22 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
         delivered = "failed";
       }
     }
+  }
+
+  // ---- WALL-CLOCK STAMPS for the two waits (steps 7-8 + confirm-wait) -------
+  //
+  // Stamped on the digest BEFORE persistThreadOutcome writes it, and only on a
+  // delivery that actually reached the wire (queued/held count - the drain
+  // delivers them verbatim). These are what the wall-clock bounds in policy.ts
+  // and advanceConfirmState measure against; without them a shop that never
+  // replies freezes the thread forever (the confirm-wait finding).
+  const reachedWire = send && delivered !== "blocked" && delivered !== "failed";
+  if (reachedWire && outcome.move === "verify-recap") {
+    outcome.digest.recapSentAt = io.now();
+  }
+  if (reachedWire && outcome.move === "confirm") {
+    const w = outcome.digest.pending?.find((p) => p.state === "waiting");
+    if (w && w.at == null) w.at = io.now();
   }
 
   // ---- judge enqueue (never inline - a cheap later invocation grades it) -----
@@ -1258,6 +1375,20 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
     !tc.inbound.verified.deflected &&
     !tc.inbound.verified.shopUnavailable;
   if (armPriceWatch) outcome.digest.priceWatchArmed = true;
+  // ...and the ONCE-PER-THREAD owe-watch: a delivered PROBE whose answer never
+  // comes causes no turn, and with no turn no bound is ever evaluated (the
+  // priced-dead-end freeze). Flag set HERE - before the digest is persisted -
+  // for the same reason priceWatchArmed is; the wakeup itself is inserted in
+  // the wakeup section below.
+  const armOweWatch =
+    reachedWire &&
+    (outcome.move === "deposit-probe" ||
+      outcome.move === "fulfillment-probe" ||
+      outcome.move === "option-probe" ||
+      outcome.move === "confirm-vehicle" ||
+      outcome.move === "clarify") &&
+    !outcome.digest.oweWatchArmed;
+  if (armOweWatch) outcome.digest.oweWatchArmed = true;
 
   // Awaited, not detached: Cloud Run freezes the CPU the moment the response
   // flushes, so a detached write is a write that may never happen. Internally
@@ -1292,15 +1423,19 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
       outcome.move === "deposit-probe" ||
       outcome.move === "fulfillment-probe" ||
       outcome.move === "pickup-location";
+    const recapDelivered =
+      outcome.move === "verify-recap" && delivered !== "blocked" && delivered !== "failed";
     const stage = !quoted
       ? undefined
-      : outcome.digest.depositKnown && outcome.digest.fulfillmentKnown
-        ? ("terms_collected" as const)
-        : askedTerms
-          ? ("terms_pending" as const)
-          : outcome.move === "bargain" || (outcome.digest.round ?? 0) > 0
-            ? ("negotiating" as const)
-            : undefined;
+      : recapDelivered
+        ? ("verifying" as const)
+        : outcome.digest.depositKnown && outcome.digest.fulfillmentKnown
+          ? ("terms_collected" as const)
+          : askedTerms
+            ? ("terms_pending" as const)
+            : outcome.move === "bargain" || (outcome.digest.round ?? 0) > 0
+              ? ("negotiating" as const)
+              : undefined;
     if (stage) {
       const { advanceThreadStage } = await import("../funnel/stages");
       await advanceThreadStage(
@@ -1314,11 +1449,13 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
           engine: "v3",
         },
         stage,
-        stage === "terms_collected"
-          ? "deposit and handover both known"
-          : stage === "terms_pending"
-            ? `asked the shop (${outcome.move})`
-            : `bargaining (round ${outcome.digest.round ?? 0})`,
+        stage === "verifying"
+          ? "verify-recap sent to the shop"
+          : stage === "terms_collected"
+            ? "deposit and handover both known"
+            : stage === "terms_pending"
+              ? `asked the shop (${outcome.move})`
+              : `bargaining (round ${outcome.digest.round ?? 0})`,
         { overridesOutOfStock: tc.inbound.verified.shopUnavailable === false }
       ).catch(() => {});
     }
@@ -1424,7 +1561,13 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
   // and loosening it would give a hallucinated wait the run of the thread
   // again. This wait is the engine's own, its horizon is a fixed constant, and
   // it is armed at most once per thread.
-  if (armPriceWatch && !waitMinutes) {
+  //
+  // NOT gated on `!waitMinutes` any more: the flag was persisted as armed
+  // either way, so a thread whose model happened to pause this turn recorded
+  // "watch armed" with NO watch ever scheduled - once, ever, means it then
+  // never could be. A short pause tick and the long watch coexist harmlessly
+  // (the earlier one that finds nothing to say goes silent and costs nothing).
+  if (armPriceWatch) {
     await io
       .insertWakeup({
         kind: "tick",
@@ -1439,6 +1582,41 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
         },
       })
       .catch(() => {});
+  }
+
+  // A QUESTION ON THE WIRE IS OWED A RE-ENTRY (the confirm-wait and
+  // priced-dead-end findings). A confirm or a verify-recap the shop ignores
+  // causes NO turn, and with no turn neither the turn bound nor the wall-clock
+  // bound is ever EVALUATED - the freeze was not the bound's size but the
+  // absence of any turn to apply it in. So every delivered confirm/recap arms
+  // one tick just past its wall-clock bound; and a delivered PROBE arms the
+  // once-per-thread owe-watch (same doctrine as the price watch: one durable
+  // re-entry, or the negotiator becomes a broadcast loop). The tick re-enters
+  // through the same engine; if the shop answered meanwhile the ordinary flow
+  // runs, and if not the bound releases / the recap rescue takes over.
+  {
+    const wantAnswerTick =
+      reachedWire && (outcome.move === "confirm" || outcome.move === "verify-recap");
+    if (wantAnswerTick || armOweWatch) {
+      const { CONFIRM_WAIT_MS } = await import("./digest");
+      const delayMs = wantAnswerTick ? CONFIRM_WAIT_MS + 5 * 60_000 : 35 * 60_000;
+      await io
+        .insertWakeup({
+          kind: "tick",
+          threadKey: input.event.threadKey,
+          notBefore: new Date(io.now() + delayMs).toISOString(),
+          payload: {
+            userEmail: input.ctx.sender,
+            vendorId: input.ctx.vendorId,
+            engine: "v3",
+            reason: wantAnswerTick
+              ? "waiting for the shop's answer - checking back if it never comes"
+              : "an open question is still unanswered - one check-back scheduled",
+            vendorName: input.ctx.vendorName,
+          },
+        })
+        .catch(() => {});
+    }
   }
 
   // THE SIBLING RE-BARGAIN - the swarm behaviour `materialDrop` has promised in
