@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { readFileSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 
 vi.mock("server-only", () => ({}));
@@ -267,15 +267,11 @@ describe("no send path walks around the lock", () => {
     expect(claimAt).toBeLessThan(sendAt);
   });
 
-  it("so does the owner's live drill", () => {
-    const drill = readCode("src/app/api/admin/drill/route.ts");
-    const claimAt = drill.indexOf("claimForSend(session.email, digits, guard.text");
-    // Matched on the prefix: the call gained a `{ skipJitter: true }` argument
-    // (the owner is watching this drill run), and pinning the exact closing
-    // paren made an unrelated argument change look like a lock regression.
-    const sendAt = drill.indexOf("sendFromUser(session.email, digits, guard.text, true");
-    expect(claimAt).toBeGreaterThan(0);
-    expect(claimAt).toBeLessThan(sendAt);
+  it("the owner's live drill route stays deleted - a send path with no lock discipline to pin", () => {
+    // It went from the guard verdict to real WhatsApp with zero UI consumers;
+    // Wave 7 deleted it (dead-code.test.ts pins the deletion). If it returns,
+    // it returns WITH the claim-before-send discipline this suite enforces.
+    expect(existsSync(join(process.cwd(), "src/app/api/admin/drill"))).toBe(false);
   });
 
   it("and the traveller is TOLD, not silently queued behind their own agent", () => {

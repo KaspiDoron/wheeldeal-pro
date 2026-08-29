@@ -617,6 +617,12 @@ export default function AdminPage() {
   const [savingKey, setSavingKey] = useState<string | null>(null);
   const [userSearch, setUserSearch] = useState("");
   const [userSort, setUserSort] = useState<"new" | "old" | "management">("new");
+  // The REAL account count + paging (the tab used to cap silently at the
+  // route's window while Analytics printed the exact total next door).
+  const [usersTotal, setUsersTotal] = useState<number | null>(null);
+  const [usersHasMore, setUsersHasMore] = useState(false);
+  const [usersNextOffset, setUsersNextOffset] = useState(0);
+  const [usersLoadingMore, setUsersLoadingMore] = useState(false);
   const [feedbackRows, setFeedbackRows] = useState<FeedbackRow[]>([]);
   // THE PANEL USED TO RENDER THE PAGE SIZE UNDER THE WORD "TOTAL".
   //
@@ -628,6 +634,10 @@ export default function AdminPage() {
   // count is unreadable, which renders as "-" rather than as a number we made
   // up), and the page itself is labelled Shown.
   const [feedbackTotal, setFeedbackTotal] = useState<number | null>(null);
+  // The two headline tiles' REAL counts (whole table). They were .length over
+  // the loaded page, so "High severity: 3" was a fact about pagination.
+  const [feedbackHighTotal, setFeedbackHighTotal] = useState<number | null>(null);
+  const [feedbackIssuesTotal, setFeedbackIssuesTotal] = useState<number | null>(null);
   const [feedbackNextOffset, setFeedbackNextOffset] = useState(0);
   const [feedbackHasMore, setFeedbackHasMore] = useState(false);
   const [feedbackLoadingMore, setFeedbackLoadingMore] = useState(false);
@@ -644,6 +654,7 @@ export default function AdminPage() {
   const [costs, setCosts] = useState<any>(null);
   // The kill switch's write outcome (502 / fleet warning) - see the onClick.
   const [killSwitchMsg, setKillSwitchMsg] = useState<string | null>(null);
+  const [costsErr, setCostsErr] = useState(false);
   const [limitEdit, setLimitEdit] = useState<Record<string, string>>({});
   const [limitsBusy, setLimitsBusy] = useState(false);
   const [limitsMsg, setLimitsMsg] = useState<string | null>(null);
@@ -680,11 +691,22 @@ export default function AdminPage() {
   }
 
   async function refreshCosts() {
-    const c = await (await fetch("/api/admin/costs")).json();
-    setCosts(c);
-    setLimitEdit(
-      Object.fromEntries(Object.entries(c.limits ?? {}).map(([k, v]) => [k, String(v)]))
-    );
+    // A failed read is a STATE, not a silent hole: the whole cost card - the
+    // kill switch included - is wrapped in {costs && ...}, so without this a
+    // fetch failure removed the owner's one emergency control with no trace.
+    try {
+      const res = await fetch("/api/admin/costs");
+      if (!res.ok) throw new Error(String(res.status));
+      const c = await res.json();
+      setCosts(c);
+      setCostsErr(false);
+      setLimitEdit(
+        Object.fromEntries(Object.entries(c.limits ?? {}).map(([k, v]) => [k, String(v)]))
+      );
+    } catch {
+      setCostsErr(true);
+      throw new Error("costs unreadable");
+    }
   }
 
   async function testKey(name: string) {
@@ -753,6 +775,9 @@ export default function AdminPage() {
       }
       setPersistent(Boolean(cfg.persistent));
       setUsers(u.users ?? []);
+      setUsersTotal(typeof u.total === "number" ? u.total : null);
+      setUsersHasMore(Boolean(u.hasMore));
+      setUsersNextOffset(Number(u.nextOffset) || 0);
       setPlans(bill.plans ?? []);
       setBillingOn(Boolean(bill.configured));
       setIsOwner(me.session?.role === "owner");
@@ -762,6 +787,8 @@ export default function AdminPage() {
       setFeedbackRows(fb.feedback ?? []);
       setFeedbackByCategory(fb.byCategory ?? {});
       setFeedbackTotal(typeof fb.total === "number" ? fb.total : null);
+      setFeedbackHighTotal(typeof fb.highSeverityTotal === "number" ? fb.highSeverityTotal : null);
+      setFeedbackIssuesTotal(typeof fb.realIssuesTotal === "number" ? fb.realIssuesTotal : null);
       setFeedbackNextOffset(Number(fb.nextOffset) || 0);
       setFeedbackHasMore(Boolean(fb.hasMore));
       // Costs are non-blocking - never make first paint wait on them.
@@ -777,6 +804,29 @@ export default function AdminPage() {
     if (tab === "analytics" && floors.length === 0) loadFloors().catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
+
+  // SERVER-SIDE search for email fragments: the loaded page is a window, and
+  // an account beyond it used to be told "No users match" while Analytics
+  // counted it. Digit-only input (a phone search) stays client-side - email is
+  // the only queryable column, and narrowing by it would hide phone matches.
+  useEffect(() => {
+    const q = userSearch.trim();
+    if (!q || /^[\d+\s-]+$/.test(q)) return;
+    const t = setTimeout(() => {
+      fetch(`/api/admin/users?q=${encodeURIComponent(q)}`)
+        .then((r) => r.json())
+        .then((d) => {
+          if (!Array.isArray(d.users)) return;
+          setUsers(d.users);
+          setUsersTotal(typeof d.total === "number" ? d.total : null);
+          setUsersHasMore(Boolean(d.hasMore));
+          setUsersNextOffset(Number(d.nextOffset) || 0);
+        })
+        .catch(() => {});
+    }, 350);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userSearch]);
 
   const visibleUsers = useMemo(() => {
     const q = userSearch.trim().toLowerCase();
@@ -1404,6 +1454,11 @@ export default function AdminPage() {
         </div>
       )}
 
+      {/* The cross-user QUEUE - the screen the two queue alerts point at.
+          Backed by /api/admin/wa-queue (rows, reasons, flush-due, drop-one),
+          which had zero UI consumers while its alerts sent the owner to Keys. */}
+      {loaded && tab === "command" && <WaQueuePanel />}
+
       {/* Anti-Ban engine + Sponsored shops - moved to Command (item #16), foldable */}
       {loaded && tab === "command" && (
         <div className="mt-3 space-y-3">
@@ -1529,6 +1584,31 @@ export default function AdminPage() {
                           }}
                           className="mt-0.5 w-full rounded border border-line bg-card p-1 text-[12px] font-extrabold text-strong"
                         />
+                        {/* The route's reset action finally has a button:
+                            setPolicy is upsert-only, so without this a bad
+                            override row was permanent from the UI. */}
+                        <button
+                          type="button"
+                          title="Remove the override - the code default applies again"
+                          onClick={async () => {
+                            const r = await fetch("/api/admin/wa-security", {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({ action: "reset", key: k }),
+                            })
+                              .then((x) => x.json())
+                              .catch(() => ({ error: "Could not reach the server." }));
+                            if (r.error) {
+                              setWaPolicyErr({ key: k, error: String(r.error) });
+                              return;
+                            }
+                            setWaPolicyErr(null);
+                            if (r.policies) setWaSec({ ...waSec, policies: r.policies });
+                          }}
+                          className="mt-0.5 text-[9px] font-extrabold text-faint underline"
+                        >
+                          ↺ default
+                        </button>
                         {waPolicyErr?.key === k && (
                           <div className="mt-1 text-[10px] font-extrabold text-brandred">
                             {waPolicyErr.error}
@@ -1675,6 +1755,22 @@ export default function AdminPage() {
 
       {loaded && tab === "analytics" && analytics && (
         <div className="space-y-3">
+          {/* The failed-read card RESTORES the kill switch's reachability:
+              everything below is wrapped in {costs && ...}, so without this a
+              fetch failure removed the emergency control with no trace. */}
+          {costsErr && !costs && (
+            <div className="rounded-blob border-2 border-brandred/40 bg-brandred-soft p-4 text-center">
+              <p className="text-[13px] font-extrabold text-brandred">
+                The cost tracker - and the kill switch with it - could not be read.
+              </p>
+              <button
+                onClick={() => refreshCosts().catch(() => {})}
+                className="btn btn-sm mt-2 rounded-xl border-2 border-brandred/40 px-3 text-[11px] font-extrabold text-brandred"
+              >
+                ↻ Retry
+              </button>
+            </div>
+          )}
           {/* Cost tracker: every request against the free quotas + est. cost */}
           {costs && (
             <div className="surface rounded-blob p-4">
@@ -1740,7 +1836,7 @@ export default function AdminPage() {
                         className={`h-full rounded-full ${
                           a.used >= a.free ? "bg-brandred" : a.used >= a.free * 0.8 ? "bg-brandyellow" : "bg-savings"
                         }`}
-                        style={{ width: `${Math.min(100, (a.used / a.free) * 100)}%` }}
+                        style={{ width: `${a.free > 0 ? Math.min(100, (a.used / a.free) * 100) : 100}%` }}
                       />
                     </div>
                   </div>
@@ -2555,6 +2651,13 @@ export default function AdminPage() {
             </select>
           </div>
 
+          {/* The honest scope line: how many are on screen vs how many exist
+              (the exact same count the Analytics tile shows). */}
+          {usersTotal != null && usersTotal > users.length && (
+            <div className="text-center text-[11px] font-bold text-faint">
+              Showing {users.length} of {usersTotal} accounts
+            </div>
+          )}
           {users.length === 0 && (
             <div className="surface rounded-blob p-4 text-center text-[12px] text-faint">
               No registered users found. If someone signed up but is missing
@@ -2661,6 +2764,33 @@ export default function AdminPage() {
               )}
             </div>
           ))}
+          {usersHasMore && (
+            <button
+              onClick={async () => {
+                setUsersLoadingMore(true);
+                try {
+                  const q = userSearch.trim() && !/^[\d+\s-]+$/.test(userSearch.trim())
+                    ? `&q=${encodeURIComponent(userSearch.trim())}`
+                    : "";
+                  const d = await fetch(`/api/admin/users?offset=${usersNextOffset}${q}`).then((r) => r.json());
+                  if (Array.isArray(d.users)) {
+                    // Append, never replace - the reader keeps their place.
+                    setUsers((cur) => [...cur, ...d.users]);
+                    setUsersHasMore(Boolean(d.hasMore));
+                    setUsersNextOffset(Number(d.nextOffset) || 0);
+                  }
+                } catch {
+                  /* leave the button so it can simply be pressed again */
+                } finally {
+                  setUsersLoadingMore(false);
+                }
+              }}
+              disabled={usersLoadingMore}
+              className="btn btn-sm w-full rounded-xl border-2 border-line py-2 text-[11px] font-extrabold text-soft disabled:opacity-60"
+            >
+              {usersLoadingMore ? <LoadingDots label="Loading" /> : "Load more accounts"}
+            </button>
+          )}
         </div>
       )}
 
@@ -2730,12 +2860,18 @@ export default function AdminPage() {
         <div className="space-y-3">
           {/* Summary counts */}
           <div className="grid grid-cols-3 gap-2">
+            {/* Real counts over the WHOLE table (null = unreadable = a dash),
+                the same fix the Total tile already got - a page-scoped .length
+                next to a true total was two vocabularies in one row. */}
             <Metric
               label="High severity"
-              value={String(feedbackRows.filter((f) => f.is_real_issue && f.severity === "high").length)}
+              value={feedbackHighTotal == null ? "-" : String(feedbackHighTotal)}
               accent
             />
-            <Metric label="Real issues" value={String(feedbackRows.filter((f) => f.is_real_issue).length)} />
+            <Metric
+              label="Real issues"
+              value={feedbackIssuesTotal == null ? "-" : String(feedbackIssuesTotal)}
+            />
             {/* Two different facts, named apart: how many exist, and how many
                 are on screen right now. They used to be the same number by
                 accident, which is how 100 could mean "all of them". */}
@@ -3367,6 +3503,172 @@ function BetaManager() {
           value is wiped on the next push.
         </p>
       )}
+    </div>
+  );
+}
+
+// THE CROSS-USER QUEUE, restored to a screen. Every traveller manages their
+// own queue on the deals page - but the OPERATOR's question ("why is the
+// drain stuck", "what is this shop still waiting on") is fleet-wide, and the
+// alerts that raise it need a panel that can answer it: rows with their
+// pacing reasons, a flush for the due ones, a drop for a wrong one. Foldable
+// and fetch-on-open, so the Command tab pays nothing while it is closed.
+function WaQueuePanel() {
+  const [data, setData] = useState<{
+    items: {
+      id: number;
+      to: string;
+      preview: string;
+      notBefore: string;
+      due: boolean;
+      overdue: boolean;
+      vendorName: string | null;
+      reason: string;
+    }[];
+    total: number;
+    due: number;
+    overdue: number;
+  } | null>(null);
+  const [queueErr, setQueueErr] = useState(false);
+  const [queueBusy, setQueueBusy] = useState<string | null>(null);
+  const [queueMsg, setQueueMsg] = useState<string | null>(null);
+  const [opened, setOpened] = useState(false);
+
+  const loadQueue = async () => {
+    setQueueErr(false);
+    try {
+      const r = await fetch("/api/admin/wa-queue", { cache: "no-store" });
+      if (!r.ok) throw new Error(String(r.status));
+      const d = await r.json();
+      if (!Array.isArray(d?.items)) throw new Error("bad payload");
+      setData(d);
+    } catch {
+      setQueueErr(true);
+    }
+  };
+
+  return (
+    <div className="mt-3">
+      <details
+        className="surface rounded-blob p-4"
+        onToggle={(e) => {
+          const open = (e.target as HTMLDetailsElement).open;
+          setOpened(open);
+          if (open && data === null && !queueErr) void loadQueue();
+        }}
+      >
+        <summary className="cursor-pointer list-none text-[13px] font-extrabold text-strong">
+          📬 Queue{data ? ` (${data.total} waiting${data.overdue ? `, ${data.overdue} overdue` : ""})` : ""}{" "}
+          <span className="text-[10px] font-bold text-faint">▾</span>
+        </summary>
+        {opened && (
+          <div className="mt-2 space-y-2">
+            {queueErr && (
+              <div className="rounded-xl border-2 border-brandred/40 bg-brandred-soft p-2.5 text-center">
+                <p className="text-[11px] font-extrabold text-brandred">
+                  The queue could not be read - that is unknown, not empty.
+                </p>
+                <button
+                  onClick={() => void loadQueue()}
+                  className="btn btn-sm mt-1.5 rounded-xl border-2 border-brandred/40 px-3 text-[10px] font-extrabold text-brandred"
+                >
+                  ↻ Retry
+                </button>
+              </div>
+            )}
+            {!queueErr && data === null && <LoadingDots label="Reading the queue" />}
+            {!queueErr && data !== null && (
+              <>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={async () => {
+                      setQueueBusy("flush");
+                      setQueueMsg(null);
+                      try {
+                        const r = await fetch("/api/admin/wa-queue", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ action: "flush" }),
+                        });
+                        const d = await r.json().catch(() => ({}));
+                        setQueueMsg(
+                          r.ok ? `Flushed - ${d.sent ?? 0} message(s) sent through the full guard.` : d.error ?? "Flush failed."
+                        );
+                        await loadQueue();
+                      } catch {
+                        setQueueMsg("Could not reach the server - nothing was flushed.");
+                      } finally {
+                        setQueueBusy(null);
+                      }
+                    }}
+                    disabled={queueBusy !== null || data.due === 0}
+                    className="btn btn-primary btn-sm rounded-xl px-3 text-[11px] disabled:opacity-60"
+                  >
+                    {queueBusy === "flush" ? <LoadingDots light label="Flushing" /> : `Flush ${data.due} due now`}
+                  </button>
+                  <button
+                    onClick={() => void loadQueue()}
+                    className="btn btn-sm rounded-xl border-2 border-line px-3 text-[11px] font-extrabold text-soft"
+                  >
+                    ↻ Refresh
+                  </button>
+                </div>
+                {queueMsg && <p className="text-[11px] font-extrabold text-soft">{queueMsg}</p>}
+                {data.items.length === 0 && (
+                  <p className="py-2 text-center text-[11px] text-faint">Nothing queued right now.</p>
+                )}
+                {data.items.map((it) => (
+                  <div key={it.id} className="rounded-xl bg-card2 p-2">
+                    <div className="flex items-center gap-2">
+                      <span className="min-w-0 flex-1 truncate text-[12px] font-extrabold text-strong">
+                        {it.vendorName ?? `+${it.to}`}
+                      </span>
+                      {it.overdue ? (
+                        <span className="shrink-0 rounded-full bg-brandred px-2 py-0.5 text-[9px] font-extrabold text-white">
+                          overdue
+                        </span>
+                      ) : it.due ? (
+                        <span className="shrink-0 rounded-full bg-brandyellow px-2 py-0.5 text-[9px] font-extrabold text-[#8a6100]">
+                          due
+                        </span>
+                      ) : (
+                        <span className="shrink-0 text-[9px] font-bold text-faint">
+                          {new Date(it.notBefore).toLocaleTimeString()}
+                        </span>
+                      )}
+                      <button
+                        onClick={async () => {
+                          if (!confirm("Drop this queued message? The shop will not receive it.")) return;
+                          setQueueBusy(`drop${it.id}`);
+                          try {
+                            const r = await fetch("/api/admin/wa-queue", {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({ action: "delete", id: it.id }),
+                            });
+                            if (r.ok) await loadQueue();
+                            else setQueueMsg("The drop did not go through - the row is still queued.");
+                          } catch {
+                            setQueueMsg("Could not reach the server - the row is still queued.");
+                          } finally {
+                            setQueueBusy(null);
+                          }
+                        }}
+                        disabled={queueBusy !== null}
+                        className="shrink-0 text-[10px] font-extrabold text-brandred underline disabled:opacity-60"
+                      >
+                        drop
+                      </button>
+                    </div>
+                    <p className="mt-0.5 truncate text-[11px] text-soft">{it.preview}</p>
+                    <p className="text-[10px] text-faint">{it.reason}</p>
+                  </div>
+                ))}
+              </>
+            )}
+          </div>
+        )}
+      </details>
     </div>
   );
 }

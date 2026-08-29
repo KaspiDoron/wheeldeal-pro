@@ -15,6 +15,8 @@
 // All of it is derived from data the app already collects. Pure, so a tile that
 // says "healthy" has to have earned it.
 
+import { percentile } from "../kpis";
+
 /** Older than this and a heartbeat is a lapse, not a rhythm. */
 export const HEARTBEAT_STALE_MS = 10 * 60_000;
 
@@ -91,10 +93,12 @@ export function queueDepth(rows: { not_before: string }[], now: number): QueueDe
   };
 }
 
+// ONE percentile definition (kpis.ts nearest-rank) for every admin surface.
+// This file's floor-index variant disagreed with kpis.ts's ceil-rank on the
+// same data, so the Engine tab, the Keys tab and the launch card could show
+// three different "p95"s for one latency series.
 function pct(sorted: number[], p: number): number | null {
-  if (sorted.length === 0) return null;
-  const i = Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length));
-  return sorted[i];
+  return percentile(sorted, p);
 }
 
 export interface Latency {

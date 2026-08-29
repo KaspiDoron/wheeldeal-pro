@@ -5,7 +5,7 @@
 // the previous flag was resolved AND new reasons appeared).
 
 import "server-only";
-import { sbSelect, sbInsert } from "../runtime-config";
+import { sbSelect, sbSelectDark, sbInsert } from "../runtime-config";
 
 interface ThreadRow {
   thread_key: string;
@@ -189,7 +189,25 @@ export async function detectWeakConversations(): Promise<{ scanned: number; flag
     const reason = findings.map((x) => `[${x.rule}] ${x.detail}`).join(" · ");
     // Idempotence: same reasons already flagged (any status) -> skip; an
     // unresolved auto flag on the thread -> skip (don't stack).
-    const prior = existing.filter((e) => e.thread_key === t.thread_key);
+    let prior = existing.filter((e) => e.thread_key === t.thread_key);
+    // The global newest-300 window is a CACHE, not the truth: once a thread's
+    // earlier auto rows aged past it, `prior` came back empty, both guards
+    // passed, and the "idempotent" sweep re-flagged the same conversation
+    // forever. A thread the window says is clean gets one scoped read of its
+    // OWN rows before the insert; unreadable fails closed (skip, don't stack).
+    if (prior.length === 0) {
+      // sbSelectDark, not sbSelect: the permissive read returns [] on an
+      // outage, which is exactly the "no prior rows" answer that authorises
+      // the duplicate insert. null = unreadable = skip this thread.
+      const scoped = await sbSelectDark<{ thread_key: string; auto_reason: string | null; status: string }>(
+        "agent_reviews",
+        `select=thread_key,auto_reason,status&source=eq.auto&thread_key=eq.${encodeURIComponent(
+          t.thread_key
+        )}&limit=50`
+      );
+      if (scoped === null) continue;
+      prior = scoped;
+    }
     if (prior.some((e) => e.auto_reason === reason)) continue;
     if (prior.some((e) => e.status !== "resolved")) continue;
 

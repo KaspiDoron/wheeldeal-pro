@@ -233,8 +233,11 @@ describe("defect 3: the gate refuses to approve what it could not check", () => 
   });
 
   it("every activation gate goes through goldenGateBlocks (source pins)", () => {
+    // admin/graph/route.ts left this list by DELETION (Wave 7, pinned in
+    // dead-code.test.ts): it could persist a graph spec around
+    // saveVersionedSpec - i.e. around this very gate - and had zero consumers.
+    // Removing the door beats gating it.
     const gates = [
-      "src/app/api/admin/graph/route.ts",
       "src/app/api/admin/ops/rules/route.ts",
       "src/app/api/admin/ops/policy/route.ts",
       "src/app/api/admin/ops/review/route.ts",

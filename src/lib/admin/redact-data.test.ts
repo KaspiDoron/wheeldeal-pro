@@ -29,6 +29,10 @@ describe("the redactor withholds every credential and coordinate", () => {
     "refresh_token",
     "some_hash",
     "webhook_secret",
+    // Credential-shaped *_key names still redact after the identifier fix.
+    "private_key",
+    "access_key",
+    "secret_key",
   ];
   const KEEPS = [
     "email",
@@ -46,6 +50,13 @@ describe("the redactor withholds every credential and coordinate", () => {
     "raw",
     "instance_name",
     "created_at",
+    // IDENTIFIERS, not credentials. A bare `_key$` alternative swallowed all
+    // three - blanking sender_key removed the primary identifier from
+    // wa_outbox and the reputation ledger, so the explorer showed rows that
+    // keyed to nothing. Must-survive columns.
+    "sender_key",
+    "thread_key",
+    "to_key",
   ];
 
   it.each(LEAKS)("redacts %s", (key) => {

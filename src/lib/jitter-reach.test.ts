@@ -56,7 +56,7 @@ describe("REPRODUCTION: the Poisson gap was gated on the wrong flag", () => {
     }
   });
 
-  it("ONLY the three paths with a person watching opt out", () => {
+  it("ONLY the two paths with a person watching opt out", () => {
     const optedOut = readdirSync(join(process.cwd(), "src/app/api"), {
       recursive: true,
       withFileTypes: true,
@@ -69,8 +69,9 @@ describe("REPRODUCTION: the Poisson gap was gated on the wrong flag", () => {
       .map((abs) => abs.slice(process.cwd().length + 1))
       .sort();
 
+    // admin/drill was the third - deleted in Wave 7 (zero UI consumers; see
+    // dead-code.test.ts). Both survivors have a human staring at the screen.
     expect(optedOut).toEqual([
-      "src/app/api/admin/drill/route.ts",
       "src/app/api/admin/wa-queue/route.ts",
       "src/app/api/outreach/route.ts",
     ]);

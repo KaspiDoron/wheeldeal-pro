@@ -19,7 +19,20 @@ export const REDACTED_EXACT = new Set(["password_hash", "stay_lat", "stay_lng", 
 /** hash / password / secret / token / api key / any *_key column. */
 export const REDACTED_PATTERN = /pass(word)?|secret|token|_?hash$|hash$|api_?key|_key$/i;
 
+/**
+ * Identifier columns the bare `_key$` alternative used to swallow:
+ * `sender_key` is a traveller's email and `thread_key`/`to_key`/`slot_key`
+ * are join keys - blanking them removed the PRIMARY IDENTIFIER from
+ * wa_outbox, the reputation ledger and every thread-keyed row, so the
+ * explorer showed rows that keyed to nothing. An explicit exception list
+ * (not a narrower pattern) keeps the fail-safe direction: a NEW *_key column
+ * is still withheld by default, and genuinely credential-shaped names like
+ * `evolution_key` keep matching.
+ */
+export const KEPT_IDENTIFIERS = new Set(["sender_key", "thread_key", "to_key", "slot_key"]);
+
 export function shouldRedact(key: string): boolean {
+  if (KEPT_IDENTIFIERS.has(key)) return false;
   return REDACTED_EXACT.has(key) || REDACTED_PATTERN.test(key);
 }
 

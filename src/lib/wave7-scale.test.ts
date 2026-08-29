@@ -447,7 +447,9 @@ describe("key-test: the keys that had no test now have one", () => {
 
   it("a blank model override still runs the test - the default is the case most worth checking", () => {
     expect(code).toMatch(/testsWithoutOwnValue/);
-    expect(code).toMatch(/name\.endsWith\("_VISION_MODEL"\)/);
+    // Broadened to EVERY model override (chat models included) in Wave 7 -
+    // vision/whisper ride the same suffix.
+    expect(code).toMatch(/name\.endsWith\("_MODEL"\)/);
   });
 
   it("the WABA block is tested as a set: shape, reachability, and DRIFT", () => {

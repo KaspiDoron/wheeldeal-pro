@@ -101,12 +101,23 @@ export async function GET(req: Request) {
   // testing; the WABA block and the Cloud API block are tested as a set; and
   // REDIS_URL is env-only, so refusing to probe it for being "unsaved" would
   // reproduce the exact invisibility this button exists to end.
+  // Settings whose most useful test IS the unset case: the echo block at the
+  // bottom answers "unset - the default applies", which beats refusing.
+  const SETTINGS_ECHO = new Set([
+    "TEST_MODE", "SCALE_MODE", "CLOUD_API_ENABLED", "HUMAN_TAKEOVER", "FAST_DISPATCH",
+    "CANCEL_GUARD", "WARMUP_GATE", "WILL_ACTIONS", "GRAPH_ENGINE", "ENGINE_V3",
+    "WARMUP_MIN_SEARCHES", "WARMUP_MIN_ENGAGED", "WARMUP_MIN_REPLIES", "WARMUP_HOLDOUT_PCT",
+    "SEARCH_SESSION_TTL_HOURS", "TRANSPORT_MODE", "NEGOTIATION_ENGINE", "PACING_MODE",
+    "EVOLUTION_PROXY_COUNTRY_DEFAULT", "EVOLUTION_PROXY_COUNTRY_ALLOW", "OPERATOR_NAME",
+  ]);
   const testsWithoutOwnValue =
     name.startsWith("WHATSAPP") ||
     name.startsWith("WABA_") ||
     name === "REDIS_URL" ||
-    name === "GROQ_WHISPER_MODEL" ||
-    name.endsWith("_VISION_MODEL");
+    SETTINGS_ECHO.has(name) ||
+    // ANY model override: blank means "use the built-in default", which is
+    // the case most worth testing (chat models included since Wave 7).
+    name.endsWith("_MODEL");
   if (!value && !testsWithoutOwnValue) {
     return NextResponse.json({ ok: false, detail: "No value saved for this key yet." });
   }
@@ -115,14 +126,35 @@ export async function GET(req: Request) {
   // any <PROVIDER>_MODEL override), from the single source in lib/ai. This kills
   // the old bug where the test used a different, drifted model id than production
   // (e.g. Cerebras tested llama3.1-8b -> 404 while the app used llama-3.3-70b).
+  // A chat-model OVERRIDE is tested as the REAL thing: the owning provider's
+  // token plus the exact model id ai.ts will run (aiProviderTestTarget
+  // already respects the override). These twelve used to fall through to "No
+  // test available" - on the documented escape hatch for a drifted model id,
+  // the one key whose whole purpose is being correctable at runtime.
+  let aiName = name;
+  let aiKey = value;
+  const chatModel =
+    /^(GROQ|GEMINI|OPENROUTER|CEREBRAS|MISTRAL|HUGGINGFACE|DEEPSEEK|TOGETHER|SAMBANOVA|ANTHROPIC|OPENAI|KIMI)_MODEL$/.exec(
+      name
+    );
+  if (chatModel) {
+    aiName = `${chatModel[1]}_TOKEN`;
+    aiKey = (await getConfig(aiName))?.trim();
+    if (!aiKey) {
+      return NextResponse.json({
+        ok: false,
+        detail: `Set ${aiName} first - the model override is tested through the provider's own key.`,
+      });
+    }
+  }
   {
     const { aiProviderTestTarget } = await import("@/lib/ai");
-    const target = await aiProviderTestTarget(name);
+    const target = await aiProviderTestTarget(aiName);
     if (target) {
       if (target.gemini) {
         try {
           const res = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/${target.model}:generateContent?key=${value}`,
+            `https://generativelanguage.googleapis.com/v1beta/models/${target.model}:generateContent?key=${aiKey}`,
             {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -148,7 +180,7 @@ export async function GET(req: Request) {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              "x-api-key": value!,
+              "x-api-key": aiKey!,
               "anthropic-version": "2023-06-01",
             },
             body: JSON.stringify({
@@ -168,7 +200,7 @@ export async function GET(req: Request) {
         }
       }
       return NextResponse.json(
-        await testOpenAICompatible(target.endpoint, value!, target.model, {
+        await testOpenAICompatible(target.endpoint, aiKey!, target.model, {
           reasoningSampler: target.sampler === "reasoning",
         })
       );
@@ -715,20 +747,27 @@ export async function GET(req: Request) {
     }
     case "EVOLUTION_PROXY_POOL": {
       const lines = value!.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
+      // Report the line NUMBER and the shape problem, NEVER the line: pool
+      // entries are scheme://user:pass@host:port, so a malformed line carries
+      // a live proxy password - and this vault row is secret:true precisely so
+      // its value is never shown. The singular EVOLUTION_PROXY case above
+      // already strips userinfo; this one used to echo two lines verbatim.
       const bad: string[] = [];
-      for (const l of lines) {
+      lines.forEach((l, i) => {
         try {
           const u = new URL(l);
-          if (!/^(socks5?|https?):$/.test(u.protocol) || !u.hostname || !u.port) bad.push(l);
+          if (!/^(socks5?|https?):$/.test(u.protocol)) bad.push(`#${i + 1} (bad scheme)`);
+          else if (!u.hostname) bad.push(`#${i + 1} (missing host)`);
+          else if (!u.port) bad.push(`#${i + 1} (missing port)`);
         } catch {
-          bad.push(l);
+          bad.push(`#${i + 1} (not a URL)`);
         }
-      }
+      });
       result = lines.length === 0
         ? { ok: false, detail: "Add one proxy URL per line (scheme://user:pass@host:port)." }
         : bad.length === 0
         ? { ok: true, detail: `OK - ${lines.length} proxy(ies). Each user is pinned to one for a stable residential IP.` }
-        : { ok: false, detail: `${bad.length} malformed line(s): ${bad.slice(0, 2).join(" ; ")}` };
+        : { ok: false, detail: `${bad.length} malformed line(s): ${bad.slice(0, 4).join(", ")}` };
       break;
     }
     case "EVOLUTION_MAX_PER_HOST": {
@@ -756,6 +795,117 @@ export async function GET(req: Request) {
       const d = await supabaseDiagnostics();
       result = { ok: d.reachable && d.appConfigOk, detail: d.detail };
       break;
+    }
+  }
+
+  // ---- SETTINGS ECHO (Wave 7) ----------------------------------------------
+  //
+  // config.ts's own rule: a Test button that always answers "No test
+  // available" is worse than no button. For a SETTING the honest test is
+  // echoing back the EFFECTIVE parsed value - the same answer the WABA block
+  // has always given - plus shape validation where a shape exists. Specific
+  // cases above always win; this net catches what used to fall through.
+  if (result.detail === "No test available for this key.") {
+    const { parseFlag } = await import("@/lib/config-flags");
+    const FLAG_DEFAULTS: Record<string, boolean> = {
+      TEST_MODE: false,
+      SCALE_MODE: false,
+      CLOUD_API_ENABLED: false,
+      HUMAN_TAKEOVER: true,
+      FAST_DISPATCH: true,
+      CANCEL_GUARD: true,
+      WARMUP_GATE: true,
+      WILL_ACTIONS: true,
+      GRAPH_ENGINE: true,
+      ENGINE_V3: true,
+    };
+    const NUMBERS: Record<string, string> = {
+      WARMUP_MIN_SEARCHES: "searches required",
+      WARMUP_MIN_ENGAGED: "distinct shops reached",
+      WARMUP_MIN_REPLIES: "shops that replied",
+      WARMUP_HOLDOUT_PCT: "holdout percent (0-100)",
+      SEARCH_SESSION_TTL_HOURS: "hours a hunt stays live",
+    };
+    if (name in FLAG_DEFAULTS) {
+      const on = parseFlag(value, FLAG_DEFAULTS[name]);
+      result = {
+        ok: true,
+        detail: `Effective value: ${on ? "ON" : "OFF"}${value ? "" : " (unset - the default)"}.`,
+      };
+    } else if (name in NUMBERS) {
+      const n = Number(value);
+      result = !value
+        ? { ok: true, detail: `Unset - the built-in default applies (${NUMBERS[name]}).` }
+        : Number.isFinite(n) && n >= 0
+          ? { ok: true, detail: `Effective value: ${n} (${NUMBERS[name]}).` }
+          : { ok: false, detail: "Not a number - the built-in default applies instead." };
+    } else if (name === "TRANSPORT_MODE") {
+      const { parseTransportMode } = await import("@/lib/wa/transports");
+      const mode = parseTransportMode(value);
+      result = {
+        ok: !value || mode === value,
+        detail: `Effective mode: ${mode}${value && mode !== value ? ` ("${value.slice(0, 30)}" is not a mode - degraded to the default)` : ""}.`,
+      };
+    } else if (name === "NEGOTIATION_ENGINE" || name === "PACING_MODE") {
+      const allowed = name === "NEGOTIATION_ENGINE" ? ["spte", "graph"] : ["fast", "balanced", "cautious"];
+      const v = (value ?? "").toLowerCase();
+      result = !v
+        ? { ok: true, detail: `Unset - the default applies (${name === "NEGOTIATION_ENGINE" ? "spte" : "balanced"}).` }
+        : allowed.includes(v)
+          ? { ok: true, detail: `Effective value: ${v}.` }
+          : { ok: false, detail: `"${v.slice(0, 30)}" is not one of: ${allowed.join(", ")}.` };
+    } else if (name === "APP_DOMAIN" || name === "TRUSTED_HOSTS") {
+      const { normalizeOrigin } = await import("@/lib/site");
+      if (name === "APP_DOMAIN") {
+        const origin = normalizeOrigin(value);
+        result = origin
+          ? { ok: true, detail: `Resolves to ${origin} - share links, SEO and sender identity use this.` }
+          : { ok: false, detail: "Not a usable origin. Paste the domain (e.g. your-domain.com or https://your-domain.com)." };
+      } else {
+        const hosts = (value ?? "").split(/[\n,]+/).map((h) => h.trim()).filter(Boolean);
+        const bad = hosts.filter((h) => !normalizeOrigin(h));
+        result = bad.length === 0
+          ? { ok: true, detail: `OK - ${hosts.length} extra trusted host(s). APP_DOMAIN is always trusted.` }
+          : { ok: false, detail: `${bad.length} unusable host(s): ${bad.slice(0, 3).join(", ").slice(0, 120)}` };
+      }
+    } else if (name === "WARMUP_HOLDOUT_LIST") {
+      const entries = (value ?? "").split(/[\n,]+/).map((x) => x.trim()).filter(Boolean);
+      const bad = entries.filter((e) => !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e));
+      result = bad.length === 0
+        ? { ok: true, detail: `OK - ${entries.length} holdout email(s).` }
+        : { ok: false, detail: `${bad.length} entr${bad.length === 1 ? "y" : "ies"} not shaped like an email (line ${entries.indexOf(bad[0]) + 1}).` };
+    } else if (name === "EVOLUTION_PROXY_TEMPLATE") {
+      // Never echo the value: templates carry credentials in the userinfo.
+      result = !value
+        ? { ok: false, detail: "No template set." }
+        : !value.includes("{session}")
+          ? { ok: false, detail: "The template must contain {session} - without it every user shares one exit IP." }
+          : /^(socks5?|https?):\/\//.test(value)
+            ? { ok: true, detail: `Shape OK - {session}${value.includes("{country}") ? " + {country}" : ""} placeholders found.` }
+            : { ok: false, detail: "Must start with socks5:// or http(s)://." };
+    } else if (name === "EVOLUTION_PROXY_COUNTRY_DEFAULT" || name === "EVOLUTION_PROXY_COUNTRY_ALLOW") {
+      const codes = (value ?? "").split(/[\s,]+/).map((c) => c.trim()).filter(Boolean);
+      const bad = codes.filter((c) => !/^[a-z]{2}$/i.test(c));
+      result = bad.length === 0
+        ? { ok: true, detail: codes.length ? `OK - ${codes.join(", ").toLowerCase()}.` : "Unset - any exit country." }
+        : { ok: false, detail: `Not two-letter codes: ${bad.slice(0, 3).join(", ").slice(0, 60)}` };
+    } else if (name === "VAPID_PUBLIC_KEY" || name === "VAPID_PRIVATE_KEY") {
+      const expected = name === "VAPID_PUBLIC_KEY" ? 87 : 43;
+      result = value && Math.abs(value.length - expected) <= 2 && /^[A-Za-z0-9_-]+$/.test(value)
+        ? { ok: true, detail: `Length and alphabet look right for a ${name === "VAPID_PUBLIC_KEY" ? "public" : "private"} VAPID key.` }
+        : { ok: false, detail: `Does not look like a base64url VAPID key (~${expected} chars). Clearing BOTH regenerates a fresh pair on first use.` };
+    } else if (name === "WHATSAPP_APP_SECRET") {
+      result = value && value.length >= 16
+        ? { ok: true, detail: "Set and long enough to verify webhook signatures." }
+        : { ok: false, detail: "Set the App Secret from Meta's app dashboard (16+ chars) - inbound webhook signatures cannot be verified without it." };
+    } else if (name === "ADSENSE_SLOT") {
+      result = /^\d{6,}$/.test(value ?? "")
+        ? { ok: true, detail: `Slot id format OK (${value}).` }
+        : { ok: false, detail: "An ad-unit id is numeric (from a Display unit in the AdSense console)." };
+    } else if (name === "OPERATOR_NAME") {
+      result = value && value.trim().length >= 2
+        ? { ok: true, detail: `The Terms and Privacy Policy name "${value.trim().slice(0, 60)}" as the operator.` }
+        : { ok: false, detail: "Unset - the legal text has nobody to protect until this names the entity." };
     }
   }
 

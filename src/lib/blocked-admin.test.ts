@@ -22,7 +22,8 @@ const state = {
 vi.mock("./runtime-config", () => ({
   getConfig: async () => undefined,
   getConfigFresh: async () => ({ value: state.extraAdmins }),
-  setConfig: async () => {},
+  setConfig: async () => ({ ok: true, persistent: true }),
+  sbCountDark: async () => 0,
 }));
 vi.mock("./access", () => ({
   getUser: async () => state.user,
@@ -128,6 +129,7 @@ async function loadUsersRoute(opts: RouteOpts) {
   vi.doMock("@/lib/runtime-config", () => ({
     sbDelete: async () => true,
     sbSelect: async () => [],
+    sbCountDark: async () => 1,
   }));
 
   const mod = await import("@/app/api/admin/users/route");

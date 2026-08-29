@@ -44,20 +44,41 @@ function publicUser(u: import("@/lib/access").UserRecord, role: string) {
   };
 }
 
-async function payload() {
-  const [admins, users] = await Promise.all([adminEmails(), listUsers()]);
+const USERS_PAGE = 200;
+
+async function payload(opts: { q?: string; offset?: number } = {}) {
+  const offset = Math.max(0, Math.round(opts.offset ?? 0));
+  const [admins, users, total] = await Promise.all([
+    adminEmails(),
+    // limit+1 answers hasMore without a second read.
+    listUsers({ q: opts.q, offset, limit: USERS_PAGE + 1 }),
+    // The same exact count the Analytics tile shows - the two tabs used to
+    // disagree (500-row window vs sbCountDark) about how many users exist.
+    (await import("@/lib/runtime-config")).sbCountDark("app_users", ""),
+  ]);
+  const page = users.slice(0, USERS_PAGE);
   return {
-    users: users.map((u) =>
+    users: page.map((u) =>
       publicUser(u, isOwner(u.email) ? "owner" : admins.includes(u.email) ? "admin" : "user")
     ),
     admins,
+    /** EVERY registered account (null = unreadable = unknown, never zero). */
+    total,
+    hasMore: users.length > USERS_PAGE,
+    nextOffset: offset + page.length,
   };
 }
 
-export async function GET() {
+export async function GET(req: Request) {
   const session = await requireManagement();
   if (!session) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  return NextResponse.json(await payload());
+  const url = new URL(req.url);
+  return NextResponse.json(
+    await payload({
+      q: url.searchParams.get("q") ?? undefined,
+      offset: Number(url.searchParams.get("offset")) || 0,
+    })
+  );
 }
 
 export async function POST(req: Request) {

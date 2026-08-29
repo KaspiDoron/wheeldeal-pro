@@ -148,7 +148,7 @@ describe("the Command Center can go dark", () => {
     expect(route).not.toMatch(/catch\(\(\) => \[\]\)/);
   });
 
-  it("all nine reads use the reader that can actually answer 'unknown'", () => {
+  it("every row read uses the reader that can actually answer 'unknown'", () => {
     // The previous version of this counted nine `.catch(() => null)` handlers
     // and passed for months while every one of them was unreachable: `sbSelect`
     // returns [] on a missing connection, a non-2xx AND a thrown exception, so
@@ -158,7 +158,9 @@ describe("the Command Center can go dark", () => {
     //
     // `sbSelectDark` returns `T[] | null`, so the null branch is reachable by
     // construction. The behaviour itself is executed in fail-dark.test.ts.
-    expect((route.match(/sbSelectDark</g) ?? []).length).toBe(9);
+    // Six, down from nine: Wave 7 deleted the sessions/replies/offers ROW
+    // reads that the sbCountDark tiles had superseded (nothing consumed them).
+    expect((route.match(/sbSelectDark</g) ?? []).length).toBe(6);
     expect(route).not.toMatch(/catch\(\(\) => null\)/);
   });
 

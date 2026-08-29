@@ -33,10 +33,7 @@ export async function GET() {
     feedback,
     outbox,
     reputation,
-    sessions,
     billing,
-    replies,
-    offers,
     aiErrors,
     agentEvents,
     waLiveCount,
@@ -57,21 +54,9 @@ export async function GET() {
         "whatsapp_number_reputation",
         "select=sender_key,trust_score,paused_until,risk_score&or=(trust_score.lt.15,risk_score.gte.40,paused_until.not.is.null)&limit=30"
       ),
-      sbSelectDark<{ email: string; status: string }>(
-        "wa_sessions",
-        "select=email,status&limit=100"
-      ),
       sbSelectDark<{ id: number; kind: string; created_at: string }>(
         "billing_events",
         `select=id,kind,created_at&created_at=gte.${encodeURIComponent(dayAgo)}&limit=50`
-      ),
-      sbSelectDark<{ id: number }>(
-        "vendor_replies",
-        `select=id&created_at=gte.${encodeURIComponent(dayAgo)}&limit=200`
-      ),
-      sbSelectDark<{ id: number }>(
-        "offers",
-        `select=id&created_at=gte.${encodeURIComponent(dayAgo)}&limit=200`
       ),
       // NOTE: the column is `failed` (not `ok`) - the old query silently
       // returned [] and AI-failure alerts never fired.
@@ -125,13 +110,13 @@ export async function GET() {
     return rows;
   };
 
+  // The sessions/replies/offers ROW reads that used to sit here were
+  // superseded by the sbCountDark tiles below and referenced by nothing -
+  // three round trips of pure egress on every load and every refresh.
   const feedbackRows = readOr(feedback, "feedback");
   const outboxRows = readOr(outbox, "queued messages");
   const reputationRows = readOr(reputation, "number reputation");
-  const sessionRows = readOr(sessions, "WhatsApp sessions");
   const billingRows = readOr(billing, "billing events");
-  const replyRows = readOr(replies, "shop replies");
-  const offerRows = readOr(offers, "offers");
   const aiErrorRows = readOr(aiErrors, "AI usage");
   const agentEventRows = readOr(agentEvents, "agent events");
 
@@ -173,19 +158,24 @@ export async function GET() {
   const overdue = outboxRows.filter(
     (o) => Date.parse(o.not_before) < Date.now() - 30 * 60_000
   );
+  // Both queue alerts point at THIS tab: the Queue panel below the alert list
+  // is the screen that can actually answer them (rows, reasons, flush, drop).
+  // They used to point at Keys, which has no queue view at all - the same
+  // points-at-a-screen-that-cannot-answer class as the paused-number alert.
   if (overdue.length) {
     alerts.push({
       level: "critical",
       title: `${overdue.length} queued WhatsApp message${overdue.length > 1 ? "s" : ""} overdue`,
-      detail: "The outbox drain has not run for 30+ minutes - check the Evolution hosts.",
-      href: "keys",
+      detail:
+        "The outbox drain has not run for 30+ minutes - see the Queue panel below (flush the due rows, then check the Evolution hosts).",
+      href: "command",
     });
   } else if (outboxRows.length) {
     alerts.push({
       level: "info",
       title: `${outboxRows.length} message${outboxRows.length > 1 ? "s" : ""} queued for shop opening hours`,
-      detail: "The anti-ban engine is pacing sends - all normal.",
-      href: "keys",
+      detail: "The anti-ban engine is pacing sends - all normal. Details in the Queue panel below.",
+      href: "command",
     });
   }
 

@@ -28,6 +28,23 @@ const DELETED = [
   // Never imported by any runtime (`from "@wheeldeal/db"` had zero hits);
   // the GCP services talk PostgREST through @wheeldeal/core instead.
   "packages/db",
+  // Wave 7: the rest of the Pipeline Studio backend, deleted with the same
+  // zero-reference proof as admin/orchestrator above. The UI was recorded as
+  // deleted (admin/page.tsx header) while these kept running - graph/route.ts
+  // in particular could persist a graph spec AROUND saveVersionedSpec, i.e.
+  // around the golden gate and the version history. graph/coach survives: it
+  // is the one graph route with a live consumer (ReviewControls).
+  "src/app/api/admin/graph/route.ts",
+  "src/app/api/admin/graph/simulate",
+  "src/app/api/admin/graph/prompts",
+  "src/app/api/admin/graph/replay",
+  "src/app/api/admin/graph/scenario-gen",
+  "src/app/api/admin/graph/scores",
+  "src/app/api/admin/graph/media-test",
+  // Sent REAL WhatsApp through the production chain with zero UI consumers -
+  // attack surface with no justification (lib/drill.ts, the ingestion gate,
+  // is unrelated and very much alive).
+  "src/app/api/admin/drill",
 ];
 
 describe("dead code stays deleted", () => {
@@ -60,6 +77,9 @@ describe("dead code stays deleted", () => {
     "src/lib/i18n-extras.ts", // already deleted once by a sweep; catalog source
     "render.yaml", // live Render half
     "src/app/api/health", // Cloud Run liveness probe
+    "src/app/api/admin/graph/coach", // ReviewControls' rule authoring
+    "src/lib/drill.ts", // the ingestion gate (NOT the deleted drill route)
+    "src/app/api/admin/wa-queue", // the Command tab's queue panel backend
   ];
   for (const rel of KEPT) {
     it(`${rel} still exists (kept on purpose)`, () => {

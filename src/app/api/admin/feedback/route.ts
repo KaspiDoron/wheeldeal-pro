@@ -64,25 +64,37 @@ export async function GET(req: Request) {
   const offset = clampInt(url.searchParams.get("offset"), 0, 0, 1_000_000);
   const categoryFilter = filtered ? `&category=eq.${encodeURIComponent(category)}` : "";
 
-  const [rows, allCategories, total] = await Promise.all([
+  const [rows, allCategories, total, highCount, issueCount] = await Promise.all([
     sbSelect<{ id: number; image_count: number; category: string }>(
       "feedback",
       `${select}${categoryFilter}&order=created_at.desc&offset=${offset}&limit=${limit}`
     ),
-    sbSelect<{ category: string | null }>(
+    sbSelect<{ category: string | null; severity: string | null; is_real_issue: boolean | null }>(
       "feedback",
-      "select=category&order=created_at.desc&limit=1000"
-    ).catch(() => [] as { category: string | null }[]),
+      "select=category,severity,is_real_issue&order=created_at.desc&limit=1000"
+    ).catch(() => [] as { category: string | null; severity: string | null; is_real_issue: boolean | null }[]),
     // THE REAL NUMBER, and `null` rather than a lie when it cannot be read.
     // `sbCount` answers 0 on any failure, which on a counter labelled "Total"
     // means an outage renders as "you have no feedback".
-    sbCountDark("feedback", `select=id${categoryFilter}`),
+    // (The filter passed here is a FILTER - sbCountDark supplies its own
+    // select, and the old `select=id${...}` emitted a duplicated parameter.)
+    sbCountDark("feedback", categoryFilter.replace(/^&/, "")),
+    // The two headline tiles' numbers, from real counts over the whole table -
+    // they used to be .length over the loaded page, so "High severity: 3" was
+    // a fact about pagination, not about the feedback.
+    sbCountDark("feedback", "is_real_issue=eq.true&severity=eq.high"),
+    sbCountDark("feedback", "is_real_issue=eq.true"),
   ]);
 
   const byCategory: Record<string, number> = {};
+  const bySeverity: Record<string, number> = {};
   for (const r of allCategories) {
     const key = (r.category ?? "other").toLowerCase();
     byCategory[key] = (byCategory[key] ?? 0) + 1;
+    if (r.is_real_issue) {
+      const sev = (r.severity ?? "low").toLowerCase();
+      bySeverity[sev] = (bySeverity[sev] ?? 0) + 1;
+    }
   }
 
   // Attach screenshots for the rows that have them - BOUNDED (see the caps).
@@ -143,6 +155,11 @@ export async function GET(req: Request) {
     })),
     /** Every category with a count - the owner's filter chips. */
     byCategory,
+    /** Real-issue counts per severity (whole table, not the page). */
+    bySeverity,
+    /** The two headline tiles - exact counts, null when unreadable. */
+    highSeverityTotal: highCount,
+    realIssuesTotal: issueCount,
     categories: CATEGORIES,
     /** Which filter produced this list, so the panel cannot claim another. */
     category: filtered ? category : null,

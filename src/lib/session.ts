@@ -126,7 +126,8 @@ export async function setAdmin(email: string, admin: boolean): Promise<boolean> 
   const wrote = await setConfig("ADMIN_EMAILS_EXTRA", Array.from(extra).join(",")).catch(
     () => ({ ok: false, persistent: false }) as { ok: boolean; persistent: boolean }
   );
-  return wrote.ok;
+  // A legacy/mocked setConfig that resolves undefined keeps the old behavior.
+  return wrote ? wrote.ok : true;
 }
 
 // ---- cookie plumbing --------------------------------------------------------

@@ -391,13 +391,28 @@ export async function isBlocked(email: string): Promise<boolean> {
   return (await getUser(email))?.status === "blocked";
 }
 
-/** Every registered user, durable store first, newest activity first. */
-export async function listUsers(): Promise<UserRecord[]> {
+/**
+ * Registered users, durable store first, newest activity first.
+ *
+ * PAGED and QUERY-SEARCHED. The hard 500-row window used to be the whole
+ * answer: with more accounts the older ones were unreachable through any UI,
+ * a search matched only inside the window ("No users match" about a user who
+ * exists), and the Users tab silently disagreed with the Analytics tab's
+ * exact total. `q` runs as an ilike on the email COLUMN so a match beyond
+ * the current page is still found.
+ */
+export async function listUsers(
+  opts: { q?: string; offset?: number; limit?: number } = {}
+): Promise<UserRecord[]> {
+  const limit = Math.min(500, Math.max(1, Math.round(opts.limit ?? 500)));
+  const offset = Math.max(0, Math.round(opts.offset ?? 0));
+  const needle = (opts.q ?? "").trim().toLowerCase().replace(/[,()."'\\%*]/g, "").slice(0, 60);
+  const qFilter = needle ? `&email=ilike.${encodeURIComponent(`*${needle}*`)}` : "";
   const seen = new Map<string, UserRecord>();
   if (supabaseConfigured()) {
     const rows = await sbSelect<UserRow>(
       "app_users",
-      "select=*&order=last_seen.desc&limit=500"
+      `select=*${qFilter}&order=last_seen.desc&limit=${limit}&offset=${offset}`
     );
     for (const r of rows) {
       const rec = fromRow(r);
@@ -405,9 +420,14 @@ export async function listUsers(): Promise<UserRecord[]> {
       remember(rec);
     }
   }
-  // Include anything this instance knows that has not landed durably yet.
-  for (const { rec } of cache().values()) {
-    if (!seen.has(rec.email)) seen.set(rec.email, rec);
+  // Include anything this instance knows that has not landed durably yet -
+  // first page only, or a fresh signup would be appended to every later page.
+  if (offset === 0) {
+    for (const { rec } of cache().values()) {
+      if (seen.has(rec.email)) continue;
+      if (needle && !rec.email.includes(needle)) continue;
+      seen.set(rec.email, rec);
+    }
   }
   return [...seen.values()].sort((a, b) => b.lastSeen - a.lastSeen);
 }

@@ -49,13 +49,17 @@ export function HealthPanel() {
   const [vitals, setVitals] = useState<Vitals | null>(null);
   const [checkedAt, setCheckedAt] = useState<Date | null>(null);
   const [busy, setBusy] = useState(false);
+  const [lastCheckFailed, setLastCheckFailed] = useState(false);
   const [nextInS, setNextInS] = useState(REFRESH_MS / 1000);
   const timer = useRef<ReturnType<typeof setInterval>>();
 
   async function check() {
     setBusy(true);
     try {
-      const d = await (await fetch("/api/admin/health")).json();
+      const res = await fetch("/api/admin/health");
+      if (!res.ok) throw new Error(String(res.status));
+      const d = await res.json();
+      setLastCheckFailed(false);
       if (Array.isArray(d.services)) {
         setServices(d.services);
         setCheckedAt(new Date());
@@ -76,7 +80,10 @@ export function HealthPanel() {
           : null
       );
     } catch {
-      /* keep the last snapshot */
+      // Keep the last snapshot - but SAY the check failed. The countdown kept
+      // animating over stale bars, so a dead health endpoint rendered as a
+      // panel of confident statuses from an hour ago.
+      setLastCheckFailed(true);
     } finally {
       setBusy(false);
     }
@@ -123,6 +130,13 @@ export function HealthPanel() {
           ? `Last checked ${checkedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · next auto-check in ${mins}m ${Math.floor(nextInS % 60)}s`
           : "Running the first check..."}
       </p>
+      {lastCheckFailed && (
+        <p className="mb-2 rounded-xl border-2 border-brandyellow/50 bg-brandyellow-soft p-2 text-[11px] font-extrabold text-warn">
+          The last check FAILED - the bars below are from{" "}
+          {checkedAt ? checkedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "an earlier run"}{" "}
+          and may be stale.
+        </p>
+      )}
 
       {/* WEBHOOK SILENCE ALERT: shops' replies aren't reaching us (Evolution is
           403ing our webhook - a stale token / lost registration). This is the

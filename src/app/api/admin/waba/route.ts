@@ -148,19 +148,40 @@ export async function GET() {
 
   // THE FUNNEL. `tapped` is the column that says whether the message WORKED -
   // delivered and read only say it arrived. No other surface in this product
-  // has that signal.
-  const funnel = leads
-    ? {
-        sent: leads.filter((l) => l.sent_at).length,
-        delivered: leads.filter((l) => l.delivered_at).length,
-        read: leads.filter((l) => l.read_at).length,
-        tapped: leads.filter((l) => l.link_tapped_at).length,
-        travellerContacted: leads.filter((l) => l.traveller_inbound_at).length,
-        handedOff: leads.filter((l) => l.handed_off_at).length,
-        held: leads.filter((l) => l.state === "held").length,
-        failed: leads.filter((l) => l.state === "failed").length,
-      }
-    : null;
+  // has that signal. EXACT COUNTS, not .length over the newest-200 slice -
+  // the exact busy-day-plateaus-at-the-cap defect the Command tab was
+  // rewritten to eliminate; the 200-row read stays only for the ledger list
+  // below, which is labelled as recent. Dry runs are excluded the same way
+  // the governor excludes them (null = pre-migration = counted).
+  const { sbCountDark } = await import("@/lib/runtime-config");
+  const stageCount = (filter: string) =>
+    sbCountDark("waba_leads", `${filter}&dry_run=not.is.true`).then(
+      (n) => (n === null ? sbCountDark("waba_leads", filter) : n)
+    );
+  const [sent, delivered, readN, tapped, travellerContacted, handedOff, held, failed] =
+    await Promise.all([
+      stageCount("sent_at=not.is.null"),
+      stageCount("delivered_at=not.is.null"),
+      stageCount("read_at=not.is.null"),
+      stageCount("link_tapped_at=not.is.null"),
+      stageCount("traveller_inbound_at=not.is.null"),
+      stageCount("handed_off_at=not.is.null"),
+      stageCount("state=eq.held"),
+      stageCount("state=eq.failed"),
+    ]);
+  const funnel =
+    sent === null && delivered === null && handedOff === null
+      ? null
+      : {
+          sent,
+          delivered,
+          read: readN,
+          tapped,
+          travellerContacted,
+          handedOff,
+          held,
+          failed,
+        };
 
   const gov = await governorVerdict();
 

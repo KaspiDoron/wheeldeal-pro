@@ -74,7 +74,7 @@ interface Data {
       quality: string;
     };
   };
-  funnel: Record<string, number> | null;
+  funnel: Record<string, number | null> | null;
   leads: Lead[] | null;
   agencies: Agency[] | null;
   degraded: string[];
@@ -386,7 +386,9 @@ export function WabaConsole() {
       {/* THE LEDGER. The first question about any failed handoff is always
           "what did we actually send them", so the wire text is right here. */}
       <div className="surface rounded-blob p-3">
-        <div className="text-[13px] font-extrabold text-strong">Recent first messages</div>
+        <div className="text-[13px] font-extrabold text-strong">
+          Recent first messages <span className="text-[10px] font-bold text-faint">(last 200)</span>
+        </div>
         {d.leads === null ? (
           <p className="mt-1 text-[12px] font-bold text-faint">&mdash; could not be read.</p>
         ) : d.leads.length === 0 ? (
