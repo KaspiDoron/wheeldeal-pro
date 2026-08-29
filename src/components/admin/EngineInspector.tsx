@@ -31,8 +31,7 @@ interface Snapshot {
   generatedAt: string;
   turns: Turn[];
   stats: {
-    turnsLast6h: number;
-    turnsCapped?: boolean;
+    turnsLast6h: number | null;
     failoversLast6h: number;
     unconfirmedSendsLast6h: number;
     // The rows behind the counts. A number nobody can act on is decoration.
@@ -256,7 +255,7 @@ export function EngineInspector() {
             <div className="grid grid-cols-3 gap-2">
               <StatTile
                 helpId="turns6h"
-                value={`${snap.stats.turnsLast6h}${snap.stats.turnsCapped ? "+" : ""}`}
+                value={snap.stats.turnsLast6h == null ? "-" : String(snap.stats.turnsLast6h)}
               />
               <StatTile
                 helpId="failovers"
