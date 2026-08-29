@@ -2596,5 +2596,26 @@ export async function runUserAction(args: {
   // User actions send promptly - the traveller is watching the screen.
   input.humanDelay = false;
   input.shopOpenNow = args.shopOpenNow;
-  return runGraphTurn(input, liveGraphIO(args.send));
+  // THE SAME PER-THREAD LOCK EVERY OTHER ENTRY TAKES. A user close racing an
+  // agent compose on the same thread was the one remaining interleave. The
+  // traveller is watching, so a lost claim WAITS one beat and retries rather
+  // than refusing; if the sibling still holds it, proceed - the send guard's
+  // per-recipient pacing serializes the wire, and a traveller's deliberate
+  // action outranks an automated turn.
+  {
+    const { claimThreadTurn } = await import("../wa/turn-lock");
+    const claim = await claimThreadTurn(args.userEmail, args.toDigits);
+    if (claim === "lost") {
+      await new Promise((r) => setTimeout(r, 3_000));
+      await claimThreadTurn(args.userEmail, args.toDigits);
+    }
+  }
+  // THROUGH THE ROUTING AUTHORITY, like every other entry point. engine-route
+  // dispatches user-action kinds to the graph engine deliberately (its nodes
+  // own them) - the point is that the dispatch is SAID in one place, not that
+  // this call bypasses it. The declared TurnEntry "user-action" finally has
+  // its producer.
+  const { runThreadTurn } = await import("../engine-route");
+  const out = await runThreadTurn(input, liveGraphIO(args.send), "user-action");
+  return out.graph ?? null;
 }
