@@ -1714,3 +1714,19 @@ begin
   end if;
 end;
 $$;
+
+-- ---- The funnel stage ledger (src/lib/funnel/stages.ts) ---------------------
+--
+-- `stage` is the thread's CURRENT funnel stage - the single vocabulary the
+-- traveller tracker, the Ops console and analytics all read, advanced only by
+-- advanceThreadStage() (forward-only + terminal refusal enforced in the PATCH
+-- filter, never read-then-write). Transition HISTORY is append-only in
+-- agent_events kind='funnel-stage' (join columns user_email/to_number/
+-- vendor_id/decision_id; detail JSON carries {from,to,evidence,transport,
+-- engine,entry}). `stage_at` is when the current stage was entered - dwell
+-- times come from the event history, this is just the cheap "since when" the
+-- tracker shows without an events query.
+alter table public.negotiation_threads add column if not exists stage text;
+alter table public.negotiation_threads add column if not exists stage_at timestamptz;
+create index if not exists negotiation_threads_stage_idx
+  on public.negotiation_threads (user_email, stage);
