@@ -485,11 +485,25 @@ function metaKindFor(move: MoveKind): string {
     case "verify-recap":
       return "auto-recap";
     case "answer":
-    case "deposit-probe":
-    case "fulfillment-probe":
-    case "pickup-location":
-    case "option-probe":
       return "auto-answer";
+    // PROBES ARE NOT ANSWERS. Collapsing them into "auto-answer" (a) hid the
+    // deposit/pickup discovery from every transcript and admin panel (the
+    // whole INFO_DISCOVERY phase rendered as generic answers), (b) counted
+    // them into legacyCounts.answer - a cap they were never meant to spend -
+    // and (c) gave them the answer's 10-25s pacing instead of the 15-40s the
+    // graph engine's jitter table already assigns these very kinds. The graph
+    // engine has stamped them distinctly all along; SPTE now speaks the same
+    // vocabulary.
+    case "deposit-probe":
+      return "auto-deposit-probe";
+    case "fulfillment-probe":
+      return "auto-fulfillment-probe";
+    case "pickup-location":
+      return "auto-pickup-location";
+    case "option-probe":
+      return "auto-option-probe";
+    case "confirm-vehicle":
+      return "auto-confirm-vehicle";
     case "farewell":
     case "closing-message":
     case "redirect-close":
@@ -1258,6 +1272,28 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
     if (local.gloss) meta.englishGloss = local.gloss;
     meta.localized = Boolean(local.gloss);
     meta.language = langOutcome.language.mode;
+    // LIVE TAIL GATES (graph parity, the audit's "never run on the live
+    // engine" pair): the global-uniqueness re-vary (hundreds of users must
+    // never repeat a sentence - a fleet-level anti-ban property that only
+    // protected the failover) and the warm-emoji tone policy. Localized
+    // output skips the English trigram store but keeps the emoji policy,
+    // exactly like the graph path. Deterministic re-vary never touches
+    // digits, so the rails' number verification survives it. Best-effort:
+    // the gates are polish, never the send.
+    try {
+      const spec = await getGraphSpec();
+      if (!local.gloss) {
+        const recent = await io.recentOutboundGlobal(6, 200).catch(() => []);
+        const { ensureGloballyUnique, enforceEmojiTone } = await import("../graph/uniqueness");
+        const fresh = await ensureGloballyUnique(send, recent);
+        send = enforceEmojiTone(fresh.text, spec.settings.emojiTone);
+      } else {
+        const { enforceEmojiTone } = await import("../graph/uniqueness");
+        send = enforceEmojiTone(send, spec.settings.emojiTone);
+      }
+    } catch {
+      /* gates are polish - the decided message still goes out */
+    }
     try {
       // INLINE DELIVERY (the "agent never replies" structural fix): the reply
       // leaves in the SAME serverless invocation that received the shop's
