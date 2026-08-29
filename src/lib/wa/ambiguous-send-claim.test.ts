@@ -75,8 +75,10 @@ describe("EXECUTED: SendResult carries ambiguous, honoured on every direct-send 
     expect(src).toMatch(/ambiguous\?: boolean/);
   });
 
+  // agent-loop is deliberately absent: its direct-send branch lived in the
+  // legacy orchestrator (deleted) - every routed reply now sends through
+  // guardAndSend/drainOutbox, whose ambiguous handling is pinned above.
   for (const [path, file] of [
-    ["agent-loop reply send", "src/lib/agent-loop.ts"],
     ["graph engine live send", "src/lib/graph/engine.ts"],
     ["single outreach", "src/app/api/outreach/route.ts"],
     ["mass outreach", "src/app/api/outreach/mass/route.ts"],

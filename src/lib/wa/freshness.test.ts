@@ -172,9 +172,13 @@ describe("the wiring", () => {
   });
 
   it("every engine stamps what its draft is an answer to", () => {
-    expect(readCode("src/lib/agent-loop.ts")).toMatch(/composedAgainst: \{/);
+    // The legacy loop's own stamp died with the legacy block; the LIVE engines
+    // are the writers now (SPTE below; the graph engine composes through the
+    // same guarded meta).
     expect(readCode("src/lib/spte/live.ts")).toMatch(/composedAgainst: \{/);
-    // ...and the inbound id is threaded from the turn that owns it.
+    // ...and the inbound id is threaded from the turn that owns it, through
+    // the routed input's ctx.
     expect(readCode("src/lib/agent-loop.ts")).toMatch(/inboundId: opts\.waMessageId/);
+    expect(readCode("src/lib/spte/live.ts")).toMatch(/inboundId: input\.ctx\.inboundId/);
   });
 });

@@ -184,12 +184,15 @@ describe("every composed outbound passes the provenance gate", () => {
     expect(rails).toMatch(/durationDays: ctx\.session\.rfq\.durationDays/);
   });
 
-  it("the graph engine and the legacy loop pass the same basis", () => {
-    for (const p of ["src/lib/graph/engine.ts", "src/lib/agent-loop.ts"]) {
+  it("both LIVE engines pass the same provenance basis (legacy loop deleted)", () => {
+    // The legacy loop's copy of this basis died with the legacy block - one
+    // fewer divergent implementation to drift. The two engines that actually
+    // run are the ones held to it.
+    for (const p of ["src/lib/graph/engine.ts", "src/lib/spte/rails.ts"]) {
       const code = readCode(p);
-      expect(code).toMatch(/grounded: \[/);
       expect(code).toMatch(/verbatimNumerals\(/);
     }
+    expect(readCode("src/lib/graph/engine.ts")).toMatch(/grounded: \[/);
   });
 
   it("outreach claims ONE user move per window and refuses honestly", () => {
