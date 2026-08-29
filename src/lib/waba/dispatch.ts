@@ -27,12 +27,16 @@ import {
   admitLead,
   advanceLead,
   createLead,
+  expiredHolds,
+  expireHold,
   heldLeadsFor,
+  holdLead,
   markTemplateCapped,
   markTemplateSent,
   noteWabaEvent,
   openWindow,
   type Lead,
+  type LeadFallback,
 } from "./leads";
 import { nationalTail } from "../wa/phone-key";
 
@@ -174,7 +178,9 @@ export async function dispatchHandoff(input: DispatchInput): Promise<DispatchOut
   if ("hold" in admission) {
     // HELD, not dropped. The agency is contactable, just not right now - and the
     // moment it answers anyone, `flushHeldLeads` releases this one for free.
-    await advanceLead(lead.id, "held", { terminal_reason: null });
+    // The fallback payload rides the hold so rung 4 (sweepExpiredHolds) has the
+    // real composed opener + rfq to re-dispatch on the traveller's own wire.
+    await holdLead(lead.id, fallbackFor(input));
     await noteWabaEvent("held", { leadId: lead.id, agencyTail: lead.agency_tail, raw: { reason: admission.reason } });
     return {
       leadId: lead.id,
@@ -187,6 +193,19 @@ export async function dispatchHandoff(input: DispatchInput): Promise<DispatchOut
   return sendForLead(lead, admission.lane, input);
 }
 
+/** The rung-4 payload a hold carries: what to say and who it is about. */
+function fallbackFor(
+  input: Pick<DispatchInput, "freeformText" | "rfq" | "vendorId" | "agencyName">
+): LeadFallback | null {
+  if (!input.freeformText) return null;
+  return {
+    text: input.freeformText,
+    rfq: input.rfq ?? null,
+    vendorId: input.vendorId ?? null,
+    vendorName: input.agencyName ?? null,
+  };
+}
+
 /** The send itself, shared by the first attempt and by the window flush. */
 export async function sendForLead(
   lead: Lead,
@@ -195,6 +214,38 @@ export async function sendForLead(
 ): Promise<DispatchOutcome> {
   const c = await wabaConfig();
   const shop = input.agencyName ?? lead.agency_name ?? "";
+
+  // THE TEMPLATE-LANE CLAIM. templateAllowed is a check-then-act on
+  // last_template_at, so two travellers dispatching the same cold agency in
+  // the same second both read "no recent template" and BOTH pay - and the
+  // second send is exactly the double-message the cooldown exists to prevent
+  // on a shared, metered, quality-rated asset. One atomic day slot per agency
+  // tail: the loser HOLDS (its lead rides the window flush like any other).
+  // A dry run takes no claim (isolation: a rehearsal spends nothing), and a
+  // claims-store outage proceeds - the cooldown already passed, and "error"
+  // here is the pre-migration state the pacing layer treats the same way.
+  if (lane === "template" && !c.dryRun) {
+    const { sbInsertClaim } = await import("../runtime-config");
+    const day = new Date().toISOString().slice(0, 10);
+    const claim = await sbInsertClaim("wa_send_claims", {
+      sender_key: "waba",
+      slot_key: `template:${lead.agency_tail}:${day}`,
+    }).catch(() => "error" as const);
+    if (claim === "lost") {
+      await holdLead(lead.id, fallbackFor(input));
+      await noteWabaEvent("held", {
+        leadId: lead.id,
+        agencyTail: lead.agency_tail,
+        raw: { reason: "template-claim-lost" },
+      });
+      return {
+        leadId: lead.id,
+        outcome: "held",
+        reason: "agency-cooldown",
+        userMessage: say(USER_COPY.held, shop),
+      };
+    }
+  }
 
   const result =
     lane === "freeform"
@@ -299,7 +350,7 @@ export async function sendForLead(
   // governor stops choosing this agency, and hold the lead for the window.
   if (result.recipientCapped) {
     await markTemplateCapped(lead.agency_tail);
-    await advanceLead(lead.id, "held", { terminal_reason: null });
+    await holdLead(lead.id, fallbackFor(input));
     return {
       leadId: lead.id,
       outcome: "held",
@@ -370,4 +421,94 @@ export async function onAgencyReplied(
     if (out.outcome === "sent") flushed += 1;
   }
   return { opened: true, flushed };
+}
+
+/**
+ * RUNG 4 OF THE LADDER - the hold times out, the legacy path takes over.
+ *
+ * Constraint 1 (absolute shop choice) is why this exists: a traveller who
+ * picked a shop gets that shop contacted, and an agency our business number
+ * could not reach inside the hold window still has to be reachable somehow -
+ * the traveller's own number, exactly as before the WABA lane existed.
+ *
+ * The race with the window flush is settled by `expireHold`'s atomic
+ * state=held claim: exactly one of the two paths contacts the shop. The
+ * legacy re-dispatch is a PARKED wa_outbox row, not a direct send - the drain
+ * re-runs the full anti-ban guard (fleet suppression included) at delivery,
+ * so rung 4 cannot bypass a single rule of the wire it falls back to. The
+ * thread was never stamped waba (a held lead delivered nothing), so the
+ * Evolution delivery stamps the thread's transport honestly.
+ *
+ * Runs from the ping (the one periodic runner production has). Never throws.
+ */
+export async function sweepExpiredHolds(now = Date.now()): Promise<{ expired: number; redispatched: number }> {
+  const due = await expiredHolds(now).catch(() => [] as Lead[]);
+  let expired = 0;
+  let redispatched = 0;
+  for (const lead of due) {
+    if (!(await expireHold(lead.id))) continue; // flush won the race - its send stands
+    expired += 1;
+    const fb = lead.fallback ?? null;
+    const key = lead.thread_key ?? "";
+    const idx = key.lastIndexOf(":");
+    const email = idx > 0 ? key.slice(0, idx) : "";
+    const digits = idx > 0 ? key.slice(idx + 1) : "";
+    if (!fb?.text || !email || !digits) {
+      // Nothing real to re-send (pre-migration hold, or no thread join). The
+      // drop is recorded, never silent - Part 5.5's rule.
+      await noteWabaEvent("expired-unrecoverable", {
+        leadId: lead.id,
+        agencyTail: lead.agency_tail,
+        raw: { hasText: Boolean(fb?.text), hasThread: Boolean(email && digits) },
+      });
+      continue;
+    }
+    const { sbInsert } = await import("../runtime-config");
+    const { outboxToKeyPatch } = await import("../wa/outbox-columns");
+    const { humanizeForOutbound } = await import("../wa-guard");
+    const parked = await sbInsert("wa_outbox", [
+      {
+        sender_key: email,
+        to_number: digits,
+        ...(await outboxToKeyPatch(digits)),
+        // Humanize at park (the drain delivers parked rows verbatim), as a
+        // FIRST outbound: the WABA hold delivered nothing, so this genuinely
+        // is the first thing the traveller's wire says to this shop.
+        body: humanizeForOutbound(email, digits, fb.text, { firstOutbound: true }),
+        not_before: new Date(now).toISOString(),
+        meta: {
+          sender: email,
+          vendorId: fb.vendorId ?? "",
+          vendorName: fb.vendorName ?? lead.agency_name ?? "",
+          kind: "rfq",
+          round: 0,
+          rfq: fb.rfq ?? null,
+          reason: "waba-hold-timeout - falling back to your own WhatsApp",
+        },
+      },
+    ]).catch(() => false);
+    if (parked) {
+      redispatched += 1;
+      const { advanceThreadStage } = await import("../funnel/stages");
+      await advanceThreadStage(
+        {
+          userEmail: email,
+          toNumber: digits,
+          vendorId: fb.vendorId ?? undefined,
+          vendorName: fb.vendorName ?? lead.agency_name ?? undefined,
+          transport: "evolution",
+        },
+        "contact_queued",
+        "WABA hold timed out - re-dispatched on the traveller's own wire"
+      ).catch(() => {});
+      await noteWabaEvent("expired-redispatched", { leadId: lead.id, agencyTail: lead.agency_tail });
+    } else {
+      await noteWabaEvent("expired-unrecoverable", {
+        leadId: lead.id,
+        agencyTail: lead.agency_tail,
+        raw: { parked: false },
+      });
+    }
+  }
+  return { expired, redispatched };
 }

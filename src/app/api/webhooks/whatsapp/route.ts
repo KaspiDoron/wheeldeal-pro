@@ -229,7 +229,14 @@ export async function POST(req: Request) {
           const { isVendorThread } = await import("@/lib/drill");
           let receiver: string | null = null;
           if (resolved) {
-            const gate = await isVendorThread(digitsOnly(msg.from), resolved);
+            // The text rides along for the staff-mobile opener allowance only
+            // (drill.ts / waba/expectation) - a WABA agency replying from a
+            // personal device whose tail matches no lead.
+            const gate = await isVendorThread(
+              digitsOnly(msg.from),
+              resolved,
+              (msg.text?.body ?? caption ?? "") || undefined
+            );
             // null = the vendor-gate store was UNREACHABLE (our outage), NOT a
             // verdict of "not a shop". Treating it as `false` parked a possibly
             // genuine shop reply unattributed - invisible to its user, and Meta

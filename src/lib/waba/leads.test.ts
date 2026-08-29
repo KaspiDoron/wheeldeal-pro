@@ -237,9 +237,17 @@ describe("the handoff exception is narrow, and provably so", () => {
   });
 
   it("it can only ever turn a no into a yes", () => {
-    // The tail of the function returns the exception's own answer, and the only
-    // reachable prior verdict at that point is false.
-    expect(drill).toMatch(/return expected \? true : false;/);
+    // The tail-match allowance answers first; below it sits the SECOND scoped
+    // allowance (the staff-mobile opener match - see wabaExpectsOpener for its
+    // own safety argument), and the function's final word is an unconditional
+    // no. Neither allowance is reachable before the original gate said no.
+    expect(drill).toMatch(/if \(expected\) return true;/);
+    expect(drill).toMatch(/wabaExpectsOpener/);
+    // The opener allowance runs only when the caller supplied the text, and
+    // propagates a store outage as retryable, mirroring the tail matcher.
+    expect(drill).toMatch(/if \(inboundText\) \{/);
+    expect(drill).toMatch(/if \(byOpener === null\) return null;/);
+    expect(drill.trimEnd()).toMatch(/return false;\s*\}$/);
   });
 
   it("the original predicate's rules are untouched", () => {
@@ -325,5 +333,92 @@ describe("the handoff exception is narrow, and provably so", () => {
     selects.length = 0;
     await wabaExpectsInbound("0812345678", "a@b.com");
     expect(stable(selects[0].query)).toBe(first);
+  });
+});
+
+// THE STAFF-MOBILE ALLOWANCE - our own words as evidence, leads as authority.
+//
+// Agencies routinely reply from a personal device: the shop phone taps the
+// link, the phone in hand sends the message. That number's tail matches no
+// lead, so the tail matcher above correctly says no - and the reply the whole
+// lane exists to produce would die at the gate. The prefilled opener is
+// authored by US, so an inbound carrying it is carrying our own words back;
+// even then the phrase authorises nothing without a live dispatched lead.
+
+describe("the opener allowance is evidence PLUS authority, never evidence alone", () => {
+  const OPENER = "Hi, this is Sunrise Rentals - you were looking to rent a vehicle?";
+
+  it("our authored phrase with a live NAMED lead authorises, and names the lead", async () => {
+    const { wabaExpectsOpener } = await import("./expectation");
+    config.WABA_ENABLED = "on";
+    selectResult = {
+      rows: [{ id: 7, agency_tail: "812345678", agency_name: "Sunrise Rentals" }],
+    };
+    const out = await wabaExpectsOpener(OPENER, "a@b.com");
+    expect(out).toEqual({ authorised: true, leadId: 7, agencyTail: "812345678" });
+  });
+
+  it("the phrase alone, with NO live lead, authorises nothing", async () => {
+    const { wabaExpectsOpener } = await import("./expectation");
+    config.WABA_ENABLED = "on";
+    selectResult = { rows: [] };
+    expect(await wabaExpectsOpener(OPENER, "a@b.com")).toEqual({ authorised: false });
+  });
+
+  it("a name we never dispatched to matches nothing", async () => {
+    const { wabaExpectsOpener } = await import("./expectation");
+    config.WABA_ENABLED = "on";
+    selectResult = {
+      rows: [{ id: 7, agency_tail: "812345678", agency_name: "Moonset Motors" }],
+    };
+    expect(await wabaExpectsOpener(OPENER, "a@b.com")).toEqual({ authorised: false });
+  });
+
+  it("the GENERIC opener needs an UNAMBIGUOUS expectation - two live leads fail closed", async () => {
+    const { wabaExpectsOpener } = await import("./expectation");
+    config.WABA_ENABLED = "on";
+    selectResult = {
+      rows: [
+        { id: 7, agency_tail: "812345678", agency_name: "A" },
+        { id: 8, agency_tail: "912345678", agency_name: "B" },
+      ],
+    };
+    expect(
+      await wabaExpectsOpener("Hi, you were looking to rent a vehicle?", "a@b.com")
+    ).toEqual({ authorised: false });
+    selectResult = { rows: [{ id: 7, agency_tail: "812345678", agency_name: "A" }] };
+    const one = await wabaExpectsOpener("Hi, you were looking to rent a vehicle?", "a@b.com");
+    expect(one).toEqual({ authorised: true, leadId: 7, agencyTail: "812345678" });
+  });
+
+  it("an arbitrary message never reaches the lead store", async () => {
+    const { wabaExpectsOpener } = await import("./expectation");
+    config.WABA_ENABLED = "on";
+    selectResult = { rows: [{ id: 7, agency_tail: "812345678", agency_name: "A" }] };
+    expect(await wabaExpectsOpener("hello do you rent bikes?", "a@b.com")).toEqual({
+      authorised: false,
+    });
+    expect(selects).toHaveLength(0);
+  });
+
+  it("flag off, nothing runs - byte-identical to today", async () => {
+    const { wabaExpectsOpener } = await import("./expectation");
+    selectResult = { rows: [{ id: 7, agency_tail: "812345678", agency_name: "Sunrise Rentals" }] };
+    expect(await wabaExpectsOpener(OPENER, "a@b.com")).toEqual({ authorised: false });
+    expect(selects).toHaveLength(0);
+  });
+
+  it("a store outage stays retryable, mirroring the tail matcher", async () => {
+    const { wabaExpectsOpener } = await import("./expectation");
+    config.WABA_ENABLED = "on";
+    selectResult = { error: "unavailable" };
+    expect(await wabaExpectsOpener(OPENER, "a@b.com")).toBeNull();
+  });
+
+  it("the webhook paths actually hand the text to the gate", () => {
+    const ingest = readCode("src/lib/wa/ingest.ts");
+    const cloud = readCode("src/app/api/webhooks/whatsapp/route.ts");
+    expect(ingest).toMatch(/isVendorThread\(from, email, extractText\(data\) \|\| undefined\)/);
+    expect(cloud).toMatch(/isVendorThread\(\s*digitsOnly\(msg\.from\),\s*resolved,/);
   });
 });

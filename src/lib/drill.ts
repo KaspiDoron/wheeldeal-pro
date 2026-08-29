@@ -36,7 +36,11 @@ export { DRILL_INGEST_WINDOW_MS, REAL_THREAD_INGEST_WINDOW_MS };
  */
 export async function isVendorThread(
   fromDigits: string,
-  ownerEmail: string
+  ownerEmail: string,
+  /** The inbound's text, when the caller has it - used ONLY by the
+   *  staff-mobile opener allowance (waba/expectation wabaExpectsOpener),
+   *  reached after both the RFQ gate and the tail matcher said no. */
+  inboundText?: string
 ): Promise<boolean | null> {
   // Look at the recent outbound history of THIS user to THIS number (not just
   // the single newest row: a human-manual reply could be newest while the
@@ -123,5 +127,48 @@ export async function isVendorThread(
       /* the stamp is ledger truth, never the gate */
     }
   }
-  return expected ? true : false;
+  if (expected) return true;
+
+  // THE STAFF-MOBILE ALLOWANCE - reached only after BOTH the RFQ gate and the
+  // tail matcher said no, and only when the caller could supply the text.
+  // Agencies routinely reply from a personal device, whose tail matches no
+  // lead; the prefilled opener we authored is then the only evidence this
+  // stranger is the shop we asked to call. wabaExpectsOpener holds the whole
+  // safety argument (live lead required, named match or unambiguous, TTL'd,
+  // flag-gated) - see waba/expectation.
+  if (inboundText) {
+    const { wabaExpectsOpener } = await import("./waba/expectation");
+    const byOpener = await wabaExpectsOpener(inboundText, ownerEmail);
+    if (byOpener === null) return null;
+    if (byOpener.authorised && byOpener.leadId) {
+      // Stamp the MATCHED lead (the staff number's own tail has no lead row):
+      // same terminal-refusing filter shape as the tail path, keyed by id.
+      try {
+        const { sbUpdate } = await import("./runtime-config");
+        const email = ownerEmail.trim().toLowerCase();
+        const digits = fromDigits.replace(/\D+/g, "");
+        const nowIso = new Date().toISOString();
+        const filter = `id=eq.${byOpener.leadId}&state=in.(template_sent,handoff_sent)&handed_off_at=is.null`;
+        const full = await sbUpdate("waba_leads", filter, {
+          state: "handed_off",
+          handed_off_at: nowIso,
+          traveller_inbound_at: nowIso,
+          // The thread the engine now owns is the STAFF number's - that is the
+          // chat the traveller will actually be talking in.
+          thread_key: `${email}:${digits}`,
+        });
+        if (!full) {
+          await sbUpdate("waba_leads", filter, {
+            state: "handed_off",
+            handed_off_at: nowIso,
+            traveller_inbound_at: nowIso,
+          }).catch(() => false);
+        }
+      } catch {
+        /* the stamp is ledger truth, never the gate */
+      }
+      return true;
+    }
+  }
+  return false;
 }

@@ -92,6 +92,21 @@ export async function GET(req: Request) {
     /* best-effort - never fail the keep-awake on the re-arm */
   }
 
+  // RUNG 4 OF THE WABA LADDER (waba/dispatch sweepExpiredHolds): a lead whose
+  // hold outlived WABA_HOLD_TIMEOUT_MINUTES expires atomically and re-parks
+  // the traveller's real opener on their own wire, so constraint 1 (absolute
+  // shop choice) survives an agency that never answers the company number.
+  // ~Every 5 min, offset from the webhook re-arm's minute; the sweep is
+  // bounded (100 leads) and a no-op while the WABA lane is idle.
+  try {
+    if (Math.floor(Date.now() / 60_000) % 5 === 2) {
+      const { sweepExpiredHolds } = await import("@/lib/waba/dispatch");
+      await sweepExpiredHolds().catch(() => null);
+    }
+  } catch {
+    /* best-effort - never fail the keep-awake on the sweep */
+  }
+
   // TRIP-COMPLETION SUGGESTION (bookings.ts): a rental whose window has passed
   // gets ONE "did you return it?" push - never an auto-complete (the funnel
   // does not assert what nobody witnessed). ~Every 15 min; the per-booking

@@ -1775,6 +1775,10 @@ alter table public.waba_agencies add column if not exists opted_in_at timestampt
 -- dry_run: a rehearsal is not a send - persisted so the governor, cooldowns
 -- and every count can exclude it.
 alter table public.waba_leads add column if not exists dry_run boolean;
+-- fallback: rung 4's payload - the composed opener + rfq captured at HOLD
+-- time, so a hold that times out can re-dispatch the traveller's real message
+-- on their own wire (a held lead has no anchor row; nothing was ever sent).
+alter table public.waba_leads add column if not exists fallback jsonb;
 
 -- ---- Fleet-wide shop suppression (owner decision: opt-out is fleet-wide) ----
 --

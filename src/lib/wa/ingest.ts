@@ -565,7 +565,10 @@ export async function processEvolutionWebhook(
       // used to be a permanent loss (the route answered 200, so the provider
       // never redelivered). Fail loud instead: mark the whole delivery
       // retryable and let the webhook answer non-2xx.
-      const gate = await isVendorThread(from, email);
+      // The text rides into the gate for one purpose only: the staff-mobile
+      // opener allowance (a WABA agency replying from a personal device whose
+      // tail matches no lead) - see drill.ts / waba/expectation.
+      const gate = await isVendorThread(from, email, extractText(data) || undefined);
       if (gate === null) {
         retryable = true;
         void noteInboundDropped(email, from, "vendor-gate-unavailable", { via: "webhook" });

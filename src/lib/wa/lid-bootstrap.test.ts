@@ -116,8 +116,10 @@ describe("the bootstrap chain is wired end to end (source pins)", () => {
     expect(ingest).toMatch(/releaseInboundStore/);
     expect(ingest).toMatch(/batch-truncated/);
     expect(ingest).toMatch(/store-claim-lost/);
-    // The strict gate is real, not a truthiness accident.
-    expect(ingest).toMatch(/const gate = await isVendorThread\(from, email\);/);
+    // The strict gate is real, not a truthiness accident. (The third argument
+    // is the inbound's text, consumed only by the staff-mobile opener
+    // allowance - see drill.ts / waba/expectation.)
+    expect(ingest).toMatch(/const gate = await isVendorThread\(from, email, extractText\(data\) \|\| undefined\);/);
     expect(ingest).toMatch(/if \(gate === null\)/);
     const drill = readCode("src/lib/drill.ts");
     expect(drill).toMatch(/Promise<boolean \| null>/);

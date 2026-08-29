@@ -110,3 +110,67 @@ export async function wabaExpectsInbound(
   }
   return read.rows.length > 0;
 }
+
+/**
+ * THE STAFF-MOBILE ALLOWANCE - the opener phrase as evidence, leads as authority.
+ *
+ * The tail matcher above covers the number we templated. Agencies routinely
+ * reply from a personal device instead (tap the link on the shop phone, send
+ * from the one in hand), and that number matches no lead - the reply the whole
+ * lane exists to produce would be dropped at the gate.
+ *
+ * The prefilled opener is authored by US (waba/render prefilledOpener), so an
+ * inbound carrying it is carrying our own words back. Even then the phrase
+ * alone authorises NOTHING - the same four properties as the tail matcher
+ * hold, plus one:
+ *
+ *   1. A LIVE DISPATCHED LEAD is still required (template_sent/handoff_sent,
+ *      inside the TTL, not yet handed off). No expectation, no allowance.
+ *   2. A NAMED opener ("this is Sunrise Rentals - ...") must match a live
+ *      lead's agency name. A name we never dispatched to matches nothing.
+ *   3. The GENERIC opener authorises only when exactly ONE lead is live -
+ *      ambiguity fails closed rather than guessing which shop this is.
+ *   4. Flag-gated and TTL'd exactly like the tail matcher.
+ *
+ * Returns the matched lead so the caller can stamp the handoff on the RIGHT
+ * row (the staff number's tail has no lead to stamp). null = store outage,
+ * same retryable contract as wabaExpectsInbound.
+ */
+export async function wabaExpectsOpener(
+  text: string,
+  ownerEmail: string,
+  now = Date.now()
+): Promise<{ authorised: boolean; leadId?: number; agencyTail?: string } | null> {
+  const c = await wabaConfig();
+  if (!c.enabled) return { authorised: false };
+
+  const { openerMatch } = await import("./render");
+  const m = openerMatch(text);
+  if (!m.match) return { authorised: false };
+
+  const cutoff = new Date(now - (await expectationTtlHours()) * 3600_000).toISOString();
+  const read = await sbSelectStrict<{ id: number; agency_tail: string; agency_name: string | null }>(
+    "waba_leads",
+    `select=id,agency_tail,agency_name&user_email=eq.${encodeURIComponent(
+      ownerEmail.trim().toLowerCase()
+    )}&state=in.(template_sent,handoff_sent)&handed_off_at=is.null&created_at=gte.${encodeURIComponent(
+      cutoff
+    )}&order=created_at.desc&limit=10`
+  );
+  if ("error" in read) {
+    return read.error === "missing" ? { authorised: false } : null;
+  }
+  const live = read.rows;
+  if (live.length === 0) return { authorised: false };
+
+  if (m.agencyName) {
+    const norm = (s: string) => s.trim().toLowerCase();
+    const hit = live.find((l) => l.agency_name && norm(l.agency_name) === norm(m.agencyName!));
+    return hit
+      ? { authorised: true, leadId: hit.id, agencyTail: hit.agency_tail }
+      : { authorised: false };
+  }
+  return live.length === 1
+    ? { authorised: true, leadId: live[0].id, agencyTail: live[0].agency_tail }
+    : { authorised: false };
+}

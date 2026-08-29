@@ -34,6 +34,7 @@ import {
   sbSelect,
   sbSelectStrict,
   sbUpdate,
+  sbUpdateReturning,
   sbInsert,
 } from "../runtime-config";
 import { nationalTail } from "../wa/phone-key";
@@ -69,6 +70,19 @@ export interface Lead {
   /** Join to the conversation spine (user_email:agency_digits). Nullable on
    *  rows written before the migration. */
   thread_key?: string | null;
+  /** What rung 4 needs to contact this shop the LEGACY way when the hold times
+   *  out: the composed opener and its rfq, captured at hold time (a held lead
+   *  has no anchor row - nothing was ever sent - so without this the fallback
+   *  would have nothing real to say). Nullable pre-migration. */
+  fallback?: LeadFallback | null;
+}
+
+export interface LeadFallback {
+  text: string;
+  rfq?: unknown;
+  vendorId?: string | null;
+  vendorName?: string | null;
+  region?: string | null;
 }
 
 export interface AgencyState {
@@ -276,6 +290,45 @@ export async function advanceLead(
   ).catch(() => false);
   if (ok) await noteWabaEvent("state", { leadId: id, raw: { to } });
   return ok;
+}
+
+/**
+ * Put a lead on HOLD, carrying the rung-4 fallback payload with it.
+ *
+ * The payload write is best-effort BY RETRY, not by silence: on an un-migrated
+ * DB (no `fallback` column) the guarded PATCH fails, and the retry without the
+ * payload still lands the hold - a lead must never be lost to a pending ALTER,
+ * and a hold without a payload merely means rung 4 will have nothing to
+ * re-send (which the sweep records honestly).
+ */
+export async function holdLead(id: number, fallback?: LeadFallback | null): Promise<boolean> {
+  if (fallback) {
+    const withPayload = await advanceLead(id, "held", { terminal_reason: null, fallback });
+    if (withPayload) return true;
+  }
+  return advanceLead(id, "held", { terminal_reason: null });
+}
+
+/**
+ * Atomically expire a STILL-HELD lead (rung 4's claim).
+ *
+ * The `state=eq.held` filter is the whole point: the window flush and this
+ * sweep race by design (an agency may answer at minute 24 of a 25-minute
+ * hold), and a plain advanceLead would let a late expiry clobber a lead the
+ * flush just promoted to handoff_sent. Winning this PATCH is what authorises
+ * the legacy re-dispatch - exactly one of the two paths contacts the shop.
+ */
+export async function expireHold(id: number): Promise<boolean> {
+  const rows = await sbUpdateReturning<{ id: number }>(
+    "waba_leads",
+    `id=eq.${id}&state=eq.held`,
+    { state: "expired", terminal_reason: "hold-timeout" }
+  ).catch(() => [] as { id: number }[]);
+  if (rows.length > 0) {
+    await noteWabaEvent("state", { leadId: id, raw: { to: "expired", reason: "hold-timeout" } });
+    return true;
+  }
+  return false;
 }
 
 /**

@@ -122,4 +122,50 @@ describe("the handoff link is safe to forward", () => {
     expect(prefilledOpener(null)).toMatch(/rent a vehicle/);
     expect(prefilledOpener("  ")).toMatch(/rent a vehicle/);
   });
+
+  it("...and openerMatch closes the loop: what we author, we recognise", async () => {
+    // The staff-mobile case's whole foundation: round-trip BOTH authored
+    // shapes through the matcher, name extraction included.
+    const { prefilledOpener, openerMatch } = await import("./render");
+    expect(openerMatch(prefilledOpener("Sunrise Rentals"))).toEqual({
+      match: true,
+      agencyName: "Sunrise Rentals",
+    });
+    expect(openerMatch(prefilledOpener(null))).toEqual({ match: true });
+    // Not a heuristic: ordinary shop talk does not match, nor does an essay
+    // that merely quotes the phrase.
+    expect(openerMatch("hello, want to rent a scooter?").match).toBe(false);
+    expect(openerMatch(`${"blah ".repeat(50)}you were looking to rent a vehicle?`).match).toBe(false);
+    expect(openerMatch("").match).toBe(false);
+    expect(openerMatch(null).match).toBe(false);
+  });
+
+  it("a lightly edited prefill still matches - staff add their name, not an essay", async () => {
+    const { openerMatch } = await import("./render");
+    const m = openerMatch("Hello! This is Sunrise Rentals, you were looking to rent a vehicle?");
+    expect(m.match).toBe(true);
+    expect(m.agencyName).toBe("Sunrise Rentals");
+  });
+});
+
+describe("the handoff link is bounded in time and by the lead's fate", () => {
+  it("a terminal lead's link is dead - failed and expired tokens resolve nothing", () => {
+    // A failed template reached no one and an expired hold sent nothing, so no
+    // one can legitimately hold either link; resolving one would connect a
+    // stranger to a traveller off a token that leaked at leisure. handed_off
+    // stays LIVE - the agency re-opening its own chat is normal.
+    expect(link).toMatch(/lead\.state === "failed" \|\| lead\.state === "expired"/);
+  });
+
+  it("the link expires on the same clock as the inbound expectation", () => {
+    expect(link).toMatch(/WABA_EXPECTATION_TTL_HOURS/);
+    expect(link).toMatch(/ttlHours \* 3600_000\) return dead\(\)/);
+    // An unparseable birth date is treated as too old, never as fresh.
+    expect(link).toMatch(/!Number\.isFinite\(born\)/);
+  });
+
+  it("the neutral dead page resolves through site.ts, not a re-derived env chain", () => {
+    expect(link).toMatch(/resolveSiteOrigin/);
+    expect(link).not.toMatch(/process\.env\.APP_DOMAIN/);
+  });
 });

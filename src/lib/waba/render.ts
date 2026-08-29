@@ -44,6 +44,33 @@ export async function renderHeldHandoff(lead: Lead): Promise<HeldRender> {
   const hello = shop ? `Hi ${shop} - ` : "Hi - ";
   let vehicle = "vehicle";
   let dates = "";
+  // THE HOLD'S OWN PAYLOAD FIRST. A held lead never sent anything, so the
+  // anchor read below usually finds nothing for it - but the dispatcher now
+  // captures the real composed opener on the hold itself (rung 4's payload),
+  // and the flush should say exactly what the traveller's agent composed
+  // rather than reconstructing a vaguer version. The link still rides along.
+  const stored = lead.fallback?.text?.trim();
+  if (stored) {
+    const r = lead.fallback?.rfq as { vehicleClass?: string; engineSizeCc?: number; durationDays?: number } | null | undefined;
+    if (r?.vehicleClass) vehicle = `${r.engineSizeCc ? `${r.engineSizeCc}cc ` : ""}${r.vehicleClass}`;
+    if (typeof r?.durationDays === "number" && r.durationDays > 0) {
+      dates = `${r.durationDays} ${r.durationDays === 1 ? "day" : "days"}`;
+    }
+    let link = "";
+    try {
+      const { wabaConfig } = await import("./config");
+      const c = await wabaConfig();
+      if (lead.link_token && c.linkBase) link = ` Their request: ${c.linkBase}/${lead.link_token}`;
+    } catch {
+      /* no link - the stored opener still stands on its own */
+    }
+    return {
+      vehicle,
+      dates,
+      agencyName: lead.agency_name ?? undefined,
+      freeformText: `${stored}${link}`,
+    };
+  }
   try {
     const key = lead.thread_key ?? "";
     const idx = key.lastIndexOf(":");
@@ -130,4 +157,32 @@ export function prefilledOpener(agencyName?: string | null): string {
   return who
     ? `Hi, this is ${who} - you were looking to rent a vehicle?`
     : "Hi, you were looking to rent a vehicle?";
+}
+
+/**
+ * The other half of the authored-opener contract: does an inbound text READ AS
+ * our prefilled opener, and which agency does it claim to be?
+ *
+ * This is what covers the staff-mobile case: the agency taps the link on the
+ * shop phone but replies from a personal device, so the number-tail
+ * authorisation (waba/expectation) finds no lead. The phrase we authored is
+ * then the only evidence that this stranger is the shop we asked to call - and
+ * because WE wrote it, matching it is a contract, not a heuristic.
+ *
+ * Deliberately strict: the core phrase must be present, the message must be
+ * SHORT (a staff intro, not an essay quoting our words), and a claimed agency
+ * name is extracted only from the exact authored shape. The consumer
+ * (wabaExpectsOpener) still requires a live dispatched lead - the phrase alone
+ * authorises nothing.
+ */
+export function openerMatch(text: string | null | undefined): {
+  match: boolean;
+  agencyName?: string;
+} {
+  const t = (text ?? "").trim();
+  if (!t || t.length > 200) return { match: false };
+  if (!/you were looking to rent a vehicle\?/i.test(t)) return { match: false };
+  const named = /this is\s+(.{1,60}?)\s*[-,]\s*you were looking to rent a vehicle\?/i.exec(t);
+  const name = named?.[1]?.trim();
+  return { match: true, ...(name ? { agencyName: name } : {}) };
 }
