@@ -731,6 +731,8 @@ export async function POST(req: Request) {
           direction: "outbound",
           raw: {
             channel: personal ? "personal-wa" : "cloud-api",
+            // Which wire carried it (one vocabulary: evolution | cloud | waba).
+            transport: personal ? "evolution" : "cloud",
             ok: true,
             ...meta,
             // The chat's privacy identity, when the provider reported one -

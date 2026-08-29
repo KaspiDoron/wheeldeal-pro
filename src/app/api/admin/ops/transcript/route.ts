@@ -56,12 +56,15 @@ export async function GET(req: Request) {
   const userEmail = threadKey.slice(0, idx);
   const digits = threadKey.slice(idx + 1);
 
-  const [outs, ins, thread, scores, reviews, offers, queued] = await Promise.all([
+  const [outs, ins, thread, scores, reviews, queued] = await Promise.all([
     sbSelect<WaRow>(
       "whatsapp_messages",
+      // NEWEST first (then causally re-sorted below): asc&limit took the
+      // OLDEST 80, so a long negotiation's live tail - the part the owner
+      // opens the transcript FOR - silently fell off the end.
       `select=id,body,received_at,raw&direction=eq.outbound&to_number=eq.${encodeURIComponent(
         digits
-      )}&raw->>sender=eq.${encodeURIComponent(userEmail)}&order=received_at.asc&limit=80`
+      )}&raw->>sender=eq.${encodeURIComponent(userEmail)}&order=received_at.desc&limit=80`
     ).catch(() => []),
     sbSelect<WaRow>(
       "whatsapp_messages",
@@ -69,17 +72,19 @@ export async function GET(req: Request) {
       // second user on the same shop number must never bleed in.
       `select=id,body,received_at,raw&direction=eq.inbound&from_number=eq.${encodeURIComponent(
         digits
-      )}&raw->>receiver=eq.${encodeURIComponent(userEmail)}&order=received_at.asc&limit=80`
+      )}&raw->>receiver=eq.${encodeURIComponent(userEmail)}&order=received_at.desc&limit=80`
     ).catch(() => []),
     sbSelect<{
       phase: string;
+      stage: string | null;
+      vendor_id: string | null;
       fields: Record<string, unknown> | null;
       last_decision_id: string | null;
       waiting_until: string | null;
       updated_at: string;
     }>(
       "negotiation_threads",
-      `select=phase,fields,last_decision_id,waiting_until,updated_at&thread_key=eq.${encodeURIComponent(
+      `select=phase,stage,vendor_id,fields,last_decision_id,waiting_until,updated_at&thread_key=eq.${encodeURIComponent(
         threadKey
       )}&limit=1`
     ).catch(() => []),
@@ -101,19 +106,6 @@ export async function GET(req: Request) {
       "agent_reviews",
       `select=*&thread_key=eq.${encodeURIComponent(threadKey)}&order=created_at.desc&limit=60`
     ).catch(() => []),
-    sbSelect<{
-      price_per_day: number;
-      list_price_per_day: number | null;
-      currency: string;
-      round: number | null;
-      verified: boolean | null;
-      created_at: string;
-    }>(
-      "offers",
-      `select=price_per_day,list_price_per_day,currency,round,verified,created_at&user_email=eq.${encodeURIComponent(
-        userEmail
-      )}&vendor_id=eq.${encodeURIComponent(digits)}&order=created_at.asc&limit=20`
-    ).catch(() => []),
     sbSelect<{ body: string; not_before: string; meta: { reason?: string } | null }>(
       "wa_outbox",
       `select=body,not_before,meta&sender_key=eq.${encodeURIComponent(
@@ -121,6 +113,27 @@ export async function GET(req: Request) {
       )}&to_number=eq.${encodeURIComponent(digits)}&order=not_before.asc&limit=5`
     ).catch(() => []),
   ]);
+
+  // OFFERS JOIN ON THE REAL KEY. offers.vendor_id is the discovery vendor id,
+  // never the shop's phone - `vendor_id=eq.<digits>` matched only threads
+  // whose vendorId happened to literally BE the digits, so the price panel
+  // read empty on almost every healthy thread. The thread row carries the
+  // real id; digits stay as the fallback for a vendor-less row (where the
+  // old behavior was the only behavior). Dependent read, so it runs after.
+  const offerVendorId = thread[0]?.vendor_id || digits;
+  const offers = await sbSelect<{
+    price_per_day: number;
+    list_price_per_day: number | null;
+    currency: string;
+    round: number | null;
+    verified: boolean | null;
+    created_at: string;
+  }>(
+    "offers",
+    `select=price_per_day,list_price_per_day,currency,round,verified,created_at&user_email=eq.${encodeURIComponent(
+      userEmail
+    )}&vendor_id=eq.${encodeURIComponent(offerVendorId)}&order=created_at.asc&limit=20`
+  ).catch(() => []);
 
   const messages = [
     ...outs.map((m) => ({
@@ -224,6 +237,9 @@ export async function GET(req: Request) {
     thread: thread[0]
       ? {
           phase: thread[0].phase,
+          // The funnel LEDGER stage - the vocabulary the owner's console
+          // shares with the traveller tracker (funnel/stages.ts).
+          stage: thread[0].stage ?? null,
           fields: thread[0].fields ?? {},
           waitingUntil: thread[0].waiting_until,
           updatedAt: thread[0].updated_at,

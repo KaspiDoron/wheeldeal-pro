@@ -30,6 +30,7 @@ import { cheapestCheaperRival } from "../negotiation/leverage";
 import { deriveThreadFacts } from "./thread-facts";
 import { getPolicyOverlay, DEFAULT_OVERLAY, type PolicyOverlay } from "../ops/overlay";
 import { getGraphSpec } from "../graph/engine";
+import { clampTurnDetail } from "./turn-detail";
 /** The historical literal, kept as the config-outage fallback. It is the graph
  *  spec's own default (default-graph.ts:44), not the 6 that used to be here. */
 const DEFAULT_MAX_ROUNDS = 4;
@@ -1510,11 +1511,11 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
       vendorName: input.ctx.vendorName,
       userEmail: input.ctx.sender,
       toDigits: input.event.toDigits,
-      // FIELD ORDER IS LOAD-BEARING. The blob is hard-capped below, so every
-      // short analytical field comes first and the two long free-text fields
-      // (`think`, `text`) come last - truncation can then only ever eat the tail
-      // of a scratchpad, never a metric.
-      detail: JSON.stringify({
+      // BOUNDED BY FIELD, NEVER BY SLICE (clampTurnDetail): the old
+      // stringify-then-slice cap cut mid-token, so any turn crossing 1600
+      // chars stopped being JSON and silently dropped out of every metric -
+      // and the crossers were exactly the degraded turns worth studying.
+      detail: clampTurnDetail({
         move: outcome.move,
         tier: outcome.route.tier,
         provider: outcome.route.provider ?? null,
@@ -1611,7 +1612,7 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
         standingQuote: tc.thread.digest.quotedPricePerDay ?? null,
         think: outcome.artifact.think?.slice(0, 180),
         text: send?.slice(0, 180) ?? null,
-      }).slice(0, 1600),
+      }),
     })
     .catch(() => {});
 

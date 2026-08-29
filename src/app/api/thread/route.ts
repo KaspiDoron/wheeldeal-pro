@@ -83,9 +83,12 @@ export async function GET(req: Request) {
         // rows carry the spelling discovery produced, inbound rows the one
         // WhatsApp delivered, and an exact match between the two silently
         // emptied half of the conversation.
+        // NEWEST 60 (the merge below re-sorts ascending): asc&limit took the
+        // OLDEST 60 per direction, so a long thread's live tail - the part
+        // the traveller opens the peek FOR - fell off before the merge.
         `select=id,body,received_at,raw&direction=eq.outbound&raw->>sender=eq.${encodeURIComponent(
           session.email
-        )}${since}&order=received_at.asc&limit=60${numberFilter("to_number", digits)}`
+        )}${since}&order=received_at.desc&limit=60${numberFilter("to_number", digits)}`
       ).catch(() => []),
       sbSelect<{
         id: number;
@@ -109,7 +112,7 @@ export async function GET(req: Request) {
         // thread with the same number.
         `select=id,body,received_at,type,wa_message_id,raw&direction=eq.inbound&raw->>receiver=eq.${encodeURIComponent(
           session.email
-        )}${since}&order=received_at.asc&limit=60${numberFilter("from_number", digits)}`
+        )}${since}&order=received_at.desc&limit=60${numberFilter("from_number", digits)}`
       ).catch(() => []),
       // Delivery status for THIS user's number -> this shop (WhatsApp ticks:
       // sent -> delivered (double grey) -> read (blue) -> replied). Scoped by

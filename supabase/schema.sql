@@ -1751,3 +1751,9 @@ alter table public.bookings add column if not exists cancelled_at timestamptz;
 alter table public.bookings add column if not exists cancel_reason text;
 alter table public.bookings add column if not exists thread_key text;
 alter table public.bookings add column if not exists completion_suggested_at timestamptz;
+
+-- waba_leads joins the real conversation spine: thread_key (user_email:digits)
+-- replaces the dead search_sessions uuid as the lead's join to
+-- negotiation_threads / whatsapp_messages. Stamped by the WABA dispatch when
+-- the takeover leg wires up (Wave 6); additive and null until then.
+alter table public.waba_leads add column if not exists thread_key text;

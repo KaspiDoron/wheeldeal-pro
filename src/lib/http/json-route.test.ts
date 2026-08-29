@@ -107,12 +107,14 @@ describe("the send route is wrapped, and bookkeeping cannot fail a delivered sen
 
   it("the outbound log insert can no longer throw out of the handler", () => {
     const r = readCode("src/app/api/outreach/route.ts");
-    // This is the one that ran AFTER the message had left.
-    const i = r.indexOf('sbInsert("whatsapp_messages"');
+    // This is the one that ran AFTER the message had left. Its protection is
+    // sbInsert's own no-reject contract, CHECKED as a boolean (the Wave-0
+    // fix) - so pin the checked form, not a .catch that would be dead code.
+    const i = r.indexOf('const wroteLog = await sbInsert("whatsapp_messages"');
     expect(i).toBeGreaterThan(-1);
-    expect(r.slice(i, i + 1400)).toMatch(/\]\)\.catch\(/);
-    // ...and the loss is reported rather than swallowed.
-    expect(r).toMatch(/kind: "outbound-log-failed"/);
+    // ...and the loss is reported rather than swallowed, by an insert that is
+    // itself throw-proof.
+    expect(r.slice(i)).toMatch(/kind: "outbound-log-failed"[\s\S]{0,700}\]\)\.catch\(/);
     expect(r).toMatch(/logged,/);
   });
 });

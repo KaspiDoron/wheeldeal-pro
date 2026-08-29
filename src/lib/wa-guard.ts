@@ -3946,6 +3946,10 @@ export async function drainOutbox(
             ok: true,
             auto: true,
             queued: true,
+            // Which wire carried it (design piece 4): the drain only ever
+            // sends via the traveller's Evolution instance; the WABA lane
+            // stamps 'waba' on its own rows. One key, one vocabulary.
+            transport: "evolution",
             confirmed: r.unconfirmed ? false : true,
             // The chat's privacy identity when the provider reported one. An
             // outbound anchor carrying raw.lid is what lets the shop's FIRST

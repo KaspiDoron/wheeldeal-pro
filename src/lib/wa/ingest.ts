@@ -842,6 +842,8 @@ export async function processEvolutionWebhook(
             receiver: email,
             pushName: data.pushName ?? null,
             channel: "evolution",
+            // Which wire carried it (one vocabulary: evolution | cloud | waba).
+            transport: "evolution",
             // The privacy identifier this chat is addressed by, when it is one.
             // Persisting it here (existing JSONB, no migration) is what lets a
             // later @lid frame with no phone field resolve to the same shop

@@ -694,6 +694,8 @@ async function handlePost(req: Request) {
         direction: "outbound",
         raw: {
           channel: result.channel,
+          // Which wire carried it (one vocabulary: evolution | cloud | waba).
+          transport: result.channel === "cloud-api" ? "cloud" : "evolution",
           sender: session.email,
           ok: true,
           // false when Evolution accepted the request but returned no delivery
