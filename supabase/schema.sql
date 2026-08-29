@@ -1730,3 +1730,24 @@ alter table public.negotiation_threads add column if not exists stage text;
 alter table public.negotiation_threads add column if not exists stage_at timestamptz;
 create index if not exists negotiation_threads_stage_idx
   on public.negotiation_threads (user_email, stage);
+
+-- ---- The booking lifecycle (src/lib/bookings.ts) ----------------------------
+--
+-- `status` grows a real vocabulary: confirmed -> deposit_pending ->
+-- deposit_settled|deposit_waived -> picked_up -> completed, terminals
+-- cancelled / no_show. Advanced ONLY by advanceBooking() (forward-only +
+-- terminal refusal + ownership in the PATCH filter); history is append-only in
+-- agent_events kind='booking-stage'. The doctrine: the funnel never asserts
+-- what nobody witnessed - picked_up/completed come from traveller taps, and
+-- the schedule timeout only ever SUGGESTS completion (completion_suggested_at
+-- throttles that push to once per booking). thread_key joins the money record
+-- to the negotiation that produced it.
+alter table public.bookings add column if not exists deposit_status text;
+alter table public.bookings add column if not exists deposit_amount numeric;
+alter table public.bookings add column if not exists deposit_currency text;
+alter table public.bookings add column if not exists picked_up_at timestamptz;
+alter table public.bookings add column if not exists completed_at timestamptz;
+alter table public.bookings add column if not exists cancelled_at timestamptz;
+alter table public.bookings add column if not exists cancel_reason text;
+alter table public.bookings add column if not exists thread_key text;
+alter table public.bookings add column if not exists completion_suggested_at timestamptz;

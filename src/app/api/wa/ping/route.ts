@@ -92,6 +92,20 @@ export async function GET(req: Request) {
     /* best-effort - never fail the keep-awake on the re-arm */
   }
 
+  // TRIP-COMPLETION SUGGESTION (bookings.ts): a rental whose window has passed
+  // gets ONE "did you return it?" push - never an auto-complete (the funnel
+  // does not assert what nobody witnessed). ~Every 15 min; the per-booking
+  // once-only claim lives on completion_suggested_at, so this gate is only
+  // about scan frequency, not correctness.
+  try {
+    if (Math.floor(Date.now() / 60_000) % 15 === 1) {
+      const { suggestCompletions } = await import("@/lib/bookings");
+      await suggestCompletions().catch(() => null);
+    }
+  } catch {
+    /* best-effort - never fail the keep-awake on a suggestion */
+  }
+
   // Extend this ping's reach: kick the self-chaining drain so one cron hit
   // keeps a staggered batch progressing for the following ~30 minutes even
   // between cron intervals. AWAITED to the point of leaving the instance - a

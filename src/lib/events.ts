@@ -24,6 +24,7 @@ import { sbInsert } from "./runtime-config";
 export const AGENT_EVENT_KINDS = [
   // ---- funnel & lifecycle ---------------------------------------------------
   "funnel-stage", // the stage ledger's transition history (funnel/stages.ts)
+  "booking-stage", // the booking lifecycle's transition history (bookings.ts)
   "phase-anomaly", // structurally illegal engine phase jump (graph/state.ts)
   "wa-session-closed", // a linked WhatsApp session ended
   // ---- engine turns ---------------------------------------------------------

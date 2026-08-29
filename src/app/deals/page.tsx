@@ -74,6 +74,9 @@ interface SessionSummary {
   best: (SessionOffer & { savedPct: number | null }) | null;
   avgAsk: number | null;
   booking: {
+    /** Row id + lifecycle status - what the tap controls PATCH (bookings.ts). */
+    id: number | null;
+    status: string;
     vendorName: string;
     total: number | null;
     perDay: number | null;
@@ -225,6 +228,36 @@ export default function DealsPage() {
   // "Is that price still good?" - one tap re-asks every shop from a past hunt.
   const [rechecking, setRechecking] = useState<string | null>(null);
   const [recheckNote, setRecheckNote] = useState<Record<string, string>>({});
+  // Booking lifecycle taps (bookings.ts doctrine: the traveller is the witness
+  // for picked_up/completed, so THEY record it). One in flight at a time.
+  const [bookingTap, setBookingTap] = useState<number | null>(null);
+
+  async function tapBookingAction(id: number, action: "picked_up" | "completed") {
+    if (bookingTap) return;
+    setBookingTap(id);
+    try {
+      const r = await fetch("/api/bookings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, action }),
+      });
+      const d = await r.json().catch(() => ({}));
+      // The server's answer (or the refusal) is the truth - reflect it locally
+      // without a full reload. ok:false means already at/past this status,
+      // which renders the same way.
+      const next = typeof d?.status === "string" && d.status ? d.status : action;
+      setSessions((prev) =>
+        prev.map((s) =>
+          s.booking?.id === id ? { ...s, booking: { ...s.booking, status: next } } : s
+        )
+      );
+      setBookings((prev) => prev.map((b) => (b.id === id ? { ...b, status: next } : b)));
+    } catch {
+      /* the next poll shows the durable state */
+    } finally {
+      setBookingTap(null);
+    }
+  }
 
   async function recheckPrices(startedAt: string, sid?: number | null) {
     if (rechecking) return;
@@ -853,6 +886,35 @@ export default function DealsPage() {
                               )}
                             </div>
                           </div>
+                          {/* Lifecycle taps - the traveller is the witness the
+                              funnel trusts for picked_up/completed. */}
+                          {s.booking.id != null && s.booking.status !== "completed" &&
+                            s.booking.status !== "cancelled" && s.booking.status !== "no_show" && (
+                            <div className="mt-2">
+                              {s.booking.status === "picked_up" ? (
+                                <button
+                                  onClick={() => tapBookingAction(s.booking!.id!, "completed")}
+                                  disabled={bookingTap != null}
+                                  className="w-full rounded-xl bg-savings px-3 py-2 text-[12px] font-extrabold text-white disabled:opacity-60"
+                                >
+                                  {t("Trip completed - I returned it")}
+                                </button>
+                              ) : (
+                                <button
+                                  onClick={() => tapBookingAction(s.booking!.id!, "picked_up")}
+                                  disabled={bookingTap != null}
+                                  className="w-full rounded-xl bg-card2 px-3 py-2 text-[12px] font-extrabold text-strong disabled:opacity-60"
+                                >
+                                  {t("I picked it up")}
+                                </button>
+                              )}
+                            </div>
+                          )}
+                          {s.booking.status === "completed" && (
+                            <div className="mt-2 rounded-xl bg-card2 px-3 py-2 text-center text-[11px] font-extrabold text-savings">
+                              {t("Trip completed")}
+                            </div>
+                          )}
                         </div>
                       )}
 
