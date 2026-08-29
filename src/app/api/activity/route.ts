@@ -476,6 +476,29 @@ export async function GET(req: Request) {
   // A real priced OFFER is the strongest state.
   for (const o of offers) if (o.price_per_day) bumpState(o.vendor_id, "offer");
 
+  // ---- THE FUNNEL LEDGER, SERVED (src/lib/funnel/stages.ts) -----------------
+  // The durable per-thread stage - the single vocabulary the tracker migrates
+  // onto, shipped ALONGSIDE the legacy 3-value rank so clients adopt it without
+  // a flag day. One cheap indexed read; keyed by vendorId with a digits
+  // fallback through the same join the raw-inbound rollup uses.
+  const vendorStages: Record<string, { stage: string; at: string | null }> = {};
+  {
+    const threadRows = await sbSelect<{
+      vendor_id: string | null;
+      to_number: string;
+      stage: string | null;
+      stage_at: string | null;
+    }>(
+      "negotiation_threads",
+      `select=vendor_id,to_number,stage,stage_at&user_email=eq.${enc}&stage=not.is.null&limit=200`
+    ).catch(() => []);
+    for (const t of threadRows) {
+      if (!t.stage) continue;
+      const id = t.vendor_id || vendorByDigits[digitsOnly(t.to_number)];
+      if (id) vendorStages[id] = { stage: t.stage, at: t.stage_at };
+    }
+  }
+
   // ---- COUNTER-OFFER DETECTION (derived, never cosmetic) --------------------
   // See deriveCountered(): a vendor is countered once the agent has sent a
   // bargain move after the shop's opening quote (offer round>=1, or an outbound
@@ -944,6 +967,7 @@ export async function GET(req: Request) {
     introBudget,
     whyByVendor,
     vendorStates,
+    vendorStages, // the funnel LEDGER stage per vendor: {stage, at} - the durable truth
     countered, // J: vendorIds where the agent countered a shop quote
     progress, // F4: the ONE two-segment bar derivation - the client renders it
     queueEtaDoneBy, // W2: honest "all done by" (max etaTo across the queue)

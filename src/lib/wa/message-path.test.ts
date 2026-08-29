@@ -84,6 +84,33 @@ describe("messagePath assembles one chronological trail", () => {
     expect(path.degraded).toBe(true);
   });
 
+  it("a funnel-stage transition renders as a sentence, and its kind is fetched", async () => {
+    responder = (table) => {
+      if (table === "agent_events")
+        return [
+          {
+            kind: "funnel-stage",
+            detail: JSON.stringify({
+              from: "understood",
+              to: "price_received",
+              evidence: "shop quoted a grounded price",
+            }),
+            created_at: "2026-08-13T10:07:00Z",
+          },
+        ];
+      return [];
+    };
+    const path = await messagePath({ senderKey: "user@x.com", toDigits: "66123456789" });
+    const step = path.steps.find((s) => s.stage === "funnel");
+    expect(step?.detail).toBe("understood -> price_received (shop quoted a grounded price)");
+    // The fetch filter includes the ledger + the newly-joinable kinds - the
+    // trail can only render what it asks for.
+    const ev = queries.find((q) => q.startsWith("agent_events"));
+    expect(ev).toContain("funnel-stage");
+    expect(ev).toContain("send-failed");
+    expect(ev).toContain("human-takeover");
+  });
+
   it("scopes every read to the traveller - the privacy keystone", async () => {
     await messagePath({ senderKey: "user@x.com", toDigits: "66123456789" });
     const wa = queries.filter((q) => q.startsWith("whatsapp_messages"));

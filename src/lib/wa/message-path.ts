@@ -50,7 +50,14 @@ export interface PathStep {
     // green. It belongs on the trail so "why did this number get restricted"
     // has the placement in it.
     | "transport"
-    | "wakeup";
+    | "wakeup"
+    // The funnel LEDGER's transitions (src/lib/funnel/stages.ts) - the trail
+    // can now say not just where a message went but where it moved the funnel.
+    | "funnel"
+    // send-failed / human-takeover / human-handback: written with join columns
+    // since Wave 1, so the trail can finally fetch them.
+    | "send-failed"
+    | "takeover";
   detail: string;
   /** Structured leftovers for machines; the UI shows `detail`. */
   raw?: Record<string, unknown>;
@@ -93,6 +100,13 @@ const EVENT_STAGE: Record<string, PathStep["stage"]> = {
   "localize-fallback": "localize",
   "engine-v3-turn": "engine-turn",
   "host-geo-mismatch": "transport",
+  // Wave 1: kinds that previously existed but were invisible here (no join
+  // columns) or did not exist at all. Every one now writes user_email +
+  // to_number, so the trail's per-thread fetch finds them.
+  "funnel-stage": "funnel",
+  "send-failed": "send-failed",
+  "human-takeover": "takeover",
+  "human-handback": "takeover",
 };
 
 /** The agent_events kinds the trail fetches - derived from the map above so
@@ -203,10 +217,17 @@ export async function messagePath(opts: {
     } catch {
       raw = undefined;
     }
+    // A funnel transition reads as a sentence, not a JSON blob: the trail is
+    // the owner's forensic view and "understood -> price_received (shop quoted
+    // a grounded price)" answers the question directly.
+    const funnelLine =
+      e.kind === "funnel-stage" && raw && typeof raw.to === "string"
+        ? `${raw.from ?? "(start)"} -> ${raw.to}${raw.evidence ? ` (${String(raw.evidence)})` : ""}`
+        : undefined;
     steps.push({
       at: e.created_at,
       stage: EVENT_STAGE[e.kind] ?? "hold",
-      detail: raw?.reason ? String(raw.reason) : e.detail ?? e.kind,
+      detail: funnelLine ?? (raw?.reason ? String(raw.reason) : e.detail ?? e.kind),
       raw,
     });
   }

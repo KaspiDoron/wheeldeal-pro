@@ -98,9 +98,14 @@ export async function fieldKpis(windowDays = 30): Promise<FieldKpis> {
     ),
     sbSelectDark<{ id: number }>("searches", `select=id&created_at=gte.${pgTimestamp(since)}&limit=10000`),
     sbSelectDark<{ id: number }>("bookings", `select=id&created_at=gte.${pgTimestamp(since)}&limit=10000`),
+    // human-takeover is the ONE kind setThreadTakeover writes (the marker's
+    // agent_events twin). The old in-list also read `takeover` and
+    // `takeover-detected` - names NO writer ever emitted, so they were dead
+    // filter weight that hid the real question ("does anything write this?")
+    // from the reader/writer reconcile test.
     sbSelectDark<{ user_email: string | null; vendor_id: string | null }>(
       "agent_events",
-      `select=user_email,vendor_id&kind=in.(human-takeover,takeover,takeover-detected)&created_at=gte.${pgTimestamp(since)}&limit=10000`
+      `select=user_email,vendor_id&kind=eq.human-takeover&created_at=gte.${pgTimestamp(since)}&limit=10000`
     ),
     // engine-v3-turn events are the response-latency source (each carries
     // `latencyMs` on a delivered reply) AND, once reduced to distinct threads,
