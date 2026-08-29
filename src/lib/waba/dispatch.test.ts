@@ -6,6 +6,9 @@ vi.mock("server-only", () => ({}));
 
 const config: Record<string, string | null> = {};
 let agencyRows: unknown = { rows: [] };
+/** The compliance gate's read (waba_agencies.opted_in_at). Defaults to opted
+ *  in so the lane tests exercise the lanes; the gate has its own cases. */
+let optedIn = true;
 const inserted: { table: string; rows: Record<string, unknown>[] }[] = [];
 const updated: { table: string; filter: string; values: Record<string, unknown> }[] = [];
 let nextLeadId = 1;
@@ -13,6 +16,12 @@ let nextLeadId = 1;
 vi.mock("../runtime-config", () => ({
   getConfig: async (k: string) => config[k] ?? null,
   sbSelectStrict: async (table: string) => (table === "waba_agencies" ? agencyRows : { rows: [] }),
+  sbSelect: async (table: string, q: string) => {
+    if (table === "waba_agencies" && q.includes("opted_in_at")) {
+      return optedIn ? [{ opted_in_at: "2026-08-01T00:00:00Z" }] : [];
+    }
+    return [];
+  },
   sbInsert: async (table: string, rows: Record<string, unknown>[]) => {
     inserted.push({ table, rows });
     return true;
@@ -91,16 +100,26 @@ describe("the ladder picks the free lane whenever it can", () => {
     expect(out.preview).toContain("can you message them?");
   });
 
-  it("a cold agency sends the template and records the cooldown", async () => {
+  it("a cold agency sends the template - and a DRY RUN spends NOTHING", async () => {
+    // WABA_DRY_RUN defaults ON, so this send is a rehearsal - and a rehearsal
+    // used to record the 24h cooldown anyway, so rehearsing against ten
+    // agencies locked real travellers out of all ten for a day. The isolation
+    // is the fix: no cooldown, no TRUTH-RULE anchor row, dry_run persisted on
+    // the lead, and never the "dry-run" sentinel as a provider id.
     live();
     const { dispatchHandoff } = await import("./dispatch");
     const out = await dispatchHandoff(INPUT);
     expect(out.outcome).toBe("sent");
     expect(out.lane).toBe("template");
-    // Recording last_template_at is what keeps the NEXT traveller off this
-    // agency for 24h, which is the guard that keeps us clear of 131049.
+    expect(out.reason).toBe("dry-run");
     const agencyWrite = inserted.find((i) => i.table === "waba_agencies");
-    expect(agencyWrite?.rows[0]).toHaveProperty("last_template_at");
+    expect(agencyWrite).toBeUndefined();
+    expect(inserted.find((i) => i.table === "whatsapp_messages")).toBeUndefined();
+    const leadAdvance = updated.find(
+      (u) => u.table === "waba_leads" && u.values.state === "template_sent"
+    );
+    expect(leadAdvance?.values.dry_run).toBe(true);
+    expect(leadAdvance?.values.provider_message_id).toBeNull();
   });
 
   it("the template carries the traveller's link, not their number in the body", async () => {

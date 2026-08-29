@@ -86,5 +86,42 @@ export async function isVendorThread(
   // never "not a shop" - a genuine handoff reply eaten by our own outage is a
   // permanent loss, because the webhook's 200 stops the provider redelivering.
   if (expected === null) return null;
+  if (expected) {
+    // THE HANDOFF JUST COMPLETED: the agency messaged the traveller, the
+    // engine takes over from here. The ledger columns for exactly this moment
+    // (traveller_inbound_at, handed_off_at) existed and NOTHING wrote them -
+    // every lead sat in template_sent/handoff_sent forever, so the console
+    // could never say the handoff worked and the hold-timeout sweep saw live
+    // conversations as stalled. Stamped by (traveller, agency) pair with the
+    // terminal refusal in the filter (the advanceLead doctrine); thread_key
+    // joins the lead to the conversation the engine now owns. Best-effort with
+    // a schema-graceful retry - the authorisation verdict is already made.
+    try {
+      const { sbUpdate } = await import("./runtime-config");
+      const { nationalTail } = await import("./wa/phone-key");
+      const tail = nationalTail(fromDigits);
+      const email = ownerEmail.trim().toLowerCase();
+      const digits = fromDigits.replace(/\D+/g, "");
+      const nowIso = new Date().toISOString();
+      const filter =
+        `user_email=eq.${encodeURIComponent(email)}&agency_tail=eq.${encodeURIComponent(tail)}` +
+        `&state=in.(template_sent,handoff_sent)&handed_off_at=is.null`;
+      const full = await sbUpdate("waba_leads", filter, {
+        state: "handed_off",
+        handed_off_at: nowIso,
+        traveller_inbound_at: nowIso,
+        thread_key: `${email}:${digits}`,
+      });
+      if (!full) {
+        await sbUpdate("waba_leads", filter, {
+          state: "handed_off",
+          handed_off_at: nowIso,
+          traveller_inbound_at: nowIso,
+        }).catch(() => false);
+      }
+    } catch {
+      /* the stamp is ledger truth, never the gate */
+    }
+  }
   return expected ? true : false;
 }

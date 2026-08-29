@@ -31,6 +31,7 @@ import "server-only";
 import { randomBytes } from "crypto";
 import {
   sbInsertReturning,
+  sbSelect,
   sbSelectStrict,
   sbUpdate,
   sbInsert,
@@ -65,6 +66,9 @@ export interface Lead {
   traveller_inbound_at: string | null;
   handed_off_at: string | null;
   terminal_reason: string | null;
+  /** Join to the conversation spine (user_email:agency_digits). Nullable on
+   *  rows written before the migration. */
+  thread_key?: string | null;
 }
 
 export interface AgencyState {
@@ -72,6 +76,10 @@ export interface AgencyState {
   window_expires_at: string | null;
   template_capped_until: string | null;
   last_template_at: string | null;
+  /** COMPLIANCE GATE (owner decision, Meta Business Messaging Policy): a cold
+   *  template may only go to a shop that opted in to WheelDeal leads. Null =
+   *  never opted in = the WABA lane refuses and Evolution stays the lane. */
+  opted_in_at?: string | null;
 }
 
 /**
@@ -117,6 +125,10 @@ export async function agencyState(
 ): Promise<{ state: AgencyState | null; unreadable: boolean }> {
   const read = await sbSelectStrict<AgencyState>(
     "waba_agencies",
+    // opted_in_at is deliberately NOT in this select: on an un-migrated DB an
+    // unknown column would fail the WHOLE read and scramble the cooldown
+    // machinery. The opt-in gate reads it separately (admitLead), where a
+    // failed read is a REFUSAL - compliance fails closed on its own.
     `select=agency_tail,window_expires_at,template_capped_until,last_template_at&agency_tail=eq.${encodeURIComponent(
       tail
     )}&limit=1`
@@ -179,12 +191,24 @@ export async function openWindow(tail: string, number: string, now = Date.now())
   ).catch(() => false);
 }
 
-/** Platform said this recipient is capped. Do NOT retry before it lifts. */
+/** Platform said this recipient is capped. Do NOT retry before it lifts.
+ *  UPSERT, not PATCH: a 131049 can arrive for an agency that has no
+ *  waba_agencies row yet (the async status path), and a PATCH on a
+ *  nonexistent row 204s silently - the cap was never recorded and the
+ *  governor kept choosing the capped agency. */
 export async function markTemplateCapped(tail: string, hours = 24): Promise<void> {
-  await sbUpdate("waba_agencies", `agency_tail=eq.${encodeURIComponent(tail)}`, {
-    template_capped_until: new Date(Date.now() + hours * 3600_000).toISOString(),
-    updated_at: new Date().toISOString(),
-  }).catch(() => false);
+  const now = new Date().toISOString();
+  await sbInsert(
+    "waba_agencies",
+    [
+      {
+        agency_tail: tail,
+        template_capped_until: new Date(Date.now() + hours * 3600_000).toISOString(),
+        updated_at: now,
+      },
+    ],
+    "agency_tail"
+  ).catch(() => false);
 }
 
 export async function markTemplateSent(tail: string, number: string): Promise<void> {
@@ -208,18 +232,27 @@ export interface CreateLeadInput {
 export async function createLead(input: CreateLeadInput): Promise<Lead | null> {
   const tail = nationalTail(input.agencyNumber);
   if (!tail) return null;
-  const rows = await sbInsertReturning<Lead>("waba_leads", [
-    {
-      state: "draft",
-      user_email: input.userEmail.trim().toLowerCase(),
-      agency_tail: tail,
-      agency_number: input.agencyNumber,
-      agency_name: input.agencyName ?? null,
-      session_id: input.sessionId ?? null,
-      link_token: mintLinkToken(),
-    },
-  ]);
-  return rows[0] ?? null;
+  const email = input.userEmail.trim().toLowerCase();
+  const digits = input.agencyNumber.replace(/\D+/g, "");
+  const row = {
+    state: "draft",
+    user_email: email,
+    agency_tail: tail,
+    agency_number: input.agencyNumber,
+    agency_name: input.agencyName ?? null,
+    session_id: input.sessionId ?? null,
+    link_token: mintLinkToken(),
+    // The join to the REAL conversation spine (negotiation_threads /
+    // whatsapp_messages) - the dead search_sessions uuid could join nothing.
+    thread_key: digits ? `${email}:${digits}` : null,
+  };
+  const rows = await sbInsertReturning<Lead>("waba_leads", [row]);
+  if (rows[0]) return rows[0];
+  // Pre-migration fallback: thread_key not yet migrated -> insert without it
+  // (a lead must never be lost to a pending ALTER).
+  const { thread_key: _tk, ...legacy } = row;
+  const fallback = await sbInsertReturning<Lead>("waba_leads", [legacy]);
+  return fallback[0] ?? null;
 }
 
 /**
@@ -290,7 +323,29 @@ export type Admission =
   | { lane: "freeform"; reason: "window-open" }
   | { lane: "template"; reason: "cold" }
   | { hold: true; reason: "agency-cooldown" | "recipient-capped" }
-  | { refuse: true; reason: "unreadable" | "no-tail" };
+  | { refuse: true; reason: "unreadable" | "no-tail" | "not-opted-in" | "suppressed" };
+
+/** Has this agency opted in to WheelDeal leads? FAILS CLOSED: an unreadable
+ *  or un-migrated store reads as "not opted in", because the thing at stake is
+ *  a Meta policy line, not a convenience. Cold templates to non-opted-in shops
+ *  are the one thing this lane must be STRUCTURALLY unable to do. */
+export async function agencyOptedIn(tail: string): Promise<boolean> {
+  const rows = await sbSelect<{ opted_in_at: string | null }>(
+    "waba_agencies",
+    `select=opted_in_at&agency_tail=eq.${encodeURIComponent(tail)}&limit=1`
+  ).catch(() => [] as { opted_in_at: string | null }[]);
+  return Boolean(rows[0]?.opted_in_at);
+}
+
+/** Record a shop's opt-in (QR/wa.me inbound to the WABA, or the partner form). */
+export async function recordAgencyOptIn(tail: string, number: string): Promise<boolean> {
+  const now = new Date().toISOString();
+  return sbInsert(
+    "waba_agencies",
+    [{ agency_tail: tail, agency_number: number, opted_in_at: now, updated_at: now }],
+    "agency_tail"
+  ).catch(() => false);
+}
 
 /**
  * Which lane may this lead use right now?
@@ -303,6 +358,15 @@ export async function admitLead(agencyNumber: string, now = Date.now()): Promise
   const tail = nationalTail(agencyNumber);
   if (!tail) return { refuse: true, reason: "no-tail" };
 
+  // FLEET-WIDE SUPPRESSION FIRST (owner decision): a shop that told anyone at
+  // WheelDeal to stop is not admitted on ANY lane, and the company number is
+  // the lane where ignoring that is a policy strike on a shared asset.
+  {
+    const { shopSuppression } = await import("../wa/suppression");
+    const sup = await shopSuppression(agencyNumber);
+    if (sup.suppressed) return { refuse: true, reason: "suppressed" };
+  }
+
   const { state, unreadable } = await agencyState(tail);
   // FAIL CLOSED. This is the opposite of the warm-up gate's direction and for
   // the opposite reason: here the asset at risk is a rented WABA shared by every
@@ -310,6 +374,16 @@ export async function admitLead(agencyNumber: string, now = Date.now()): Promise
   if (unreadable) return { refuse: true, reason: "unreadable" };
 
   if (windowOpen(state, now)) return { lane: "freeform", reason: "window-open" };
+
+  // THE COMPLIANCE GATE (owner decision, Meta policy): outside an open window
+  // the only remaining lane is a COLD TEMPLATE, and a cold template may only
+  // go to a shop that opted in to WheelDeal leads. A shop that has never opted
+  // in is not refused SERVICE - it is refused THIS LANE; the dispatcher maps
+  // this to fallback-legacy so the traveller's own number contacts it as
+  // always. Inside an open window the shop messaged US first - that inbound
+  // IS the opt-in Meta's rules recognise, which is why the gate sits below
+  // windowOpen.
+  if (!(await agencyOptedIn(tail))) return { refuse: true, reason: "not-opted-in" };
 
   const cooldown = await agencyCooldownHours();
   if (!templateAllowed(state, cooldown, now)) {

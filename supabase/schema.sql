@@ -1764,3 +1764,29 @@ alter table public.waba_leads add column if not exists thread_key text;
 -- on a FAILED set (throttling a broken re-arm into staying broken for an
 -- hour). Stamped only on a verified outcome.
 alter table public.wa_sessions add column if not exists webhook_rearmed_at timestamptz;
+
+-- ---- WABA compliance + ledger completion (Wave 6) ---------------------------
+--
+-- opted_in_at: the Meta-policy gate. A cold template may only go to a shop
+-- that opted in to WheelDeal leads (QR/wa.me inbound to the WABA, or the
+-- partner form); admitLead fails CLOSED on this - an un-migrated or unreadable
+-- store refuses the lane and Evolution stays the path.
+alter table public.waba_agencies add column if not exists opted_in_at timestamptz;
+-- dry_run: a rehearsal is not a send - persisted so the governor, cooldowns
+-- and every count can exclude it.
+alter table public.waba_leads add column if not exists dry_run boolean;
+
+-- ---- Fleet-wide shop suppression (owner decision: opt-out is fleet-wide) ----
+--
+-- A shop that asked to stop hearing from WheelDeal asked WheelDeal, not one
+-- traveller. Keyed on the national number tail (same canonical key as the
+-- recipient ledger and waba_agencies); consulted by guardOutbound's cold gate,
+-- mass outreach admission and the WABA admitLead.
+create table if not exists public.wa_suppressions (
+  number_tail text primary key,
+  number      text,
+  reason      text,
+  source      text,               -- stop-intent | owner | wrong-number
+  created_at  timestamptz not null default now()
+);
+alter table public.wa_suppressions enable row level security;

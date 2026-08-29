@@ -7,12 +7,24 @@ vi.mock("server-only", () => ({}));
 const config: Record<string, string | null> = {};
 const selects: { table: string; query: string }[] = [];
 let selectResult: unknown = { rows: [] };
+/** The fleet suppression read (wa_suppressions). Defaults to none. */
+let suppressionResult: unknown = { rows: [] };
+/** The compliance gate's read (waba_agencies.opted_in_at). Defaults to opted
+ *  in so the lane tests exercise the lanes; the gate has its own cases. */
+let optedIn = true;
 
 vi.mock("../runtime-config", () => ({
   getConfig: async (k: string) => config[k] ?? null,
   sbSelectStrict: async (table: string, query: string) => {
     selects.push({ table, query });
+    if (table === "wa_suppressions") return suppressionResult;
     return selectResult;
+  },
+  sbSelect: async (table: string, query: string) => {
+    if (table === "waba_agencies" && query.includes("opted_in_at")) {
+      return optedIn ? [{ opted_in_at: "2026-08-01T00:00:00Z" }] : [];
+    }
+    return [];
   },
   sbInsert: async () => true,
   sbInsertReturning: async () => [],
@@ -32,6 +44,8 @@ beforeEach(() => {
   for (const k of Object.keys(config)) delete config[k];
   selects.length = 0;
   selectResult = { rows: [] };
+  suppressionResult = { rows: [] };
+  optedIn = true;
 });
 
 const HOUR = 3600_000;
@@ -140,6 +154,38 @@ describe("admission is one decision in one place", () => {
   it("an unusable number refuses rather than defaulting to a key", async () => {
     const { admitLead } = await import("./leads");
     expect(await admitLead("123")).toEqual({ refuse: true, reason: "no-tail" });
+  });
+
+  it("COMPLIANCE: a shop that never opted in is refused the COLD lane - and fails closed", async () => {
+    // Meta's rule as structure: outside an open window the only lane left is a
+    // cold template, and that needs opt-in. The dispatcher maps this refusal
+    // to fallback-legacy, so the traveller's own number contacts the shop as
+    // always - the shop is refused THIS LANE, not service.
+    const { admitLead } = await import("./leads");
+    optedIn = false;
+    expect(await admitLead("66812345678")).toEqual({ refuse: true, reason: "not-opted-in" });
+  });
+
+  it("...but an OPEN WINDOW needs no opt-in: the shop messaged us first", async () => {
+    // The inbound that opened the window IS the opt-in Meta's rules recognise.
+    const { admitLead } = await import("./leads");
+    optedIn = false;
+    const now = Date.now();
+    selectResult = {
+      rows: [{ agency_tail: "812345678", window_expires_at: new Date(now + HOUR).toISOString(), template_capped_until: null, last_template_at: null }],
+    };
+    expect(await admitLead("66812345678", now)).toEqual({ lane: "freeform", reason: "window-open" });
+  });
+
+  it("FLEET SUPPRESSION outranks everything: a shop that said stop is refused every lane", async () => {
+    const { admitLead } = await import("./leads");
+    suppressionResult = { rows: [{ reason: "stop-intent" }] };
+    const now = Date.now();
+    selectResult = {
+      rows: [{ agency_tail: "812345678", window_expires_at: new Date(now + HOUR).toISOString(), template_capped_until: null, last_template_at: null }],
+    };
+    // Even an open window does not readmit a suppressed shop.
+    expect(await admitLead("66812345678", now)).toEqual({ refuse: true, reason: "suppressed" });
   });
 });
 

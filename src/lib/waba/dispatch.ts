@@ -91,6 +91,11 @@ export interface DispatchInput {
   language?: string;
   /** Rendered by the caller for the free-form lane - informal is fine here. */
   freeformText: string;
+  /** The structured RFQ, stamped onto the anchor row so the takeover leg can
+   *  resolve the thread (raw.rfq is what resolveThreadContext anchors on). */
+  rfq?: unknown;
+  /** Discovery vendor id, for the anchor row's identity. */
+  vendorId?: string;
 }
 
 /**
@@ -130,6 +135,19 @@ export async function dispatchHandoff(input: DispatchInput): Promise<DispatchOut
 
   const admission = await admitLead(input.agencyNumber);
   if ("refuse" in admission) {
+    // NOT-OPTED-IN is a lane verdict, not a reachability verdict: the shop is
+    // perfectly contactable on the traveller's own number, and Meta's rules
+    // only forbid OUR cold template. Fallback, so the traveller's enquiry
+    // proceeds exactly as it always has. A SUPPRESSED shop is the opposite -
+    // it asked all of WheelDeal to stop, and no lane may contact it.
+    if (admission.reason === "not-opted-in") {
+      return {
+        leadId: null,
+        outcome: "fallback-legacy",
+        reason: "not-opted-in",
+        userMessage: say(USER_COPY.fallback, shop),
+      };
+    }
     return {
       leadId: null,
       outcome: "refused",
@@ -173,7 +191,7 @@ export async function dispatchHandoff(input: DispatchInput): Promise<DispatchOut
 export async function sendForLead(
   lead: Lead,
   lane: "template" | "freeform",
-  input: Pick<DispatchInput, "vehicle" | "dates" | "language" | "freeformText" | "agencyName">
+  input: Pick<DispatchInput, "vehicle" | "dates" | "language" | "freeformText" | "agencyName" | "rfq" | "vendorId">
 ): Promise<DispatchOutcome> {
   const c = await wabaConfig();
   const shop = input.agencyName ?? lead.agency_name ?? "";
@@ -206,8 +224,66 @@ export async function sendForLead(
       lane,
       sent_at: new Date().toISOString(),
       preview: result.preview,
+      // The provider's id, so a delivery/read/failed status can find its lead
+      // (the column + index existed; nothing ever wrote it). Never the
+      // "dry-run" sentinel - a rehearsal id would shadow a real one.
+      provider_message_id:
+        result.messageId && result.messageId !== "dry-run" ? result.messageId : null,
+      // A rehearsal is not a send: persisted so the governor, the cooldown
+      // and every count can exclude it.
+      dry_run: result.dryRun,
     });
-    if (lane === "template") await markTemplateSent(lead.agency_tail, lead.agency_number);
+    // A DRY RUN spends nothing: no cooldown (markTemplateSent is what starts
+    // the 24h per-agency clock), no anchor row (nothing reached the shop).
+    if (lane === "template" && !result.dryRun) {
+      await markTemplateSent(lead.agency_tail, lead.agency_number);
+    }
+    if (!result.dryRun) {
+      // THE TRUTHFUL ANCHOR (the decided crux): the template/handoff GENUINELY
+      // reached this shop - it just left from the company number - so the
+      // outbound row satisfies the repo's TRUTH RULE and every downstream
+      // surface works unchanged. Above all the takeover leg: when the agency
+      // messages the traveller, resolveThreadContext anchors on raw.rfq of
+      // this very row, and the reply no longer dies as `no-rfq-thread`.
+      const { sbInsert } = await import("../runtime-config");
+      const digits = lead.agency_number.replace(/\D+/g, "");
+      await sbInsert("whatsapp_messages", [
+        {
+          wa_message_id:
+            result.messageId && result.messageId !== "dry-run" ? result.messageId : null,
+          to_number: digits || lead.agency_number,
+          body: result.preview,
+          type: "text",
+          direction: "outbound",
+          raw: {
+            sender: lead.user_email,
+            channel: "waba",
+            transport: "waba",
+            kind: "waba-lead",
+            ok: true,
+            confirmed: true,
+            auto: true,
+            leadId: lead.id,
+            ...(input.rfq ? { rfq: input.rfq } : {}),
+            ...(input.vendorId ? { vendorId: input.vendorId } : {}),
+            ...(shop ? { vendorName: shop } : {}),
+          },
+        },
+      ]).catch(() => false);
+      // FUNNEL LEDGER: the lead reached the shop - on the company wire.
+      const { advanceThreadStage } = await import("../funnel/stages");
+      await advanceThreadStage(
+        {
+          userEmail: lead.user_email,
+          toNumber: lead.agency_number,
+          vendorId: input.vendorId,
+          vendorName: shop || undefined,
+          transport: "waba",
+        },
+        "contacted",
+        lane === "template" ? "WABA lead template delivered" : "WABA handoff delivered"
+      ).catch(() => {});
+    }
     return {
       leadId: lead.id,
       outcome: "sent",
@@ -254,13 +330,34 @@ export async function sendForLead(
  */
 export async function onAgencyReplied(
   agencyNumber: string,
-  render: (lead: Lead) => Pick<DispatchInput, "vehicle" | "dates" | "language" | "freeformText" | "agencyName">
+  render: (
+    lead: Lead
+  ) =>
+    | Pick<DispatchInput, "vehicle" | "dates" | "language" | "freeformText" | "agencyName" | "rfq" | "vendorId">
+    | Promise<Pick<DispatchInput, "vehicle" | "dates" | "language" | "freeformText" | "agencyName" | "rfq" | "vendorId">>
 ): Promise<{ opened: boolean; flushed: number }> {
   const tail = nationalTail(agencyNumber);
   if (!tail) return { opened: false, flushed: 0 };
 
   await openWindow(tail, agencyNumber);
   await noteWabaEvent("inbound", { agencyTail: tail });
+  // AN INBOUND ON THE BUSINESS NUMBER IS THE OPT-IN Meta's rules recognise -
+  // record it durably so the next cold template to this shop is legitimate.
+  {
+    const { recordAgencyOptIn } = await import("./leads");
+    await recordAgencyOptIn(tail, agencyNumber).catch(() => false);
+  }
+  // The ledger column existed and nothing wrote it: stamp agency_replied_at on
+  // every live lead for this tail that lacks it, so the console can show WHEN
+  // the agency answered instead of inferring it from the window.
+  {
+    const { sbUpdate } = await import("../runtime-config");
+    await sbUpdate(
+      "waba_leads",
+      `agency_tail=eq.${encodeURIComponent(tail)}&agency_replied_at=is.null&handed_off_at=is.null`,
+      { agency_replied_at: new Date().toISOString() }
+    ).catch(() => false);
+  }
 
   const held = await heldLeadsFor(tail);
   let flushed = 0;
@@ -269,7 +366,7 @@ export async function onAgencyReplied(
     // AGENCY to contact the traveller, not on us to send again - re-sending
     // would double-message the agency about the same person.
     if (lead.state !== "held") continue;
-    const out = await sendForLead(lead, "freeform", render(lead));
+    const out = await sendForLead(lead, "freeform", await render(lead));
     if (out.outcome === "sent") flushed += 1;
   }
   return { opened: true, flushed };

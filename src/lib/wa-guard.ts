@@ -2611,6 +2611,35 @@ export async function guardOutbound(rawOpts: {
     };
   }
 
+  //      ...AND STOP IS FLEET-WIDE (owner decision). The per-sender stamp above
+  //      only protects the traveller the shop said it to; the fleet store is
+  //      what stops a DIFFERENT traveller cold-introducing the same shop the
+  //      next day - a Meta policy signal and an anti-ban risk under Evolution,
+  //      and structurally mandatory under a single company number. Checked for
+  //      COLD contacts only: a shop mid-conversation with THIS traveller has
+  //      its own per-sender state, and an unreadable store proceeds (the
+  //      per-sender veto above still stands).
+  if (isNewContact) {
+    const { shopSuppression } = await import("./wa/suppression");
+    const sup = await shopSuppression(opts.toDigits).catch(
+      () => ({ suppressed: false }) as { suppressed: boolean }
+    );
+    if (sup.suppressed) {
+      void recordSendDropped(
+        opts.senderKey,
+        opts.toDigits,
+        "suppressed - this shop asked WheelDeal not to contact it",
+        opts.meta
+      );
+      return {
+        allow: false,
+        terminal: true,
+        reason: "suppressed - this shop asked WheelDeal not to contact it",
+        text,
+      };
+    }
+  }
+
   // 0.0 THE OWNER'S KILL SWITCH, ENFORCED WHERE SENDS ACTUALLY HAPPEN.
   //
   //     KILL_SWITCH was checked in six API routes - vendors, geocode, outreach,

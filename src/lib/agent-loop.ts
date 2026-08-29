@@ -737,6 +737,12 @@ export async function processVendorReply(opts: {
         if (!ours.some((o) => norm(o.body || "") === norm(text))) {
           const { markRecipientOptedOut } = await import("./wa-guard");
           await markRecipientOptedOut(ctx.sender, from, ctx.vendorName ?? undefined).catch(() => {});
+          // FLEET-WIDE (owner decision): a shop that told ONE traveller's agent
+          // to stop told WheelDeal. The per-sender stamp above keeps its
+          // existing veto; this is the store every lane consults - cold intros
+          // from OTHER travellers, mass outreach, and the WABA template lane.
+          const { suppressShop } = await import("./wa/suppression");
+          await suppressShop(from, text.slice(0, 120), "stop-intent").catch(() => false);
         }
       }
     } catch {
@@ -763,6 +769,9 @@ export async function processVendorReply(opts: {
         if (verdict.optOut) {
           const { markRecipientOptedOut } = await import("./wa-guard");
           await markRecipientOptedOut(ctx.sender!, from, ctx.vendorName ?? undefined).catch(() => {});
+          // Fleet-wide too (same doctrine as the regex fast path above).
+          const { suppressShop } = await import("./wa/suppression");
+          await suppressShop(from, text.slice(0, 120), "stop-intent").catch(() => false);
         }
         if (verdict.risk === "none") return;
         // user_email column = EXACT ownership scoping for the risk feed (the

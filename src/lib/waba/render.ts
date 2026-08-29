@@ -33,18 +33,59 @@ export interface HeldRender {
  * dates are what make a message answerable, and Part 5.12 found that an
  * unanswerable opener is read as reseller fishing - the exact message people
  * block rather than reply to. That finding does not stop applying because the
- * sender changed.
+ * sender changed - and this function used to VIOLATE it: no vehicle, no dates,
+ * no link, just "we have a customer looking to rent". The specifics come from
+ * the lead's own anchor row (raw.rfq via thread_key), and the tap target is
+ * the lead's link - the same one the template's button carries, so the flush
+ * is exactly as actionable as the paid lane.
  */
-export function renderHeldHandoff(lead: Lead): HeldRender {
+export async function renderHeldHandoff(lead: Lead): Promise<HeldRender> {
   const shop = lead.agency_name?.trim();
   const hello = shop ? `Hi ${shop} - ` : "Hi - ";
+  let vehicle = "vehicle";
+  let dates = "";
+  try {
+    const key = lead.thread_key ?? "";
+    const idx = key.lastIndexOf(":");
+    if (idx > 0) {
+      const email = key.slice(0, idx);
+      const digits = key.slice(idx + 1);
+      const { sbSelect } = await import("../runtime-config");
+      const rows = await sbSelect<{
+        raw: { rfq?: { vehicleClass?: string; engineSizeCc?: number; durationDays?: number } } | null;
+      }>(
+        "whatsapp_messages",
+        `select=raw&direction=eq.outbound&to_number=eq.${encodeURIComponent(
+          digits
+        )}&raw->>sender=eq.${encodeURIComponent(email)}&order=received_at.desc&limit=5`
+      );
+      const rfq = rows.find((r) => r.raw?.rfq)?.raw?.rfq;
+      if (rfq?.vehicleClass) {
+        vehicle = `${rfq.engineSizeCc ? `${rfq.engineSizeCc}cc ` : ""}${rfq.vehicleClass}`;
+      }
+      if (typeof rfq?.durationDays === "number" && rfq.durationDays > 0) {
+        dates = `${rfq.durationDays} ${rfq.durationDays === 1 ? "day" : "days"}`;
+      }
+    }
+  } catch {
+    /* the generic line still goes out - better vague than silent */
+  }
+  let link = "";
+  try {
+    const { wabaConfig } = await import("./config");
+    const c = await wabaConfig();
+    if (lead.link_token && c.linkBase) link = ` Their request: ${c.linkBase}/${lead.link_token}`;
+  } catch {
+    /* no link - the message still names the vehicle and dates */
+  }
   return {
-    vehicle: "vehicle",
-    dates: "",
+    vehicle,
+    dates,
     agencyName: lead.agency_name ?? undefined,
     freeformText:
-      `${hello}we have a customer looking to rent. ` +
-      `Could you message them directly to share your prices? Thanks!`,
+      `${hello}we have a customer looking to rent a ${vehicle}` +
+      `${dates ? ` for ${dates}` : ""}. ` +
+      `Could you message them directly to share your prices?${link} Thanks!`,
   };
 }
 

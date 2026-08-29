@@ -51,10 +51,13 @@ describe("the webhook authenticates before it acts", () => {
 });
 
 describe("statuses are classified, not merely logged", () => {
-  it("131049 marks the recipient capped and returns without retrying", () => {
+  it("131049 marks the recipient capped, rescues the LEAD to held, and returns", () => {
     // The message is guaranteed undeliverable until the recipient's own cap
-    // resets. Re-sending only spends quality rating to be told so again.
-    expect(hook).toMatch(/if \(code === 131049 && tail\) \{[\s\S]{0,160}markTemplateCapped\(tail\);[\s\S]{0,40}return;/);
+    // resets. Re-sending only spends quality rating to be told so again - and
+    // the lead whose send just capped goes back to HELD (the old early return
+    // skipped the lead lookup, stranding it in template_sent forever).
+    expect(hook).toMatch(/if \(code === 131049 && tail\) \{[\s\S]{0,160}markTemplateCapped\(tail\);/);
+    expect(hook).toMatch(/markTemplateCapped\(tail\);[\s\S]{0,700}advanceLead\(capped\.id, "held"[\s\S]{0,120}return;/);
   });
 
   it("delivered and read are write-once", () => {
