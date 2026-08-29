@@ -93,11 +93,14 @@ describe("the unused-export sweep, done honestly", () => {
     expect(existsSync(join(process.cwd(), "src/lib/budget-cache.ts"))).toBe(true);
     const reexport = readFileSync(join(process.cwd(), "packages/redis/budgets.ts"), "utf8");
     expect(reexport).toMatch(/from "\.\.\/\.\.\/src\/lib\/budget-cache"/);
+    // The live consumer is the OUTREACH worker (seedIntroWindow et al).
+    // outbound.worker used to be the example here, but it was fenced off the
+    // direct-send path and no longer touches the intro mirror.
     const worker = readFileSync(
-      join(process.cwd(), "services/workers/src/outbound.worker.ts"),
+      join(process.cwd(), "services/workers/src/outreach.worker.ts"),
       "utf8"
     );
-    expect(worker).toMatch(/recordIntro/);
+    expect(worker).toMatch(/seedIntroWindow/);
   });
 
   it("...and the concurrent-campaign lever is enforced on the SUPABASE path", () => {

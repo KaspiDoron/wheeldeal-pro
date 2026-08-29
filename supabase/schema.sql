@@ -1757,3 +1757,10 @@ alter table public.bookings add column if not exists completion_suggested_at tim
 -- negotiation_threads / whatsapp_messages. Stamped by the WABA dispatch when
 -- the takeover leg wires up (Wave 6); additive and null until then.
 alter table public.waba_leads add column if not exists thread_key text;
+
+-- The webhook re-arm's shared clock (src/lib/evolution reassertWebhook) lives
+-- on the instance's own session row now - the old per-instance WH_REARM_*
+-- app_config rows polluted the owner's Key Vault, and the clock advanced even
+-- on a FAILED set (throttling a broken re-arm into staying broken for an
+-- hour). Stamped only on a verified outcome.
+alter table public.wa_sessions add column if not exists webhook_rearmed_at timestamptz;

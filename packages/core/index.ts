@@ -84,7 +84,7 @@ export {
 export { noteWebhookAccepted, noteWebhook403 } from "../../src/lib/wa/webhook-trace";
 // Lets the worker runtime schedule a drain at a parked reply's exact due time
 // instead of leaving it to the next heartbeat (see setDrainArmer's doc).
-export { setDrainArmer } from "../../src/lib/wa/park";
+export { setDrainArmer, parkOutboxOnce } from "../../src/lib/wa/park";
 export {
   guardOutbound,
   drainOutbox,

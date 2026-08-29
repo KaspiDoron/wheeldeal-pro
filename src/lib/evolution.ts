@@ -15,7 +15,7 @@
 
 import "server-only";
 import { createHash } from "crypto";
-import { getConfig, sbInsert, sbSelect, sbDelete, sbSelectStrict } from "./runtime-config";
+import { getConfig, sbInsert, sbSelect, sbUpdate, sbDelete, sbSelectStrict } from "./runtime-config";
 import { deriveWebhookToken, sameWebhookTarget, classifyRegisteredWebhook } from "./wa/webhook-token";
 import type { TokenState } from "./wa/webhook-token";
 import { jidMatches } from "./wa/jid";
@@ -533,27 +533,48 @@ function rearmStore(): Map<string, number> {
 const REARM_THROTTLE_MS = 60 * 60 * 1000; // ~1h per instance unless forced
 const rearmConfigKey = (instance: string) => `WH_REARM_${instance}`;
 
-/** The last re-arm time for an instance, from the shared config row (falling
- *  back to this process's own memory). Returns 0 when never re-armed / unread. */
-async function lastRearmAt(instance: string): Promise<number> {
+/** The last re-arm time for an instance. The shared clock lives on the
+ *  instance's OWN wa_sessions row (webhook_rearmed_at) - the old per-instance
+ *  app_config rows polluted the owner's Key Vault with one WH_REARM_* entry
+ *  per traveller. The legacy config row is still READ (so existing throttles
+ *  carry over a deploy) but never written again. */
+async function lastRearmAt(email: string, instance: string): Promise<number> {
   const local = rearmStore().get(instance) ?? 0;
+  let shared = NaN;
   try {
-    const raw = await getConfig(rearmConfigKey(instance));
-    const shared = raw ? Date.parse(raw) : NaN;
-    return Number.isFinite(shared) ? Math.max(local, shared) : local;
+    const rows = await sbSelect<{ webhook_rearmed_at: string | null }>(
+      "wa_sessions",
+      `select=webhook_rearmed_at&email=eq.${encodeURIComponent(email)}&limit=1`
+    );
+    shared = rows[0]?.webhook_rearmed_at ? Date.parse(rows[0].webhook_rearmed_at) : NaN;
   } catch {
-    return local; // vault unreadable - the local clock still throttles this process
+    /* fall through to the legacy row */
   }
+  if (!Number.isFinite(shared)) {
+    try {
+      const raw = await getConfig(rearmConfigKey(instance));
+      shared = raw ? Date.parse(raw) : NaN;
+    } catch {
+      /* vault unreadable - the local clock still throttles this process */
+    }
+  }
+  return Number.isFinite(shared) ? Math.max(local, shared) : local;
 }
 
-/** Stamp the re-arm time in BOTH the shared row and this process's memory. */
-async function stampRearm(instance: string, atMs: number): Promise<void> {
-  rearmStore().set(instance, atMs);
+/** Stamp the shared re-arm clock - called ONLY on a verified outcome (a
+ *  successful set, or a read that proved the registration healthy). A FAILED
+ *  set must not advance the shared clock: it used to, so a broken re-arm was
+ *  throttled into staying broken for the next hour on every instance. */
+async function stampRearmShared(email: string, atMs: number): Promise<void> {
   try {
-    const { setConfig } = await import("./runtime-config");
-    await setConfig(rearmConfigKey(instance), new Date(atMs).toISOString());
+    const ok = await sbUpdate(
+      "wa_sessions",
+      `email=eq.${encodeURIComponent(email)}`,
+      { webhook_rearmed_at: new Date(atMs).toISOString() }
+    );
+    if (!ok) throw new Error("no wa_sessions row");
   } catch {
-    /* the local stamp above still throttles this process */
+    /* pre-migration / rowless: the local clock still throttles this process */
   }
 }
 
@@ -583,28 +604,47 @@ export async function reassertWebhook(
   if (!origin) return { ok: false, changed: false, registeredUrl: null, skipped: "no-origin" };
 
   const now = Date.now();
-  if (!opts.force && now - (await lastRearmAt(instance)) < REARM_THROTTLE_MS) {
+  if (!opts.force && now - (await lastRearmAt(email, instance)) < REARM_THROTTLE_MS) {
     return { ok: true, changed: false, registeredUrl: null, skipped: "throttled" };
   }
-  await stampRearm(instance, now);
+  // In-process stampede guard only. The SHARED clock is stamped below, and
+  // only on a verified outcome - a failed set used to advance it, throttling a
+  // broken re-arm into staying broken for the next hour, fleet-wide.
+  rearmStore().set(instance, now);
 
   const token = await webhookToken();
   if (!token) return { ok: false, changed: false, registeredUrl: null, skipped: "no-host" };
   const webhookUrl = `${origin}/api/webhooks/evolution?token=${token}`;
   const events = [...WEBHOOK_EVENTS];
 
-  // Read-before-write: don't churn a healthy instance.
+  // Read-before-write: don't churn a healthy instance. "Healthy" means the
+  // URL+token match AND the EVENTS SET matches: an instance registered before
+  // a new event was added (qrcode.updated, messages.update...) used to read
+  // as healthy on the URL alone and never gained the event - the exact
+  // silent-degrade this reconcile exists to end. Events unreadable from the
+  // find response -> URL-only verdict (unknown must not cause hourly churn).
   let registeredUrl: string | null = null;
+  let registeredEvents: string[] | null = null;
   try {
     const found = await evoFetch(host, `/webhook/find/${instance}`);
     registeredUrl =
       (typeof found.data?.url === "string" && found.data.url) ||
       (typeof found.data?.webhook?.url === "string" && found.data.webhook.url) ||
       null;
+    const ev = Array.isArray(found.data?.events)
+      ? found.data.events
+      : Array.isArray(found.data?.webhook?.events)
+        ? found.data.webhook.events
+        : null;
+    registeredEvents = ev ? ev.filter((e: unknown): e is string => typeof e === "string") : null;
   } catch {
     /* proceed to set */
   }
-  if (registeredUrl && sameWebhookTarget(registeredUrl, origin, token)) {
+  const eventsMatch =
+    registeredEvents === null ||
+    (registeredEvents.length === events.length && events.every((e) => registeredEvents!.includes(e)));
+  if (registeredUrl && sameWebhookTarget(registeredUrl, origin, token) && eventsMatch) {
+    await stampRearmShared(email, now);
     return { ok: true, changed: false, registeredUrl };
   }
 
@@ -637,6 +677,9 @@ export async function reassertWebhook(
     }
   }
 
+  // The shared clock advances ONLY on success - a failed set leaves the next
+  // cycle (or the next instance) free to repair immediately.
+  if (set.ok) await stampRearmShared(email, now);
   return { ok: set.ok, changed: set.ok, registeredUrl: set.ok ? webhookUrl : registeredUrl };
 }
 
