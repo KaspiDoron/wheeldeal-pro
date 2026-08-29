@@ -90,6 +90,34 @@ export async function renderHeldHandoff(lead: Lead): Promise<HeldRender> {
 }
 
 /**
+ * Template-variable labels from a structured RFQ the caller already holds.
+ *
+ * Same derivation as renderHeldHandoff's anchor read, for the dispatch call
+ * sites (outreach + mass) that have the rfq in hand. Every value must satisfy
+ * the templateVariables contract: usable when the rfq is vague, and never a
+ * bare phone number.
+ */
+export function rfqLabels(rfq: unknown): { vehicle: string; dates: string } {
+  const r = (rfq ?? {}) as {
+    vehicleClass?: string;
+    engineSizeCc?: number;
+    durationDays?: number;
+    startDate?: string;
+  };
+  const vehicle = r.vehicleClass
+    ? `${r.engineSizeCc ? `${r.engineSizeCc}cc ` : ""}${r.vehicleClass}`
+    : "vehicle";
+  const days =
+    typeof r.durationDays === "number" && r.durationDays > 0
+      ? `${r.durationDays} ${r.durationDays === 1 ? "day" : "days"}`
+      : "";
+  const dates = r.startDate
+    ? `from ${r.startDate}${days ? ` for ${days}` : ""}`
+    : days || "their dates";
+  return { vehicle, dates };
+}
+
+/**
  * What the agency's chat with the traveller opens pre-filled.
  *
  * Authored by us on purpose. When that message lands on the traveller's phone it

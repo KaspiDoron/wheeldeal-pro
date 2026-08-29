@@ -60,6 +60,9 @@ interface Data {
   /** Every code path that can put a message on WhatsApp, and whether it can
    *  right now. See the api route for why this exists. */
   senders?: { id: string; label: string; live: boolean; detail: string }[];
+  /** The architecture toggles with their STORED values (what the vault holds,
+   *  not what anyone last requested). */
+  architecture?: { key: string; value: string; hint: string }[];
   governor: {
     allowed: boolean;
     binding: string | null;
@@ -93,9 +96,28 @@ const FUNNEL_ROWS: { k: string; label: string; note?: string }[] = [
   { k: "handedOff", label: "Handed to the agents" },
 ];
 
+/** Valid values per architecture toggle - mirrors the POST's validation. */
+const ARCH_OPTIONS: Record<string, string[]> = {
+  TRANSPORT_MODE: ["evolution", "waba-first", "waba-fallback"],
+  WABA_ENABLED: ["on", "off"],
+  WABA_DRY_RUN: ["on", "off"],
+  WABA_KILL: ["on", "off"],
+  CLOUD_API_ENABLED: ["on", "off"],
+};
+
+const ARCH_LABELS: Record<string, string> = {
+  TRANSPORT_MODE: "First-contact wire",
+  WABA_ENABLED: "Business-number handoff",
+  WABA_DRY_RUN: "Dry run",
+  WABA_KILL: "EMERGENCY STOP",
+  CLOUD_API_ENABLED: "Legacy Cloud sender",
+};
+
 export function WabaConsole() {
   const [d, setD] = useState<Data | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [archMsg, setArchMsg] = useState<string | null>(null);
+  const [flipping, setFlipping] = useState<string | null>(null);
 
   useEffect(() => {
     fetch("/api/admin/waba", { cache: "no-store" })
@@ -103,6 +125,38 @@ export function WabaConsole() {
       .then((j) => (j.error ? setErr(j.error) : setD(j)))
       .catch(() => setErr("Could not reach the server."));
   }, []);
+
+  // HONEST WRITES: the card re-renders from the response's read-back, never
+  // from the value that was requested - a toggle that did not persist must not
+  // look flipped.
+  const flip = async (key: string, value: string) => {
+    setFlipping(key);
+    setArchMsg(null);
+    try {
+      const r = await fetch("/api/admin/waba", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key, value }),
+      });
+      const j = (await r.json()) as {
+        ok?: boolean;
+        error?: string;
+        warning?: string;
+        architecture?: Data["architecture"];
+      };
+      if (j.error) {
+        setArchMsg(j.error);
+      } else {
+        if (j.architecture) setD((cur) => (cur ? { ...cur, architecture: j.architecture } : cur));
+        if (!j.ok) setArchMsg(j.warning ?? `${key} did not persist - the vault still holds the old value.`);
+        else if (j.warning) setArchMsg(j.warning);
+      }
+    } catch {
+      setArchMsg("Could not reach the server - nothing was changed.");
+    } finally {
+      setFlipping(null);
+    }
+  };
 
   if (err) return <div className="surface rounded-blob p-4 text-[13px] font-bold text-brandred">{err}</div>;
   if (!d) return <div className="surface rounded-blob p-4 text-[13px] font-bold text-soft">Loading…</div>;
@@ -141,6 +195,67 @@ export function WabaConsole() {
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* THE ARCHITECTURE CARD - the no-redeploy switchboard. One canonical
+          engine, interchangeable wires: which wire makes first contact is an
+          owner decision made HERE, and every value shown is the vault's own
+          read-back (the POST refuses to render a toggle that did not stick). */}
+      {(d.architecture ?? []).length > 0 && (
+        <div className="rounded-blob border-2 border-line bg-card p-3">
+          <div className="text-[13px] font-extrabold text-strong">Architecture</div>
+          <p className="mt-0.5 text-[11px] font-bold text-faint">
+            One negotiation engine; these choose the wire. Changes apply within ~30s, no redeploy.
+          </p>
+          <div className="mt-2 space-y-2">
+            {(d.architecture ?? []).map((t) => {
+              const kill = t.key === "WABA_KILL";
+              return (
+                <div key={t.key} className="rounded-xl bg-card2 p-2">
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className={`text-[12px] font-extrabold ${kill ? "text-brandred" : "text-strong"}`}>
+                      {ARCH_LABELS[t.key] ?? t.key}
+                    </span>
+                    <span className="shrink-0 text-[10px] font-bold text-faint">
+                      {t.value ? `stored: ${t.value}` : "unset (default)"}
+                    </span>
+                  </div>
+                  <div className="mt-1 text-[10px] font-bold text-faint">{t.hint}</div>
+                  <div className="mt-1.5 flex flex-wrap gap-1.5">
+                    {(ARCH_OPTIONS[t.key] ?? []).map((v) => {
+                      const active = t.value === v;
+                      const danger = kill && v === "on";
+                      return (
+                        <button
+                          key={v}
+                          type="button"
+                          disabled={flipping !== null}
+                          onClick={() => flip(t.key, v)}
+                          className={`rounded-full px-3 py-1 text-[11px] font-extrabold disabled:opacity-50 ${
+                            active
+                              ? danger
+                                ? "bg-brandred text-white"
+                                : "bg-brandgreen text-white"
+                              : danger
+                                ? "border-2 border-brandred/50 text-brandred"
+                                : "border-2 border-line text-soft"
+                          }`}
+                        >
+                          {flipping === t.key ? "…" : v}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {archMsg && (
+            <p className="mt-2 rounded-xl bg-brandred-soft p-2 text-[11px] font-extrabold text-brandred">
+              {archMsg}
+            </p>
+          )}
         </div>
       )}
 

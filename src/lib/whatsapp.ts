@@ -1,10 +1,10 @@
 // Official Meta WhatsApp Cloud API integration.
 //
 // When WHATSAPP_ACCESS_TOKEN + WHATSAPP_PHONE_NUMBER_ID are configured AND the
-// WABA_ENABLED master switch is on, outbound messages go through the Graph API
-// to opted-in partner vendors. Otherwise we return a compliant click-to-chat
-// (wa.me) deep link the user can send themselves - no scraping, no unsolicited
-// bulk blasting.
+// CLOUD_API_ENABLED master switch is on, outbound messages go through the Graph
+// API to opted-in partner vendors. Otherwise we return a compliant
+// click-to-chat (wa.me) deep link the user can send themselves - no scraping,
+// no unsolicited bulk blasting.
 //
 // THE SWITCH IS THE POINT, AND IT USED NOT TO EXIST.
 //
@@ -18,17 +18,23 @@
 // dry run, no anti-ban lane budget (see wa/lane-split.test.ts), and no owner
 // decision anywhere in the loop.
 //
-// One switch now governs both senders, because the owner's rule is one
-// sentence: only Evolution sends today, and the official lane starts only when
-// real WABA credentials arrive and the flag is deliberately turned on.
+// THE SWITCH IS ALSO ITS OWN, not WABA_ENABLED (Wave 6). Sharing that flag
+// re-created the original accident one door over: rehearsing the governed
+// lead-handoff lane means turning WABA_ENABLED on with WABA_DRY_RUN on - and
+// this module reads neither the dry-run nor the governor, so the "rehearsal"
+// would have armed this sender FOR REAL across the same three routes. An
+// ungoverned lane cannot borrow the governed lane's switch: CLOUD_API_ENABLED
+// exists so that arming this sender is a separate, deliberate owner decision -
+// and it stays off until this lane earns a governed adapter (see
+// wa/transports/index.ts, which refuses to register "cloud" for the same
+// reason).
 
 import "server-only";
 import { getConfig } from "./runtime-config";
 import { digitsOnly } from "./phone";
 
 /**
- * The master switch, resolved the same way `wabaConfig` resolves it, so the two
- * senders can never disagree about whether the official lane is open.
+ * The master switch for THIS sender alone.
  *
  * ABSENT MEANS OFF, and an UNREADABLE vault means off too - both the undefined
  * `getConfig` normally returns and the exception it can throw resolve to the
@@ -37,7 +43,7 @@ import { digitsOnly } from "./phone";
  * sending from a rented business number.
  */
 async function officialSendingEnabled(): Promise<boolean> {
-  const v = (await getConfig("WABA_ENABLED").catch(() => undefined)) ?? "";
+  const v = (await getConfig("CLOUD_API_ENABLED").catch(() => undefined)) ?? "";
   const s = String(v).trim().toLowerCase();
   return s === "on" || s === "1" || s === "true" || s === "yes";
 }

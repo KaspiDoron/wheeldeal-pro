@@ -443,6 +443,82 @@ async function handlePost(req: Request) {
     ).catch(() => {});
   }
 
+  // THE COMPANY WIRE (Wave 6). resolveTransport says which wire carries this
+  // thread's FIRST contact: the thread's own stamp first (immutable), the
+  // owner's TRANSPORT_MODE second, Evolution by default. Only a cold RFQ may
+  // ride the WABA lead handoff - bargains and customs continue on the thread's
+  // existing wire, and the reply leg of a handed-off thread is still the
+  // traveller's own WhatsApp (the handoff's whole point is that the shop
+  // messages the traveller). This sits ABOVE guardOutbound/claimForSend on
+  // purpose: those govern the traveller's number, and a company-wire send is
+  // governed by the WABA governor + admission inside dispatchHandoff instead.
+  if (kind === "rfq") {
+    const { resolveTransport } = await import("@/lib/wa/transports");
+    const resolved = await resolveTransport(session.email, digits).catch(() => null);
+    if (resolved && resolved.transport.kind === "waba") {
+      const { dispatchHandoff } = await import("@/lib/waba/dispatch");
+      const { rfqLabels } = await import("@/lib/waba/render");
+      const labels = rfqLabels(settledRfq);
+      const out = await dispatchHandoff({
+        userEmail: session.email,
+        agencyNumber: digits,
+        agencyName: vendorName || undefined,
+        sessionId: body.campaign ? String(body.campaign) : undefined,
+        vehicle: labels.vehicle,
+        dates: labels.dates,
+        freeformText: outboundText,
+        rfq: settledRfq ?? undefined,
+        vendorId: vendorId || undefined,
+      });
+      // A DRY RUN rehearses the WABA funnel without contacting anyone - the
+      // traveller's real enquiry must still go out, so a rehearsal falls
+      // through to the legacy lane below (as do an explicit fallback-legacy
+      // and any refusal the traveller's own number can still serve).
+      const rehearsal = out.outcome === "sent" && out.reason === "dry-run";
+      if (out.outcome === "sent" && !rehearsal) {
+        // The truthful anchor row + the `contacted` funnel stamp were written
+        // inside the dispatcher; nothing here needs to double-record them.
+        return NextResponse.json({
+          allowed: true,
+          sent: true,
+          configured: true,
+          channel: "waba",
+          phone: to,
+          logged: true,
+          note: out.userMessage,
+          notice,
+        });
+      }
+      if (out.outcome === "held") {
+        // Contactable on the company wire, just not right now - the lead
+        // flushes free the moment the agency answers anyone. Queued, not
+        // failed; the move window stays spent (a queued move is a move).
+        return NextResponse.json({
+          allowed: true,
+          sent: false,
+          configured: true,
+          channel: "waba",
+          queued: true,
+          queuedReason: out.reason,
+          error: out.userMessage,
+          notice,
+        });
+      }
+      if (out.outcome === "refused" && out.reason === "suppressed") {
+        // No lane may contact this shop (fleet-wide opt-out). Say so here
+        // rather than letting the legacy guard repeat it with less context.
+        await releaseMove();
+        return NextResponse.json({
+          allowed: true,
+          sent: false,
+          suppressed: true,
+          error: "This shop asked not to be contacted - your agent will leave it alone.",
+        });
+      }
+      // fallback-legacy / other refusals / dry-run: the traveller's own wire.
+    }
+  }
+
   const { guardOutbound, afterSend } = await import("@/lib/wa-guard");
   const guard = await guardOutbound({
     senderKey: session.email,

@@ -265,6 +265,18 @@ export async function advanceThreadStage(
     }
   }
 
+  // THE THREAD'S WIRE, stamped at first delivered contact. Delivery is the
+  // moment the transport stops being a plan (a dry-run or a refused WABA lead
+  // falls back to Evolution; only the wire that actually carried the RFQ may
+  // become the thread's immutable stamp). Write-once inside the helper - a
+  // later TRANSPORT_MODE flip can never reroute a running conversation.
+  if (to === "contacted") {
+    const { isWireTransport, stampThreadTransport } = await import("../wa/transport-stamp");
+    if (isWireTransport(args.transport)) {
+      await stampThreadTransport(threadKey, args.transport).catch(() => false);
+    }
+  }
+
   // The history event - join columns as COLUMNS (the wa-send-dropped lesson:
   // events without user_email/to_number are invisible to messagePath), written
   // only on a real transition so history stays append-only AND bounded (~a

@@ -235,6 +235,10 @@ const KEYS: {
   { name: "WABA_QUALITY_RATING", label: "Quality rating as last reported (GREEN/YELLOW/RED) - RED pauses first contact", scope: "messaging", editable: true },
   { name: "WABA_TIER_UNIQUE_PER_DAY", label: "Messaging tier: unique recipients per 24h (250 unverified, 1000 after verification)", scope: "messaging", editable: true },
   { name: "WABA_TEMPLATE_COST_USD", label: "Cost per template, for the spend estimate (default 0.05)", scope: "messaging", editable: true },
+  // The LEGACY Cloud sender's own switch (lib/whatsapp.ts). Deliberately NOT
+  // WABA_ENABLED: rehearsing the governed handoff lane (WABA_ENABLED on,
+  // WABA_DRY_RUN on) must never arm this ungoverned sender as a side effect.
+  { name: "CLOUD_API_ENABLED", label: "Legacy Cloud API sender ('on' = owner-number Graph API sends; default OFF - separate from the handoff lane)", scope: "messaging", editable: true, secret: false },
   { name: "WHATSAPP_ACCESS_TOKEN", label: "WhatsApp Cloud API Token (optional)", scope: "messaging", editable: true },
   { name: "WHATSAPP_PHONE_NUMBER_ID", label: "WhatsApp Phone Number ID (optional)", scope: "messaging", editable: true },
   { name: "WHATSAPP_VERIFY_TOKEN", label: "WhatsApp Webhook Verify Token (optional)", scope: "messaging", editable: true },
