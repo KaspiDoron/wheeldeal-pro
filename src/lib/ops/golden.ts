@@ -138,9 +138,9 @@ export function evaluateCase(
  *
  * The `action` half gates the dormant graph engine. The `move` half is new
  * (Wave 3): when the source turn ran SPTE (meta.engine === "v3", stamped by
- * runSpteLiveTurn), the frozen case also asserts the PRIMARY engine's move -
- * without it, wantsMove stayed false and the SPTE replay was skipped for every
- * real conversation the owner froze.
+ * runSpteLiveTurn), the frozen case also asserts the PRIMARY engine's move.
+ * (Since the W10 inversion the SPTE replay runs for every case regardless -
+ * the move expectation decides what can FAIL, no longer what runs.)
  */
 export function expectationFromOutbound(
   raw: { kind?: string; engine?: string; move?: string } | null | undefined
@@ -217,12 +217,21 @@ export async function runGoldenCase(
   try {
     // Both engines replay the same frozen thread: the graph engine for the
     // action/edge assertions, SPTE - the one that actually answers shops - for
-    // the move assertions. Only cases that ask for a move pay for the second.
+    // the move assertions.
     //
     // THE CANDIDATE GOES TO BOTH. replaySpteTurns used to run with no candidate
     // at all, so in the one column that gates production, baseline and
     // candidate agreed by construction - the gate could not fail there.
-    const wantsMove = gc.expects.some((e) => e?.move || e?.moveNot?.length || e?.noMessageContains?.length);
+    //
+    // W10 GATE INVERSION: SPTE replays for EVERY case, not only the ones that
+    // assert a move. The old `wantsMove` skip meant a frozen conversation with
+    // only action/target expectations never exercised the primary engine at
+    // all - an SPTE crash on exactly that conversation sailed through the gate
+    // while the dormant graph engine got full coverage. Expectations stay
+    // opt-in (a move-less case cannot fail on a move it never asserted), but a
+    // replay CRASH now fails the case whichever engine threw, because the
+    // whole try/catch below treats it as a failed case. The extra replay per
+    // case is the gate doing its one job; MAX_CASES bounds the bill.
     const [{ turns }, spte] = await Promise.all([
       replayConversation({
         turns: gc.turns,
@@ -232,15 +241,13 @@ export async function runGoldenCase(
         spec: opts.spec,
         overlay: opts.overlay,
       }),
-      wantsMove
-        ? replaySpteTurns({
-            turns: gc.turns,
-            rfq: gc.rfq,
-            floor: gc.floor,
-            spec: opts.spec,
-            overlay: opts.overlay,
-          })
-        : Promise.resolve({ turns: [] as Awaited<ReturnType<typeof replaySpteTurns>>["turns"] }),
+      replaySpteTurns({
+        turns: gc.turns,
+        rfq: gc.rfq,
+        floor: gc.floor,
+        spec: opts.spec,
+        overlay: opts.overlay,
+      }),
     ]);
     return evaluateCase(gc, turns, spte.turns);
   } catch (e) {

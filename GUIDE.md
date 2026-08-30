@@ -56,8 +56,14 @@ This lets you paste all other keys inside the app and have them stick.
    inside every browser) can call `/rest/v1/rpc/prune_old_rows` with
    `retain_days: 0` and delete your operational history. The file is idempotent;
    re-run it any time. Verify from **Admin -> Keys -> Connection tests ->
-   "Check anon RPC lockdown"**, which asks your real database.
-7. Redeploy the Cloud Run web service so the new variables load.
+   "Check anon RPC lockdown"**, which asks your real database. The health
+   panel's **Retention tile stays red until the nightly prune has actually
+   run once** - that is the tile telling the truth, not a bug.
+7. Still in the SQL Editor, run `supabase/perf-indexes.sql` once. The app
+   works without it, but every hot-path query (threads, outbox, messages by
+   number) table-scans - at real usage that is the difference between a
+   1-second and a 20-second screen.
+8. Redeploy the Cloud Run web service so the new variables load.
 
 Now sign in to your live app with `kaspidoron@gmail.com` (the owner signs in
 with email only - no phone or terms needed), open **Admin -> Keys**, and you'll

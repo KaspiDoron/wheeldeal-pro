@@ -97,6 +97,18 @@ describe("golden replay harness", () => {
     expect(result.turns[0].failures.join(" ")).toContain("target");
   });
 
+  it("W10 INVERSION: a MOVE-LESS case still replays the PRIMARY engine", async () => {
+    // CASE_BARGAIN asserts only graph-engine facts (action/target) - under the
+    // old `wantsMove` skip, SPTE never ran for it, so an SPTE crash on exactly
+    // this frozen conversation passed the gate. Now every case replays both:
+    // got.move is populated (proof SPTE ran), and a replay crash in either
+    // engine fails the case via runGoldenCase's catch.
+    const { runGoldenCase } = await import("./golden");
+    const result = await runGoldenCase(CASE_BARGAIN);
+    expect(result.pass).toBe(true);
+    expect(result.turns[0].got.move).toBeTruthy();
+  });
+
   it("multi-turn: firm shop with rival leverage keeps pushing, then respects two firms", async () => {
     const spec = defaultGraphSpec();
     const turns = [

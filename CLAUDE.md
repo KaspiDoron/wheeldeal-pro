@@ -5,67 +5,119 @@ Guidance for Claude (and humans) working in this repo.
 ## What this is
 
 **WheelDeal** - a mobile-first web app that finds and negotiates the cheapest
-car / motorbike / scooter rentals near a traveller's hotel. AI agents structure
-the request, discover partner vendors within a radius, and run a live, gamified
-negotiation funnel. Next.js 14 (App Router) + TypeScript + Tailwind, deployed on
-GCP (Cloud Run) free tier. Runs fully in **demo mode** with zero external services.
+car / motorbike / scooter rentals near a traveller's hotel. The negotiation is
+REAL: AI agents message rental shops over live WhatsApp - by default from the
+traveller's OWN linked number (Evolution API v2 / Baileys, a disclosed
+ban-risk), with an optional company-WABA first-contact lane for opted-in
+partner shops - read the replies (text, photos of price boards, voice notes,
+any language), and bargain toward a market-grounded floor. Next.js 14 (App
+Router) + TypeScript + Tailwind, deployed on GCP Cloud Run. Runs fully in
+**demo mode** with zero external services.
 
 ## Golden rules
 
 - **Never commit secrets.** All keys come from `process.env` or the Supabase-
   backed Key Vault. `.env*` is gitignored. `.env.example` holds placeholders only.
-- **Everything degrades gracefully.** Every integration (LLM, Supabase, WhatsApp,
-  Resend, PayPal) has a no-key fallback so the app always builds and runs.
-- **Use only short hyphens `-`** in code and copy. No `-` or `-`.
-- **Mobile first.** Test at 320-430px. No horizontal overflow. Respect safe-area
-  insets (`pt-safe`, `pb-safe`). Keep form controls >= 16px to avoid iOS zoom.
-- Validate before pushing: `npm run typecheck && npm run build`.
+- **Everything degrades gracefully.** Every integration (LLM, Supabase,
+  WhatsApp, email, PayPal) has a no-key fallback so the app always builds and
+  runs - and every admin surface must render honest "unknown/unreadable"
+  states over a dead store, never a confident zero (`sbSelectDark`,
+  `sbCountDark`, `degraded[]`).
+- **Honest writes.** A toggle or config write reports whether it PERSISTED
+  (read-back echo, 502 on a failed durable write) - never optimistic success.
+- **Anti-ban constants are DO-NOT-TOUCH** (pinned in `wave8-scale.test.ts`):
+  the 8s hard per-recipient floor, the `max(5, min_gap/2)` fleet gap, the
+  2-intros-per-sender cold cap. Read `ANTI-BAN.md` + `PRODUCTION-READINESS.md`
+  before changing wa-guard, pacing, usage limits or outbox draining.
+- **Use only short hyphens `-`** in code and copy. No em/en dashes.
+- **Mobile first.** Test at 320-430px. No horizontal overflow. Respect
+  safe-area insets (`pt-safe`, `pb-safe`). Form controls >= 16px (iOS zoom).
+- Validate before pushing: `npm run typecheck && npx vitest run` (plus
+  `npm run build && npm run check:mobile` for layout-touching changes).
+- **Every user-visible string goes through `t("...")`** and must be in the
+  generated catalogue: run `node scripts/gen-i18n-catalog.js` after adding
+  copy. Computed copy is declared in `src/lib/i18n-extras.ts` - never hand-
+  edit `i18n-catalog.ts`.
 
 ## Architecture
 
 ```
 src/
   app/
-    page.tsx                 Main app: search -> funnel -> offers -> booking
-    login/ admin/            Passwordless login + management workspace
-    icon.svg apple-icon.tsx  Brand mark (half motorbike / half car)
-    opengraph-image.tsx      Social card (next/og, generated offline)
-    manifest.ts              PWA manifest (standalone => App Store feel)
+    page.tsx                Main app: search -> outreach -> live negotiation -> booking
+    login/ profile/ admin/  Password+Google auth, profile (DSAR: export/erase,
+                            consent toggles, sign-out-everywhere), management
     api/
-      profile   negotiate   safety   vendors      (core funnel)
-      outreach                                     (WhatsApp send, safety-screened)
-      feedback  feedback/assist                    (triaged feedback + AI writer)
-      billing/checkout  billing/confirm            (PayPal, admin only)
-      webhooks/whatsapp  webhooks/paypal           (inbound events)
-      admin/config  admin/users  admin/analytics   (admin, session-gated)
-      admin/ops/*                                  (OWNER-only AI Operations Center)
-      auth/login|logout|me
+      outreach outreach/mass    start conversations (guard -> claims -> wire)
+      activity replies thread   the traveller's live view of the funnel
+      deals bookings            Trips: history, price re-check, lifecycle taps
+      negotiate/close-deal      deal close (banks deal_memory, consent-stamped)
+      webhooks/evolution        inbound WhatsApp (token-gated, 503 = redeliver)
+      webhooks/whatsapp         Meta Cloud API lane (WABA) + signature check
+      webhooks/paypal           billing events
+      wa/ping wa/tick wa/reply-tick   the drain/sweep cron surface (token-gated)
+      profile/export profile/erase profile/consent   DSAR + opt-in purposes
+      admin/*                   management (session-gated; transcripts owner-only)
+      admin/ops/*               OWNER-only AI Operations Center
+      admin/waba                Architecture card (transport mode, WABA switches)
   lib/
-    agents.ts        Profiler, Bargaining, Market-Rate, Sentiment, Safety, Feedback agents
-    ai.ts            LLM provider abstraction (Groq/Gemini/OpenRouter/Cerebras) + mock
-    runtime-config.ts Key resolution: Supabase override -> process.env (+ AES encryption)
-    config.ts        Admin Key Vault (masked, never leaks secrets to client)
-    session.ts       HMAC-signed cookie sessions; admin via ADMIN_EMAILS allowlist
-    whatsapp.ts email.ts paypal.ts   integrations (all optional)
-    plans.ts                         plan catalogue (Pro/Ultra, provider-neutral)
-    memory.ts access.ts vendors.ts geo.ts brand.ts types.ts
-  components/        UI (VendorCard, MapView, Tracker, Filters, BookingSheet,
-                    FeedbackModal, TabBar, BrandMark, icons, ...)
-supabase/schema.sql  Run once; RLS on, service-role only
+    spte/            THE PRIMARY ENGINE (single-pass turn engine): live
+                     negotiation turns, digest/thread-facts, deal memory
+    graph/           the deterministic FAILOVER engine + golden replay target
+    engine-route.ts  the single routing authority between them
+    wa/              transport contract (transport.ts), Evolution adapter
+                     (transports/evolution.ts), pacing/claims, ingest,
+                     inbound-gate, suppression, webhook-token
+    waba/            company-WABA lane: leads, dispatch, templates, governor
+    funnel/stages.ts THE STAGE LEDGER: advanceThreadStage writes
+                     negotiation_threads.stage + one funnel-stage event per
+                     transition (evidence-based; the one source of truth the
+                     client, admin and product_events all read)
+    bookings.ts      booking lifecycle (advanceBooking; completed joins funnel)
+    wa-guard.ts      outbound guard: budgets, dedupe, fairness, drain
+    evolution.ts     Evolution API client (sessions, sends, webhook re-arm)
+    privacy/         user-tables.ts (THE ERASURE REGISTRY), erase.ts,
+                     product-events.ts (consent-gated projection)
+    consent.ts       acceptance ledger + the two opt-in purposes (consentFor)
+    ops/             Ops Center: golden gate, insights rollup (k>=20), vitals
+    ai.ts ai-rpm.ts  LLM provider ladder + fleet RPM budgets
+    runtime-config.ts  Key Vault + the honest PostgREST client family
+    session.ts       HMAC cookie sessions: revocation horizon, 90d absolute
+                     lifetime, blocked/erased checks; ADMIN_EMAILS role gate
+supabase/schema.sql        run on setup, idempotent (RLS on, service-role only)
+supabase/perf-indexes.sql  run once per database
+supabase/retention.sql     run once; nightly prune + de-identify + heartbeat
 ```
 
 ## Key mechanics
 
-- **Runtime config**: integration secrets resolve as Supabase override ->
-  `process.env`, cached 30s per instance. Admin-pasted keys are AES-256-GCM
-  encrypted (key derived from `SESSION_SECRET`) and stored in `app_config`, so
-  they persist on serverless and apply without a redeploy. Bootstrap secrets
-  (Supabase connection, `SESSION_SECRET`) are env-only / read-only in the UI.
-- **Admin gate**: `getSession().isAdmin` is derived from `ADMIN_EMAILS`, never
-  from client input. All `/api/admin/*`, billing, and the admin page check it.
-- **Negotiation** is simulated server-side (round-based price cuts bounded by the
-  Market-Rate Analyst). Swap in real WhatsApp threads later via the webhook +
-  `whatsapp_messages` table.
+- **Two engines, one router.** SPTE (`lib/spte`) answers shops in production;
+  the graph engine is the deterministic failover and the golden-replay
+  subject. `engine-route.ts` decides; `meta.engine` stamps every outbound.
+  The golden gate (`lib/ops/golden.ts`) replays BOTH engines for every case.
+- **Transport is a contract.** `resolveTransport` precedence: per-thread stamp
+  (`negotiation_threads.fields.transport`, write-once at first DELIVERED
+  contact) > `TRANSPORT_MODE` flag > `evolution`. The WABA lane does opt-in
+  two-step first contact (number withheld until the shop replies YES); the
+  reply leg is always the traveller's own wire. Fleet-wide shop suppression
+  (`wa_suppressions`) is honored by every lane.
+- **The funnel ledger is the truth.** Search -> selected -> contacted ->
+  replied -> understood -> price_received/verified -> negotiating -> terms ->
+  verifying -> shop_confirmed -> booked -> completed, each stage advanced only
+  on evidence via `advanceThreadStage`. Client, admin and the consent-gated
+  `product_events` projection all read the same rows - never recompute stage
+  client-side.
+- **Runtime config**: secrets resolve Supabase override -> `process.env`,
+  cached 30s. Admin-pasted keys are AES-256-GCM encrypted (key derived from
+  `SESSION_SECRET`). Bootstrap secrets are env-only.
+- **Sessions**: password change / block / erase / sign-out-everywhere move
+  `app_users.sessions_valid_from`; cookies carry issuedAt + firstIssuedAt
+  (90-day absolute ceiling). Password reset is token-based (a request changes
+  nothing; redemption proves the inbox).
+- **Privacy is code**: `privacy/user-tables.ts` registers every user-keyed
+  table; erase + export walk it, a schema-grep test refuses unregistered
+  tables. Retention windows (90/180/360d + priced-transcript de-identify) run
+  nightly with a heartbeat the health panel reads.
 
 ## AI Operations Center (Admin -> Ops, owner only)
 
@@ -74,31 +126,40 @@ verdicts, corrections and bookmarks compile into `app_config.ops_learning`
 (director priors + exemplars + judge calibration, kill switch `OPS_LEARNING`);
 thresholds live in the clamped `policy_overlay`; every behavior change is a
 `policy_versions` row gated by the deterministic golden replay suite
-(`agent_golden_cases`, `replayConversation` in `src/lib/simulate.ts`) with
-one-click rollback. Key libs: `src/lib/ops/*`, `src/lib/policy.ts`. Never
-bypass `saveVersionedSpec` when writing the graph spec or overlay.
+(`agent_golden_cases`; `replayConversation` + `replaySpteTurns` in
+`src/lib/simulate.ts`) with one-click rollback. Key libs: `src/lib/ops/*`,
+`src/lib/policy.ts`. Never bypass `saveVersionedSpec` when writing the graph
+spec or overlay.
 
 ## Operations
 
-`PRODUCTION-READINESS.md` is the living scale/ops review: queue mechanics,
-anti-ban budgets, the honest TEST_MODE truth table, tester/host capacity and
-the P1/P2 launch roadmap. Read it before changing wa-guard, usage limits or
-the outbox/wakeup draining.
+`PRODUCTION-READINESS.md` is the living scale/ops review; `SCALING.md` covers
+the drain/queue mechanics and their honest limits; `ANTI-BAN.md` the pacing
+doctrine. Read them before changing wa-guard, usage limits or the
+outbox/wakeup draining.
 
 ## Deploy
 
 Bootstrap env vars in GCP Secret Manager: `SUPABASE_URL`,
 `SUPABASE_SERVICE_ROLE_KEY`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SESSION_SECRET`,
-`ADMIN_EMAILS`, `APP_DOMAIN` (the public GCP gateway URL). Run
-`supabase/schema.sql`. All other keys can be pasted in Admin -> Keys. See
-`GUIDE.md` for the step-by-step. GCP (Cloud Run web + gateway + workers) is
-the primary target; `render.yaml` + `deploy/*` remain the live Render half
+`ADMIN_EMAILS`, `APP_DOMAIN` (the public GCP gateway URL); optional
+`WEBHOOK_TOKEN_SALT` (webhook-token rotation without touching
+`SESSION_SECRET`), `REDIS_URL` (fleet-wide rate limits + AI RPM). Run ALL
+THREE SQL files: `supabase/schema.sql`, `supabase/perf-indexes.sql`,
+`supabase/retention.sql` (the health panel's retention tile stays red until
+the nightly prune has actually run). Evolution runs against its OWN database -
+never the app's Supabase project - with
+`DATABASE_SAVE_DATA_NEW_MESSAGE/CONTACTS/CHATS=false`; the admin anon-probe
+(`/api/admin/rpc-exposure`) alarms if foreign tables ever appear. All other
+keys can be pasted in Admin -> Keys (`OPERATOR_NAME` renders red until set).
+See `GUIDE.md` for the step-by-step. GCP (Cloud Run web + gateway + workers)
+is the primary target; `render.yaml` + `deploy/*` remain the live Render half
 and are NOT dead code.
 
 ## Working branch, and what deploys
 
-Develop on `claude/rental-agents-legal-setup-o7rgcv`. Commit + push there, then
-merge into `master` with `--no-ff`.
+Develop on `claude/wheeldeal-production-architecture-91hmfq`. Commit + push
+there, then merge into `master` with `--no-ff`.
 
 **`master` is the only thing that deploys, and BOTH deploy paths read it:**
 
@@ -110,9 +171,9 @@ merge into `master` with `--no-ff`.
 A change to `render.yaml` does nothing until it reaches `master` AND somebody
 applies it - the Blueprint does not follow a feature branch.
 
-> This section previously named `claude/rental-negotiation-app-pc33ux`, which
-> stopped existing long ago. If you rename or retire a branch, grep the repo
-> for its name before you delete it.
+> Earlier versions of this section named `claude/rental-negotiation-app-pc33ux`
+> and then `claude/rental-agents-legal-setup-o7rgcv`, both retired. If you
+> rename or retire a branch, grep the repo for its name before you delete it.
 
 ### The Render Blueprint is OPTIONAL - do not treat it as the deploy path
 
@@ -161,13 +222,19 @@ Gemini, OpenRouter, Cerebras, Mistral, DeepSeek, Together, SambaNova,
 Hugging Face, Brevo, Resend, Gmail SMTP, Google Maps Platform, OSM Nominatim,
 Google AdSense, Web Push/VAPID.
 
-## Owner switches (Admin -> Keys / Users)
+## Owner switches (Admin -> Keys / Users / Architecture card)
 
 - `TEST_MODE` - "on": beta testers flagged `test` ride Ultra free, checkout
   applies plans instantly with no charge, a global banner shows. Toggle also
   lives in Admin -> Users. "off" (or unset): fully live.
 - `SCALE_MODE` - "on": 3x per-user rate limits + relaxed client polling for
   high-concurrency periods (flip AFTER upgrading the backend plans).
+- `TRANSPORT_MODE` - `evolution` (default) | `waba-first` | `waba-fallback`:
+  first-contact routing (per-thread stamps always win). Flipped from the
+  Architecture card (Admin -> WABA), which also holds `WABA_ENABLED`,
+  `WABA_DRY_RUN`, `CLOUD_API_ENABLED` and `WABA_KILL`.
 - `APP_DOMAIN` - the public domain; drives SEO/share metadata, geocoder
   identity and push sender identity with no redeploy.
 - `HUMAN_TAKEOVER` - "off" disables user-typed-message takeover detection.
+- `OPS_LEARNING` - kill switch for the Ops learning loop.
+- `OPERATOR_NAME` - the legal entity the Terms/Privacy name. Red until set.

@@ -292,7 +292,7 @@ export function WabaConsole() {
           { k: "Quality", v: g.headroom.quality },
           {
             k: "Tier left",
-            v: g.headroom.tierRemaining === null ? "—" : String(g.headroom.tierRemaining),
+            v: g.headroom.tierRemaining === null ? "-" : String(g.headroom.tierRemaining),
           },
         ].map((x) => (
           <div key={x.k} className="rounded-xl bg-card2 p-2">
@@ -416,7 +416,7 @@ export function WabaConsole() {
                 </summary>
                 <div className="mt-1.5 space-y-0.5 text-[11px] font-bold text-soft">
                   <div className="break-words">
-                    <span className="text-faint">wire:</span> {l.preview ?? "—"}
+                    <span className="text-faint">wire:</span> {l.preview ?? "-"}
                   </div>
                   {l.terminal_reason && (
                     <div className="text-brandred">

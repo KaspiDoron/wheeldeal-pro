@@ -5,9 +5,11 @@
 // readers with no writers rendering as confident zeros).
 //
 // Source pins, deliberately: the sites live inside route handlers and the
-// drain loop, which no unit harness executes end-to-end until the Wave-5
-// funnel e2e. Each pin is scoped to its file so a hit elsewhere cannot
-// satisfy it.
+// drain loop, which no unit harness executes end-to-end - the route-level
+// funnel e2e is a RECORDED deferral (RUNBOOK.md: a faithful harness means
+// emulating PostgREST semantics across a dozen tables; a mocked-into-
+// tautology version would be the fake-test class the audit condemned). Each
+// pin is scoped to its file so a hit elsewhere cannot satisfy it.
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "fs";
 import { join } from "path";
