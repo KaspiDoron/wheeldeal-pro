@@ -52,9 +52,23 @@ export const CONSENT_KINDS = [
   "number_sharing",
   "wa_link",
   "deal_terms",
+  // W9: the two OPT-IN processing purposes (owner problem #10). Unlike the six
+  // above - mandatory acceptances required to use the product - these default
+  // to NO and are toggled from Profile. A withdrawal is a ROW (granted=false),
+  // never a deletion, so the history stays provable in both directions.
+  //
+  // analytics: structured product_events collection (the funnel projection).
+  // commercial_insights: whether this person's DE-IDENTIFIED deal outcomes may
+  // feed commercial aggregate datasets (deal_memory rows get stamped
+  // insights_ok at write time; the sellable rollup reads only stamped rows).
+  "analytics",
+  "commercial_insights",
 ] as const;
 
 export type ConsentKind = (typeof CONSENT_KINDS)[number];
+
+/** The kinds that are opt-IN purposes rather than mandatory acceptances. */
+export const OPT_IN_KINDS: readonly ConsentKind[] = ["analytics", "commercial_insights"];
 
 /** The breadcrumb kind a lost ledger row falls back to. On `agent_events`,
  *  which exists on every database this app has ever had. */
@@ -65,6 +79,8 @@ export interface ConsentEvent {
   version: string;
   at: number;
   context?: Record<string, unknown>;
+  /** False = a recorded WITHDRAWAL. Absent (legacy rows) = an acceptance. */
+  granted?: boolean;
   /** True when this came from the fallback breadcrumb rather than the ledger -
    *  the acceptance is real, the durable record was not written. */
   degraded?: boolean;
@@ -114,10 +130,13 @@ export async function recordConsent(input: {
   kind: ConsentKind;
   version?: string;
   context?: Record<string, unknown>;
+  /** W9: false records a WITHDRAWAL. Defaults to true (an acceptance). */
+  granted?: boolean;
 }): Promise<boolean> {
   const email = String(input.email ?? "").trim().toLowerCase();
   if (!email) return false;
   const version = input.version ?? TERMS_VERSION;
+  const granted = input.granted !== false;
 
   // ONE KIND IS NOT BEST-EFFORT, AND IT IS THE ONE THAT MATTERS MOST.
   //
@@ -142,9 +161,26 @@ export async function recordConsent(input: {
         kind: input.kind,
         version,
         context: input.context ?? null,
+        granted,
         accepted_at: new Date().toISOString(),
       },
     ]).catch(() => false);
+    // Pre-migration tolerance: on a database without the `granted` column the
+    // insert 400s whole. An ACCEPTANCE may fall back to the legacy row shape
+    // (absent granted has always meant accepted). A WITHDRAWAL may NOT - a
+    // legacy row would read back as the exact opposite of what the person
+    // said - so it falls through to the breadcrumb, which carries `granted`.
+    if (!landed && granted) {
+      landed = await sbInsert("consent_events", [
+        {
+          email,
+          kind: input.kind,
+          version,
+          context: input.context ?? null,
+          accepted_at: new Date().toISOString(),
+        },
+      ]).catch(() => false);
+    }
   }
   if (landed) return true;
 
@@ -168,6 +204,7 @@ export async function recordConsent(input: {
         consentKind: input.kind,
         version,
         context: input.context ?? null,
+        granted,
         at: new Date().toISOString(),
       }).slice(0, 2000),
     },
@@ -190,6 +227,52 @@ export async function recordConsentBlocking(input: {
   context?: Record<string, unknown>;
 }): Promise<boolean> {
   return recordConsent(input);
+}
+
+// ---- The read gate for the opt-in purposes ----------------------------------
+
+const consentCache = new Map<string, { value: boolean; exp: number }>();
+const CONSENT_CACHE_MS = 60_000;
+
+/** Test hook: drop the consentFor cache. */
+export function resetConsentCache(): void {
+  consentCache.clear();
+}
+
+/**
+ * Is this purpose currently GRANTED for this person? The gate every consented
+ * write goes through (product_events projection, deal_memory insights stamp).
+ *
+ * Semantics are strict opt-in: the answer is true only when the NEWEST ledger
+ * row for (email, kind) exists and is not a withdrawal. No row, an unreadable
+ * ledger, or a granted=false row all answer false - data you cannot prove
+ * consent for is data you do not collect. Cached 60s per (email, kind) so a
+ * funnel transition does not cost a ledger read every time; a Profile toggle
+ * busts the cache on this instance via recordConsent's callers calling
+ * resetConsentCache (other instances converge within the minute).
+ */
+export async function consentFor(emailRaw: string, kind: ConsentKind): Promise<boolean> {
+  const email = String(emailRaw ?? "").trim().toLowerCase();
+  if (!email) return false;
+  const cacheKey = `${email}|${kind}`;
+  const hit = consentCache.get(cacheKey);
+  if (hit && hit.exp > Date.now()) return hit.value;
+
+  let value = false;
+  try {
+    const rows = await sbSelect<{ granted: boolean | null }>(
+      "consent_events",
+      `select=granted&email=eq.${encodeURIComponent(email)}&kind=eq.${encodeURIComponent(
+        kind
+      )}&order=accepted_at.desc&limit=1`
+    );
+    value = rows.length > 0 && rows[0].granted !== false;
+  } catch {
+    value = false;
+  }
+  if (consentCache.size > 5000) consentCache.clear();
+  consentCache.set(cacheKey, { value, exp: Date.now() + CONSENT_CACHE_MS });
+  return value;
 }
 
 /**
@@ -226,18 +309,32 @@ export async function consentLedger(email: string, limit = 50): Promise<ConsentE
   if (!who) return [];
   const cap = Math.max(1, Math.min(200, limit));
 
+  type LedgerRow = {
+    kind: string;
+    version: string | null;
+    context: Record<string, unknown> | null;
+    accepted_at: string;
+    granted?: boolean | null;
+  };
   const [rows, crumbs] = await Promise.all([
-    sbSelect<{
-      kind: string;
-      version: string | null;
-      context: Record<string, unknown> | null;
-      accepted_at: string;
-    }>(
-      "consent_events",
-      `select=kind,version,context,accepted_at&email=eq.${encodeURIComponent(
-        who
-      )}&order=accepted_at.desc&limit=${cap}`
-    ).catch(() => []),
+    // Two-tier read: a pre-migration database 400s a select naming `granted`,
+    // and sbSelect collapses that to [] - which would blank the whole proof
+    // view. The legacy retry costs one extra read only when the first is empty.
+    (async (): Promise<LedgerRow[]> => {
+      const withGranted = await sbSelect<LedgerRow>(
+        "consent_events",
+        `select=kind,version,context,accepted_at,granted&email=eq.${encodeURIComponent(
+          who
+        )}&order=accepted_at.desc&limit=${cap}`
+      ).catch(() => [] as LedgerRow[]);
+      if (withGranted.length) return withGranted;
+      return sbSelect<LedgerRow>(
+        "consent_events",
+        `select=kind,version,context,accepted_at&email=eq.${encodeURIComponent(
+          who
+        )}&order=accepted_at.desc&limit=${cap}`
+      ).catch(() => [] as LedgerRow[]);
+    })(),
     sbSelect<{ detail: string; created_at: string }>(
       "agent_events",
       `select=detail,created_at&kind=eq.${UNRECORDED_KIND}&order=created_at.desc&limit=200`
@@ -251,6 +348,7 @@ export async function consentLedger(email: string, limit = 50): Promise<ConsentE
       version: r.version ?? "",
       at: Date.parse(r.accepted_at) || 0,
       context: r.context ?? undefined,
+      ...(r.granted === false ? { granted: false } : {}),
     }));
 
   const fromCrumbs: ConsentEvent[] = [];
@@ -261,6 +359,7 @@ export async function consentLedger(email: string, limit = 50): Promise<ConsentE
         consentKind?: string;
         version?: string;
         context?: Record<string, unknown> | null;
+        granted?: boolean;
         at?: string;
       };
       if (String(d.email ?? "").toLowerCase() !== who) continue;
@@ -270,6 +369,7 @@ export async function consentLedger(email: string, limit = 50): Promise<ConsentE
         version: d.version ?? "",
         at: Date.parse(d.at ?? c.created_at) || 0,
         context: d.context ?? undefined,
+        ...(d.granted === false ? { granted: false } : {}),
         degraded: true,
       });
     } catch {

@@ -300,5 +300,21 @@ export async function advanceThreadStage(
     },
   ]).catch(() => false);
 
+  // The consent-gated PROJECTION (W9): the same transition, into the typed
+  // product_events dataset - only while this person's 'analytics' consent is
+  // granted, and never allowed to fail the funnel write it rides on. Deliberate
+  // shape choice: stage + transport + engine, no vendor identifiers - the
+  // dataset is about the traveller's funnel, not the shop directory.
+  void import("../privacy/product-events")
+    .then(({ projectProductEvent }) =>
+      projectProductEvent({
+        email,
+        stage: to,
+        kind: "thread-stage",
+        props: { from: from ?? null, transport: args.transport ?? null, engine: args.engine ?? null },
+      })
+    )
+    .catch(() => {});
+
   return { advanced: true };
 }

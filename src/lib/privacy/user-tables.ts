@@ -61,6 +61,7 @@ export const USER_TABLES: UserTableKey[] = [
   { table: "agent_events", column: "user_email", match: "exact" },
   { table: "api_usage", column: "user_email", match: "exact" },
   { table: "graph_wakeups", column: "user_email", match: "exact" },
+  { table: "product_events", column: "user_email", match: "exact" },
   { table: "feedback", column: "reporter_email", match: "exact" },
   { table: "feedback_replies", column: "author_email", match: "exact" },
   // ---- sender_key IS the email (one WhatsApp number per account) -----------

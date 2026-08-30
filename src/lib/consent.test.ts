@@ -92,7 +92,7 @@ describe("the operator's name is a key, not a constant with a TODO", () => {
 });
 
 describe("every acceptance surface now writes a record", () => {
-  it("the vocabulary covers all six, including the two per-EVENT ones", () => {
+  it("the vocabulary covers the six acceptances plus the two W9 opt-in purposes", () => {
     // `number_sharing` was added deliberately, not incidentally. Under the
     // business-number handoff (plan Part 12) WheelDeal's own official number
     // gives a rental agency the traveller's phone number and the agency then
@@ -100,8 +100,21 @@ describe("every acceptance surface now writes a record", () => {
     // genuinely surprising experience, so it is recorded on its own rather than
     // folded into the general terms - a traveller startled by a message from a
     // rental shop is a trust failure, not a UX detail.
+    //
+    // W9 adds `analytics` and `commercial_insights` - the two kinds that are
+    // NOT mandatory acceptances but opt-in processing purposes, default OFF,
+    // toggled from Profile with withdrawals recorded as rows.
     expect([...CONSENT_KINDS].sort()).toEqual(
-      ["ai_responsibility", "deal_terms", "number_sharing", "terms", "wa_link", "wa_risk"].sort()
+      [
+        "ai_responsibility",
+        "analytics",
+        "commercial_insights",
+        "deal_terms",
+        "number_sharing",
+        "terms",
+        "wa_link",
+        "wa_risk",
+      ].sort()
     );
   });
 

@@ -130,6 +130,19 @@ export async function advanceBooking(
     detail: JSON.stringify({ bookingId: id, to, evidence: evidence.slice(0, 160) }),
   });
 
+  // Consent-gated projection into product_events (W9) - same doctrine as the
+  // funnel ledger's: granted 'analytics' consent or no row at all.
+  void import("./privacy/product-events")
+    .then(({ projectProductEvent }) =>
+      projectProductEvent({
+        email: userEmail,
+        stage: to,
+        kind: "booking-stage",
+        props: { bookingId: id },
+      })
+    )
+    .catch(() => {});
+
   if (to === "completed" && toDigits) {
     const { advanceThreadStage } = await import("./funnel/stages");
     await advanceThreadStage(

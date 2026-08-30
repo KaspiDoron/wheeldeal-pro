@@ -11,7 +11,12 @@
 // summarised (that WhatsApp can restrict or ban a number for using an
 // unofficial connection). Existing linked users are re-prompted, because the
 // thing they agreed to was not what the document said.
-export const TERMS_VERSION = "2026-08-09";
+// Bumped 2026-08-30 (W9): privacy sections 3/6/8 rewritten - per-purpose legal
+// bases with the two opt-in switches, the REAL retention windows the nightly
+// prune now enforces, the DSAR endpoints, and the honest market-statistics
+// carve-out replacing the blanket "not sold" line. The re-acceptance gate
+// (needsReacceptance) puts every existing user through the new text once.
+export const TERMS_VERSION = "2026-08-30";
 export const OPERATOR_NAME = "the Operator"; // TODO: replace with the legal entity name
 export const GOVERNING_LAW = "the State of Israel";
 export const JURISDICTION = "the competent courts of Tel Aviv, Israel";
@@ -249,9 +254,15 @@ export const PRIVACY_SECTIONS: LegalSection[] = [
   },
   {
     n: "3",
-    title: "How and why we process it",
+    title: "How and why we process it (purposes and their legal bases)",
     body:
-      "We process this data to operate the service: to find shops near you, to let the AI agents read shop replies and negotiate on your behalf, to transcribe voice notes and read photos, to detect abuse, and to improve the service. Message content, images and voice notes are sent to third-party AI providers (large-language-model and speech/vision providers) for processing. Negotiation conversations and the agents' decision logs may additionally be reviewed internally by the operator for quality assurance and to improve the AI agents' behaviour; they are never shared with other users. Location you share for pickup is sent to the specific shop only after you explicitly consent on that shop's card.",
+      "Each purpose has its own basis, and the optional ones have their own switch. " +
+      "(a) OPERATING THE SERVICE - finding shops near you, letting the AI agents read shop replies and negotiate on your behalf, transcribing voice notes and reading photos, processing bookings: performance of our contract with you. Message content, images and voice notes are sent to third-party AI providers (large-language-model and speech/vision providers) for this processing. " +
+      "(b) SAFETY AND ABUSE PREVENTION - rate limits, anti-ban pacing, blocking misuse: our legitimate interest in keeping the service and your WhatsApp number safe. " +
+      "(c) QUALITY ASSURANCE - negotiation conversations and the agents' decision logs may be reviewed internally by the operator to fix and improve the AI agents' behaviour; they are never shared with other users: legitimate interest. " +
+      "(d) PRODUCT ANALYTICS - a structured record of your funnel steps (search, contact, reply, booking stages): ONLY with your consent, off by default, and switchable off at any time in Profile -> Your data. Turning it off stops new collection immediately. " +
+      "(e) MARKET INSIGHTS - your closed deals feeding anonymous, aggregated market statistics: ONLY with your consent, off by default, switchable at any time. See section 8 for exactly what this data looks like. " +
+      "Location you share for pickup is sent to the specific shop only after you explicitly consent on that shop's card.",
   },
   {
     n: "4",
@@ -269,7 +280,8 @@ export const PRIVACY_SECTIONS: LegalSection[] = [
     n: "6",
     title: "Storage, retention & deletion",
     body:
-      "Data is stored on cloud infrastructure (Supabase). We retain data for as long as needed to operate the service and as required by law. You may request deletion of your account data by contacting us; some records may be retained where required for legal, security or anti-abuse purposes.",
+      "Data is stored on cloud infrastructure (Supabase). Retention is time-bounded and enforced by an automatic nightly prune: operational records (message-handling events, processing traces, risk events) are kept about 90 days; conversation context (negotiation threads, shop replies, sign-in history) about 180 days; your own visible history (searches and offers, which power the Trips screen) about 12 months. WhatsApp messages that recorded a price are DE-IDENTIFIED after about 180 days - the message text and the personal identifiers are removed while the pricing record is kept. Your bookings and the record of your consents are kept for the life of your account. " +
+      "You do not have to contact anyone to exercise your rights: Profile -> Your data lets you DOWNLOAD everything we hold about you as one file, and DELETE your account - the deletion walks every table that keys you (conversations, threads, offers, consents, risk records, all of it), tells you honestly if any part could not be removed, and can be retried. Some minimal records may be retained where the law requires it.",
   },
   {
     n: "7",
@@ -279,9 +291,10 @@ export const PRIVACY_SECTIONS: LegalSection[] = [
   },
   {
     n: "8",
-    title: "Not sold; changes",
+    title: "Personal data is not sold; anonymous market statistics",
     body:
-      "We do not sell your personal data. This Privacy Policy may be updated; material changes require re-acceptance on your next sign-in.",
+      "We do NOT sell your personal data - not your messages, your number, your location, your searches, or anything that identifies you. Separately, and only if you switch on 'Market insights' in Profile -> Your data (it is off by default), the outcome of your closed deals may feed ANONYMOUS market statistics: the region, the vehicle type, the price achieved and the negotiation approach - never your name, email, number, or the shop's identity - and only ever published in groups of at least 20 deals, so no individual outcome is recoverable. Deals closed while the switch is off never enter these statistics, and switching off stops new deals entering them. " +
+      "This Privacy Policy may be updated; material changes require re-acceptance on your next sign-in.",
   },
 ];
 

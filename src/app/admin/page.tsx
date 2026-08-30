@@ -2460,12 +2460,28 @@ export default function AdminPage() {
                       </div>
                       <span
                         className={`rounded-full px-2 py-0.5 text-[10px] font-extrabold ${
-                          k.configured ? "bg-savings-soft text-savings" : "bg-card2 text-faint"
+                          k.configured
+                            ? "bg-savings-soft text-savings"
+                            : k.name === "OPERATOR_NAME"
+                              ? "bg-brandred-soft text-brandred"
+                              : "bg-card2 text-faint"
                         }`}
                       >
-                        {k.configured ? "configured" : "missing"}
+                        {k.configured
+                          ? "configured"
+                          : k.name === "OPERATOR_NAME"
+                            ? "REQUIRED - unset"
+                            : "missing"}
                       </span>
                     </div>
+                    {!k.configured && k.name === "OPERATOR_NAME" && (
+                      <p className="mt-1 rounded-xl bg-brandred-soft p-2 text-[11px] font-bold text-brandred">
+                        Until this is set, the Terms and Privacy Policy name
+                        &quot;the Operator&quot; as the responsible legal entity -
+                        which protects nobody. Paste the real entity name before
+                        launch.
+                      </p>
+                    )}
                     {!k.configured && k.docUrl && (
                       <a
                         href={k.docUrl}

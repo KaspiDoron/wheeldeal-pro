@@ -157,6 +157,11 @@ begin
   delete from public.user_cooldowns where until < now() - interval '30 days';
   get diagnostics n = row_count; others := others || jsonb_build_object('user_cooldowns', n);
 
+  -- The consented analytics projection ages out with the long window too - a
+  -- year of funnel history is plenty for any product question it can answer.
+  delete from public.product_events where occurred_at < cutoff_long;
+  get diagnostics n = row_count; others := others || jsonb_build_object('product_events', n);
+
   -- USER-VISIBLE history last, on the long window (Trips restore reads these
   -- with no date bound; a year-old hunt is stale enough to let go).
   delete from public.offers where created_at < cutoff_long;

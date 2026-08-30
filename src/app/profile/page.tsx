@@ -73,6 +73,53 @@ export default function ProfilePage() {
   const [eraseBusy, setEraseBusy] = useState(false);
   const [eraseMsg, setEraseMsg] = useState<string | null>(null);
 
+  // The two opt-in data purposes (W9). null = not loaded yet; the toggles
+  // render disabled until the real values arrive - a default-looking toggle
+  // that lies about the recorded state is the one thing this UI must not do.
+  const [consents, setConsents] = useState<{
+    analytics: boolean;
+    commercial_insights: boolean;
+  } | null>(null);
+  const [consentBusy, setConsentBusy] = useState<string | null>(null);
+  const [consentMsg, setConsentMsg] = useState<string | null>(null);
+  useEffect(() => {
+    fetch("/api/profile/consent")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (d && typeof d.analytics === "boolean") {
+          setConsents({
+            analytics: d.analytics,
+            commercial_insights: Boolean(d.commercial_insights),
+          });
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  async function flipConsent(kind: "analytics" | "commercial_insights") {
+    if (!consents) return;
+    const next = !consents[kind];
+    setConsentBusy(kind);
+    setConsentMsg(null);
+    try {
+      const res = await fetch("/api/profile/consent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind, granted: next }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setConsents({ ...consents, [kind]: next });
+      } else {
+        setConsentMsg(String(d?.error || t("Could not save your choice - try again.")));
+      }
+    } catch {
+      setConsentMsg(t("Could not save your choice - try again."));
+    } finally {
+      setConsentBusy(null);
+    }
+  }
+
   // Phone editing (mirrored to the database + used by WhatsApp threads).
   const [phoneEdit, setPhoneEdit] = useState(false);
   const [phoneVal, setPhoneVal] = useState("");
@@ -826,6 +873,54 @@ export default function ProfilePage() {
           <p className="mt-1 text-[12px] text-soft">
             {t("Download a copy of everything WheelDeal holds about you, or delete your account and every trace of your data - conversations, searches, offers, all of it.")}
           </p>
+          {/* The two OPT-IN purposes. Off by default, a withdrawal is recorded
+              as its own ledger row, and neither gates any product feature. */}
+          <div className="mt-2 space-y-2">
+            {(
+              [
+                {
+                  kind: "analytics" as const,
+                  label: t("Product analytics"),
+                  hint: t("Allow WheelDeal to keep a structured record of your funnel steps (searches, replies, bookings) to understand how the product is used."),
+                },
+                {
+                  kind: "commercial_insights" as const,
+                  label: t("Market insights"),
+                  hint: t("Allow your closed deals to feed anonymous market statistics (region, vehicle, price - never your name or number, and only in groups of 20+ deals)."),
+                },
+              ]
+            ).map((c) => (
+              <div key={c.kind} className="rounded-2xl bg-card2 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-[12px] font-extrabold text-strong">{c.label}</div>
+                  <button
+                    onClick={() => flipConsent(c.kind)}
+                    disabled={!consents || consentBusy === c.kind}
+                    aria-pressed={Boolean(consents?.[c.kind])}
+                    className={`btn btn-sm rounded-full px-3 py-1 text-[11px] font-extrabold ${
+                      consents?.[c.kind]
+                        ? "bg-brandgreen-soft text-brandgreen"
+                        : "bg-card text-faint"
+                    }`}
+                  >
+                    {!consents
+                      ? "..."
+                      : consentBusy === c.kind
+                        ? "..."
+                        : consents[c.kind]
+                          ? t("On")
+                          : t("Off")}
+                  </button>
+                </div>
+                <p className="mt-1 text-[11px] leading-snug text-soft">{c.hint}</p>
+              </div>
+            ))}
+            {consentMsg && (
+              <p className="rounded-2xl bg-brandred-soft p-2.5 text-[12px] font-bold text-brandred">
+                {consentMsg}
+              </p>
+            )}
+          </div>
           <a
             href="/api/profile/export"
             download

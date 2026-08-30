@@ -1805,3 +1805,35 @@ alter table public.wa_suppressions enable row level security;
 -- Without it, revocation only reached the one browser that performed the
 -- action - every other device kept a valid 30-day cookie.
 alter table public.app_users add column if not exists sessions_valid_from timestamptz;
+
+-- ---- Consent data layer (Wave 9, owner problem #10) -------------------------
+--
+-- granted: a withdrawal is a ROW (granted=false), never a deletion, so the
+-- ledger proves the history in both directions. Legacy rows (null) are
+-- acceptances - that is what an un-flagged row always meant.
+alter table public.consent_events add column if not exists granted boolean;
+
+-- The structured behavioural event store: a consent-gated PROJECTION of the
+-- funnel/booking stage ledgers (the same advanceThreadStage/advanceBooking
+-- writes serve observability and, only under granted 'analytics' consent,
+-- this dataset). Typed columns, not JSON stuffed into agent_events.detail.
+create table if not exists public.product_events (
+  id          bigint generated always as identity primary key,
+  user_email  text not null,
+  session_id  text,
+  stage       text not null,
+  kind        text not null,             -- 'thread-stage' | 'booking-stage'
+  props       jsonb,
+  occurred_at timestamptz not null default now()
+);
+alter table public.product_events enable row level security;
+create index if not exists product_events_user_idx
+  on public.product_events (user_email, occurred_at desc);
+
+-- insights_ok: stamped at write time from the trader's commercial_insights
+-- consent. The row itself carries NO user identifier (that is deal_memory's
+-- whole shape); the stamp is how a consent decision survives into a store
+-- that cannot be filtered by person after the fact. The sellable rollup reads
+-- ONLY insights_ok=true rows - legacy null rows serve the in-product prior
+-- but never the commercial artefact.
+alter table public.deal_memory add column if not exists insights_ok boolean;

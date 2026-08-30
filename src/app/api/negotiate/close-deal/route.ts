@@ -253,6 +253,9 @@ export async function POST(req: Request) {
           pricePerDay: price,
           listPrice: Number(body.listPricePerDay) || undefined,
           tactic: "closed-deal",
+          // Decides the row's insights_ok stamp from THIS person's
+          // commercial_insights consent at write time (W9).
+          userEmail: session.email,
         });
       }
     }
