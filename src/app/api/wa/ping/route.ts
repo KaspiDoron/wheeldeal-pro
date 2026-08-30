@@ -24,7 +24,8 @@ export async function GET(req: Request) {
     );
   }
   const token = new URL(req.url).searchParams.get("token");
-  if (token !== expected) {
+  const { tokenMatches } = await import("@/lib/wa/webhook-token");
+  if (!tokenMatches(token, expected)) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 

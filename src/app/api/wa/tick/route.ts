@@ -28,7 +28,8 @@ const CHAIN_HORIZON_MS = 10 * 60_000; // chain only for work due soon
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const expected = await webhookToken();
-  if (!expected || url.searchParams.get("token") !== expected) {
+  const { tokenMatches } = await import("@/lib/wa/webhook-token");
+  if (!expected || !tokenMatches(url.searchParams.get("token"), expected)) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
   const hop = Math.max(0, Number(url.searchParams.get("hop")) || 0);

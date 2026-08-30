@@ -482,7 +482,11 @@ function markTeardown(email: string, trigger: string): void {
  * with the current token (reassertWebhook), not to accept stale tokens. */
 export async function webhookToken(): Promise<string | null> {
   if ((await getHosts()).length === 0) return null;
-  return deriveWebhookToken({ secret: process.env.SESSION_SECRET, nodeEnv: process.env.NODE_ENV });
+  return deriveWebhookToken({
+    secret: process.env.SESSION_SECRET,
+    nodeEnv: process.env.NODE_ENV,
+    salt: process.env.WEBHOOK_TOKEN_SALT,
+  });
 }
 
 /**
@@ -497,7 +501,11 @@ export async function webhookToken(): Promise<string | null> {
  * point at) keeps the host-gated webhookToken().
  */
 export function webhookAuthToken(): string | null {
-  return deriveWebhookToken({ secret: process.env.SESSION_SECRET, nodeEnv: process.env.NODE_ENV });
+  return deriveWebhookToken({
+    secret: process.env.SESSION_SECRET,
+    nodeEnv: process.env.NODE_ENV,
+    salt: process.env.WEBHOOK_TOKEN_SALT,
+  });
 }
 
 /** The canonical public origin the webhook must point at. The admin-set

@@ -50,7 +50,8 @@ const slotFor = (sender: string, atMs: number) =>
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const expected = await webhookToken();
-  if (!expected || url.searchParams.get("token") !== expected) {
+  const { tokenMatches } = await import("@/lib/wa/webhook-token");
+  if (!expected || !tokenMatches(url.searchParams.get("token"), expected)) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
   const sender = (url.searchParams.get("sender") ?? "").trim();

@@ -21,6 +21,16 @@ import { requireManagement } from "@/lib/session";
 // server there is no way to test the anon path, and a green light that means
 // "we did not check" is exactly the kind of reassurance this codebase refuses
 // to ship.
+//
+// W9: THE PROBE NOW COVERS TABLES, NOT JUST THE ONE RPC. The app's own 55
+// tables all carry RLS, but that is only ever asserted about the SQL files in
+// this repo - a table created by anything else (Evolution's Prisma migrations
+// pointed at the app's Supabase, per the old GUIDE instructions, is exactly
+// how it happens) arrives with the default anon grants and no RLS, and every
+// static assertion stays green while travellers' private chats sit readable
+// under the publishable key. `GET /rest/v1/` with the anon key returns
+// PostgREST's OpenAPI document listing every relation THAT ROLE can see - the
+// same enumeration an attacker would run first.
 export async function GET() {
   const session = await requireManagement();
   if (!session) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
@@ -43,42 +53,107 @@ export async function GET() {
     });
   }
 
+  const headers = {
+    apikey: anon,
+    Authorization: `Bearer ${anon}`,
+    "Content-Type": "application/json",
+  };
+
+  // Probe 1: the SECURITY DEFINER rpc.
+  let rpc: { state: string; detail: string };
   try {
     const res = await fetch(`${url}/rest/v1/rpc/prune_old_rows`, {
       method: "POST",
-      headers: {
-        apikey: anon,
-        Authorization: `Bearer ${anon}`,
-        "Content-Type": "application/json",
-      },
+      headers,
       // 100 years: matches no row, so an EXPOSED function deletes nothing.
       body: JSON.stringify({ retain_days: 36500 }),
       cache: "no-store",
     });
     if (res.ok) {
-      return NextResponse.json({
+      rpc = {
         state: "exposed",
         detail:
           "ANYONE HOLDING THE PUBLIC ANON KEY CAN CALL prune_old_rows AND DELETE YOUR HISTORY. Open the Supabase SQL editor and run supabase/retention.sql (or supabase/security-fix.sql for the one-line repair) now.",
-      });
-    }
-    // 401/403 = permission refused, 404 = PostgREST will not even name a
-    // function this role cannot execute. Both mean the anon key is locked out.
-    if ([401, 403, 404].includes(res.status)) {
-      return NextResponse.json({
+      };
+    } else if ([401, 403, 404].includes(res.status)) {
+      // 401/403 = permission refused, 404 = PostgREST will not even name a
+      // function this role cannot execute. Both mean the anon key is locked out.
+      rpc = {
         state: "locked",
-        detail: `The anon key cannot call prune_old_rows (Supabase answered ${res.status}). This is the state you want.`,
-      });
+        detail: `The anon key cannot call prune_old_rows (Supabase answered ${res.status}).`,
+      };
+    } else {
+      const body = await res.text().catch(() => "");
+      rpc = {
+        state: "unknown",
+        detail: `Supabase answered ${res.status}, which is neither a refusal nor a success: ${body.slice(0, 160)}`,
+      };
     }
-    const body = await res.text().catch(() => "");
-    return NextResponse.json({
-      state: "unknown",
-      detail: `Supabase answered ${res.status}, which is neither a refusal nor a success: ${body.slice(0, 160)}`,
-    });
   } catch (e) {
-    return NextResponse.json({
+    rpc = {
       state: "unknown",
       detail: `Could not reach Supabase to check: ${e instanceof Error ? e.message : "network error"}`,
-    });
+    };
   }
+
+  // Probe 2 (W9): which RELATIONS can the anon role even see? PostgREST's
+  // root document is an OpenAPI schema enumerating them - for a database
+  // where every table has RLS and no policy, the correct answer is NONE.
+  // Any name here (Evolution's "Message"/"Chat"/"Contact" being the known
+  // offenders) is a table the publishable browser key can query.
+  let tables: { state: string; exposed: string[]; detail: string };
+  try {
+    const res = await fetch(`${url}/rest/v1/`, { headers, cache: "no-store" });
+    if (!res.ok) {
+      tables = {
+        state: "unknown",
+        exposed: [],
+        detail: `The anon key could not list the API schema (Supabase answered ${res.status}).`,
+      };
+    } else {
+      const doc = (await res.json().catch(() => null)) as {
+        paths?: Record<string, unknown>;
+        definitions?: Record<string, unknown>;
+      } | null;
+      const names = Object.keys(doc?.paths ?? {})
+        .filter((p) => p.startsWith("/") && p !== "/" && !p.startsWith("/rpc/"))
+        .map((p) => p.slice(1))
+        .sort();
+      tables = names.length
+        ? {
+            state: "exposed",
+            exposed: names,
+            detail:
+              `The public anon key can see ${names.length} relation(s): ${names.slice(0, 12).join(", ")}` +
+              (names.length > 12 ? ", ..." : "") +
+              ". Every app table carries RLS with no policies, so these are FOREIGN tables (Evolution's message store being the known way this happens) - move that service to its own database, or enable RLS / revoke anon on each.",
+          }
+        : {
+            state: "clean",
+            exposed: [],
+            detail: "The anon key sees zero relations - RLS is doing its job.",
+          };
+    }
+  } catch (e) {
+    tables = {
+      state: "unknown",
+      exposed: [],
+      detail: `Could not enumerate the anon-visible schema: ${e instanceof Error ? e.message : "network error"}`,
+    };
+  }
+
+  // The combined verdict keeps the original top-level shape the admin panel
+  // reads: worst-of, so a clean rpc can never paint over an exposed table.
+  const state =
+    rpc.state === "exposed" || tables.state === "exposed"
+      ? "exposed"
+      : rpc.state === "locked" && tables.state === "clean"
+        ? "locked"
+        : "unknown";
+  return NextResponse.json({
+    state,
+    detail: `RPC: ${rpc.detail} Tables: ${tables.detail}`,
+    rpc,
+    tables,
+  });
 }

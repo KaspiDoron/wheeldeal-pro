@@ -450,7 +450,9 @@ export default function AdminPage() {
     const m = await (await fetch("/api/admin/market")).json();
     if (m.rows) setFloors(m.rows);
   }
-  const [dataTables, setDataTables] = useState<{ name: string; label: string; count: number }[]>([]);
+  const [dataTables, setDataTables] = useState<
+    { name: string; label: string; count: number; ownerOnly?: boolean }[]
+  >([]);
   const [dataTable, setDataTable] = useState<string | null>(null);
   const [dataRows, setDataRows] = useState<Record<string, unknown>[]>([]);
   const [dataBusy, setDataBusy] = useState(false);
@@ -2806,11 +2808,22 @@ export default function AdminPage() {
               {dataTables.map((tbl) => (
                 <button
                   key={tbl.name}
-                  onClick={() => openDataTable(tbl.name)}
+                  onClick={() => !tbl.ownerOnly && openDataTable(tbl.name)}
+                  disabled={Boolean(tbl.ownerOnly)}
+                  title={
+                    tbl.ownerOnly
+                      ? "Conversation content is owner-only - admins see the count, not the rows."
+                      : undefined
+                  }
                   className={`btn btn-sm chip rounded-xl border-2 px-3 py-1.5 text-[11px] font-extrabold ${
-                    dataTable === tbl.name ? "border-brandblue bg-brandblue-soft text-brandblue" : "border-line text-soft"
+                    dataTable === tbl.name
+                      ? "border-brandblue bg-brandblue-soft text-brandblue"
+                      : tbl.ownerOnly
+                        ? "border-line text-faint opacity-60"
+                        : "border-line text-soft"
                   }`}
                 >
+                  {tbl.ownerOnly ? "🔒 " : ""}
                   {tbl.label} <span className="text-faint">({tbl.count})</span>
                 </button>
               ))}

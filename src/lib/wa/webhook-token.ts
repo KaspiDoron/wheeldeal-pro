@@ -10,21 +10,63 @@
 // Kept dependency-light (only node crypto) so it tests without env mutation and
 // without pulling the server-only evolution.ts graph.
 
-import { createHash } from "crypto";
+import { createHash, timingSafeEqual } from "crypto";
 
 // A predictable fallback secret would make the webhook/ping token guessable, so
 // it is only ever used off-production (mirrors evolution.ts:242-245).
 const DEV_FALLBACK = createHash("sha256").update("wd-webhook:dev-only").digest("hex").slice(0, 32);
 
-/** The CURRENT webhook token for a given secret. Mirrors evolution.ts:237-247
- * exactly (sha256("wd-webhook:"+secret).slice(0,32); a <16-char secret yields a
- * dev-only token off-production, null in production). */
-export function deriveWebhookToken(opts: { secret?: string | null; nodeEnv?: string }): string | null {
+/**
+ * The CURRENT webhook token for a given secret (sha256("wd-webhook:"+secret)
+ * .slice(0,32); a <16-char secret yields a dev-only token off-production, null
+ * in production).
+ *
+ * W9: `salt` (env WEBHOOK_TOKEN_SALT) folds into the digest when set, so the
+ * webhook token can be ROTATED without touching SESSION_SECRET - which cannot
+ * be rotated freely, because it is also the vault's encryption key. Unset salt
+ * derives the exact historical token, so nothing re-arms until the owner
+ * chooses to rotate; setting it changes every token at once and the next
+ * reassertWebhook cycle re-registers the fleet (a short 403 window per host is
+ * the rotation's cost, and the 403 breadcrumbs make it visible).
+ *
+ * DELIBERATELY STILL FLEET-WIDE, not per-instance. hmac(secret, instanceName)
+ * would confine a leak to one user, but registration and authentication would
+ * then have to agree on the instance name for every event Evolution posts -
+ * and Evolution's payloads name the instance in the BODY, which we would have
+ * to parse before authenticating. Re-keying every registered host in one
+ * flight is also exactly the migration that bricked inbound once before
+ * (OR11 I2.4). Recorded as deferred; the salt gives the rotation path that
+ * finding actually needed.
+ */
+export function deriveWebhookToken(opts: {
+  secret?: string | null;
+  nodeEnv?: string;
+  salt?: string | null;
+}): string | null {
   const secret = opts.secret;
   if (!secret || secret.length < 16) {
     return opts.nodeEnv === "production" ? null : DEV_FALLBACK;
   }
-  return createHash("sha256").update(`wd-webhook:${secret}`).digest("hex").slice(0, 32);
+  const salted = opts.salt ? `wd-webhook:${secret}:${opts.salt}` : `wd-webhook:${secret}`;
+  return createHash("sha256").update(salted).digest("hex").slice(0, 32);
+}
+
+/**
+ * Constant-time token comparison for the webhook/cron gates. The session
+ * cookie and the Meta webhook both compare with timingSafeEqual; the Evolution
+ * webhook and the tick/ping gates used plain `!==` - same class of secret,
+ * weaker comparison. Length is checked first (timingSafeEqual throws on
+ * mismatched lengths, and length is not the secret here).
+ */
+export function tokenMatches(
+  presented: string | null | undefined,
+  expected: string | null | undefined
+): boolean {
+  if (!presented || !expected) return false;
+  const a = Buffer.from(presented);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
 }
 
 export type TokenState = "current" | "foreign" | "none";
