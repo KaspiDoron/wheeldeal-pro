@@ -138,9 +138,19 @@ export async function POST(req: Request) {
       });
     }
   } else {
-    // Brute-force throttle: a locked account refuses password attempts.
+    // Brute-force throttle, keyed on (email, ip) - NOT on the email alone.
+    // An email-keyed lock was itself a weapon: six wrong passwords from
+    // anyone locked the real owner of the address out for 15 minutes,
+    // repeatable forever (a lockout DoS on any known email). Keyed on the
+    // pair, an attacker only ever locks their own network path; the real
+    // person logging in from their own device is untouched, and a rotating
+    // attacker still runs into the 30/hour per-IP limit above. Same
+    // clientIp discipline as the Google route: the appended hop, never the
+    // caller-typed leftmost one.
     const { authLockLeft, noteAuthFailure, clearAuthFailures } = await import("@/lib/cooldown");
-    const lockLeft = await authLockLeft(email, "login");
+    const { clientIp } = await import("@/lib/rate-limit");
+    const lockKey = `${email}|ip:${clientIp(req)}`;
+    const lockLeft = await authLockLeft(lockKey, "login");
     if (lockLeft > 0) {
       return NextResponse.json(
         { error: `Too many attempts - try again in ${lockLeft} min or use Forgot password.` },
@@ -174,7 +184,7 @@ export async function POST(req: Request) {
       user = await getUser(email, { fresh: true });
     }
     if (!verifyPassword(password, user?.passwordHash)) {
-      const { locked, lockedMinutes } = await noteAuthFailure(email, "login");
+      const { locked, lockedMinutes } = await noteAuthFailure(lockKey, "login");
       return NextResponse.json(
         {
           error: locked
@@ -184,7 +194,7 @@ export async function POST(req: Request) {
         { status: locked ? 429 : 401 }
       );
     }
-    clearAuthFailures(email, "login");
+    clearAuthFailures(lockKey, "login");
     await touchUser(email);
   }
 

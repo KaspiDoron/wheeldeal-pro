@@ -63,6 +63,10 @@ export default function ProfilePage() {
   const [pwMsg, setPwMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [mustChangePw, setMustChangePw] = useState(false);
 
+  // "Sign out everywhere" (revokes every other device's session).
+  const [outAllBusy, setOutAllBusy] = useState(false);
+  const [outAllMsg, setOutAllMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
   // Phone editing (mirrored to the database + used by WhatsApp threads).
   const [phoneEdit, setPhoneEdit] = useState(false);
   const [phoneVal, setPhoneVal] = useState("");
@@ -810,6 +814,47 @@ export default function ProfilePage() {
           </div>
         </section>
 
+        {outAllMsg && (
+          <p
+            className={`rounded-2xl p-2.5 text-[12px] font-bold ${
+              outAllMsg.ok ? "bg-brandgreen-soft text-brandgreen" : "bg-brandred-soft text-brandred"
+            }`}
+          >
+            {outAllMsg.text}
+          </p>
+        )}
+        <button
+          onClick={async () => {
+            setOutAllMsg(null);
+            setOutAllBusy(true);
+            try {
+              const res = await fetch("/api/auth/logout-all", { method: "POST" });
+              const d = await res.json().catch(() => ({}));
+              if (res.ok) {
+                setOutAllMsg({
+                  ok: true,
+                  text: t("Done - every other device is signed out. This one stays signed in.") + " ✓",
+                });
+              } else {
+                setOutAllMsg({
+                  ok: false,
+                  text: String(d?.error || t("Could not sign out your other devices - try again.")),
+                });
+              }
+            } catch {
+              setOutAllMsg({
+                ok: false,
+                text: t("Could not sign out your other devices - try again."),
+              });
+            } finally {
+              setOutAllBusy(false);
+            }
+          }}
+          disabled={outAllBusy}
+          className="btn btn-ghost w-full rounded-2xl py-3 text-sm"
+        >
+          {outAllBusy ? t("Signing out other devices...") : t("Sign out everywhere else")}
+        </button>
         <button onClick={signOut} className="btn btn-danger w-full rounded-2xl py-3 text-sm">
           {t("Sign out")}
         </button>

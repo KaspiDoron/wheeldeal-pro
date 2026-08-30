@@ -1797,3 +1797,11 @@ create table if not exists public.wa_suppressions (
   created_at  timestamptz not null default now()
 );
 alter table public.wa_suppressions enable row level security;
+
+-- ---- Session revocation horizon (Wave 9) ------------------------------------
+--
+-- A password change, a block, an erasure or "Sign out everywhere" moves this
+-- timestamp to now; getSession rejects any cookie whose issuedAt predates it.
+-- Without it, revocation only reached the one browser that performed the
+-- action - every other device kept a valid 30-day cookie.
+alter table public.app_users add column if not exists sessions_valid_from timestamptz;

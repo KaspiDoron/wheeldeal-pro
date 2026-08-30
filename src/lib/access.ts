@@ -11,7 +11,14 @@
 // normalised on read, so old databases keep working without a migration.
 
 import { randomBytes, scryptSync, timingSafeEqual } from "crypto";
-import { sbInsert, sbSelect, sbSelectStrict, sbDelete, supabaseConfigured } from "./runtime-config";
+import {
+  sbInsert,
+  sbSelect,
+  sbSelectStrict,
+  sbDelete,
+  sbUpdate,
+  supabaseConfigured,
+} from "./runtime-config";
 import { boundedSet } from "./bounded-map";
 
 export type PlanId = "free" | "pro" | "ultra";
@@ -54,6 +61,10 @@ export interface UserRecord {
   stayLat?: number;
   stayLng?: number;
   stayShareConsentAt?: number;
+  /** REVOCATION HORIZON (ms): any session cookie issued BEFORE this instant is
+   *  dead, whatever its own age says. Set by password change/reset, block,
+   *  erase and "Sign out everywhere"; checked in getSession. */
+  sessionsValidFrom?: number;
   addedAt: number;
   lastSeen: number;
 }
@@ -119,6 +130,7 @@ interface UserRow {
   stay_lat: number | null;
   stay_lng: number | null;
   stay_share_consent_at: string | null;
+  sessions_valid_from: string | null;
   added_at: string | null;
   last_seen: string | null;
 }
@@ -145,6 +157,7 @@ function fromRow(r: UserRow): UserRecord {
     stayLat: typeof r.stay_lat === "number" ? r.stay_lat : undefined,
     stayLng: typeof r.stay_lng === "number" ? r.stay_lng : undefined,
     stayShareConsentAt: r.stay_share_consent_at ? Date.parse(r.stay_share_consent_at) : undefined,
+    sessionsValidFrom: r.sessions_valid_from ? Date.parse(r.sessions_valid_from) : undefined,
     addedAt: r.added_at ? Date.parse(r.added_at) : Date.now(),
     lastSeen: r.last_seen ? Date.parse(r.last_seen) : Date.now(),
   };
@@ -346,7 +359,32 @@ export async function setPassword(
   rec.passwordHash = hashPassword(password);
   rec.mustChangePassword = mustChange;
   const persisted = await mirror(rec);
+  // A credential change is a REVOCATION EVENT: every outstanding cookie was
+  // minted under the old password, and the likeliest reason for the change is
+  // that someone else may hold one. Best-effort - the password change itself
+  // must never fail on the revocation column being un-migrated - and the
+  // caller re-issues its own cookie so the person changing stays signed in.
+  if (persisted) await revokeSessions(email).catch(() => false);
   return supabaseConfigured() ? persisted : true;
+}
+
+/**
+ * Kill every outstanding session for this account: cookies issued before this
+ * instant are refused by getSession from the next request on. Returns whether
+ * the horizon PERSISTED (an un-migrated column returns false - callers that
+ * promise "signed out everywhere" must not claim it on a failed write).
+ */
+export async function revokeSessions(email: string): Promise<boolean> {
+  const key = email.trim().toLowerCase();
+  const nowIso = new Date().toISOString();
+  const wrote = await sbUpdate("app_users", `email=eq.${encodeURIComponent(key)}`, {
+    sessions_valid_from: nowIso,
+  }).catch(() => false);
+  // Keep this instance's cache honest immediately - the fresh read path would
+  // catch up anyway, but a 10s window on a revocation is 10s too many.
+  const cached = cache().get(key)?.rec;
+  if (cached) cached.sessionsValidFrom = Date.parse(nowIso);
+  return wrote;
 }
 
 /**
@@ -447,4 +485,8 @@ export async function setUserStatus(
   };
   rec.status = status;
   await mirror(rec);
+  // Blocking is the urgent revocation: the status check in getSession already
+  // refuses blocked accounts per-request, and the horizon closes the remaining
+  // door (a race with the 10s cache, an unblock-then-reblock).
+  if (status === "blocked") await revokeSessions(key).catch(() => false);
 }
