@@ -89,6 +89,7 @@ export const AGENT_EVENT_KINDS = [
   "webhook-origin-override", // webhook re-arm changed the origin
   "webhook-orphan", // webhook event for an unknown instance
   "cron-ping", // scheduler heartbeat
+  "retention-ran", // nightly prune heartbeat - WRITTEN BY supabase/retention.sql
   "engine-disabled", // both engines off by hand; reply stored but unanswered
   "ai-budget-exhausted", // provider budget refused an AI call
   "localize-fallback", // localization fell back to English

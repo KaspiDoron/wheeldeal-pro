@@ -3,10 +3,24 @@
 // tag the fastest quartile as "fast responders" - an Ultra-tier insight.
 
 import "server-only";
+import { createHash } from "crypto";
 import { sbSelect, sbInsert, supabaseConfigured } from "./runtime-config";
 import { digitsOnly } from "./phone";
 import { numberFilter } from "./wa/phone-key";
 
+/**
+ * W9: the stored key is md5(digits), not the bare number. response_times was
+ * the one table holding raw shop phone numbers with no owner and (until W9's
+ * retention pass) no expiry - a global, growing phone book. The ranking only
+ * ever needs EQUALITY between a sample and a probe, and a deterministic hash
+ * gives exactly that: the writer hashes the shop's number, the reader hashes
+ * its probe, retention.sql migrates legacy plain rows with the SQL md5() of
+ * the same string. Not cryptographic anonymity (the phone space is small);
+ * it removes the plain numbers from the table, which is the point.
+ */
+export function responsePhoneKey(phoneRaw: string): string {
+  return createHash("md5").update(digitsOnly(phoneRaw)).digest("hex");
+}
 
 /**
  * On a shop's FIRST reply, record how long it took since our first outbound
@@ -16,11 +30,13 @@ export async function recordResponseTime(phoneRaw: string): Promise<void> {
   if (!supabaseConfigured()) return;
   const phone = digitsOnly(phoneRaw);
   if (phone.length < 7) return;
+  const key = responsePhoneKey(phone);
 
-  // Already have a sample for this shop? Keep the first reply only.
+  // Already have a sample for this shop? Keep the first reply only. (Legacy
+  // rows may still hold the plain digits until retention migrates them.)
   const existing = await sbSelect(
     "response_times",
-    `select=id&phone=eq.${encodeURIComponent(phone)}&limit=1`
+    `select=id&phone=in.(${encodeURIComponent(key)},${encodeURIComponent(phone)})&limit=1`
   );
   if (existing.length) return;
 
@@ -37,7 +53,7 @@ export async function recordResponseTime(phoneRaw: string): Promise<void> {
 
   const ms = Date.now() - started;
   if (ms < 0 || ms > 7 * 24 * 3600_000) return; // ignore nonsense/very stale
-  await sbInsert("response_times", [{ phone, ms }]);
+  await sbInsert("response_times", [{ phone: key, ms }]);
 }
 
 // Cache the fast-responder set: recomputing on every search would be wasteful.
@@ -47,7 +63,8 @@ declare global {
 }
 
 /**
- * Normalized phone numbers of the fastest-replying quartile of shops. Needs a
+ * PHONE KEYS (responsePhoneKey hashes) of the fastest-replying quartile of
+ * shops - probe membership with `set.has(responsePhoneKey(number))`. Needs a
  * minimum sample of shops before the ranking is meaningful.
  */
 export async function fastResponderPhones(): Promise<Set<string>> {
@@ -60,10 +77,11 @@ export async function fastResponderPhones(): Promise<Set<string>> {
       "response_times",
       "select=phone,ms&limit=20000"
     );
-    // Best (fastest) sample per shop.
+    // Best (fastest) sample per shop, normalizing legacy plain-digit rows to
+    // the hashed key so both generations rank together.
     const best = new Map<string, number>();
     for (const r of rows) {
-      const p = digitsOnly(r.phone);
+      const p = /^[0-9a-f]{32}$/.test(r.phone) ? r.phone : responsePhoneKey(r.phone);
       const prev = best.get(p);
       if (prev === undefined || r.ms < prev) best.set(p, r.ms);
     }

@@ -67,6 +67,12 @@ export default function ProfilePage() {
   const [outAllBusy, setOutAllBusy] = useState(false);
   const [outAllMsg, setOutAllMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
+  // Account erasure (typed confirmation, not a click - see /api/profile/erase).
+  const [eraseOpen, setEraseOpen] = useState(false);
+  const [eraseConfirm, setEraseConfirm] = useState("");
+  const [eraseBusy, setEraseBusy] = useState(false);
+  const [eraseMsg, setEraseMsg] = useState<string | null>(null);
+
   // Phone editing (mirrored to the database + used by WhatsApp threads).
   const [phoneEdit, setPhoneEdit] = useState(false);
   const [phoneVal, setPhoneVal] = useState("");
@@ -812,6 +818,84 @@ export default function ProfilePage() {
             <a href="/terms" className="underline">{t("Terms of Use")}</a>
             <a href="/privacy" className="underline">{t("Privacy Policy")}</a>
           </div>
+        </section>
+
+        {/* Your data - the DSAR pair: take a copy, or delete everything. */}
+        <section className="surface rounded-blob p-4">
+          <div className="text-[13px] font-extrabold text-strong">🗂️ {t("Your data")}</div>
+          <p className="mt-1 text-[12px] text-soft">
+            {t("Download a copy of everything WheelDeal holds about you, or delete your account and every trace of your data - conversations, searches, offers, all of it.")}
+          </p>
+          <a
+            href="/api/profile/export"
+            download
+            className="btn btn-ghost mt-2 block w-full rounded-2xl py-2.5 text-center text-[13px]"
+          >
+            {t("Download my data (JSON)")}
+          </a>
+          {!eraseOpen ? (
+            <button
+              onClick={() => setEraseOpen(true)}
+              className="btn mt-2 w-full rounded-2xl py-2.5 text-[13px] font-bold text-brandred underline"
+            >
+              {t("Delete my account and data...")}
+            </button>
+          ) : (
+            <div className="mt-2 rounded-2xl border-2 border-brandred bg-brandred-soft p-3">
+              <p className="text-[12px] font-bold text-brandred">
+                {t("This permanently deletes your account, your WhatsApp link and all your data. It cannot be undone. Type your email address to confirm.")}
+              </p>
+              <input
+                value={eraseConfirm}
+                onChange={(e) => setEraseConfirm(e.target.value)}
+                placeholder={session?.email ?? "you@example.com"}
+                autoComplete="off"
+                className="input mt-2 w-full rounded-xl px-3 py-2.5 text-[16px]"
+              />
+              {eraseMsg && (
+                <p className="mt-2 text-[12px] font-bold text-brandred">{eraseMsg}</p>
+              )}
+              <div className="mt-2 flex gap-2">
+                <button
+                  onClick={() => {
+                    setEraseOpen(false);
+                    setEraseConfirm("");
+                    setEraseMsg(null);
+                  }}
+                  className="btn btn-ghost flex-1 rounded-2xl py-2.5 text-[13px]"
+                >
+                  {t("Cancel")}
+                </button>
+                <button
+                  onClick={async () => {
+                    setEraseMsg(null);
+                    setEraseBusy(true);
+                    try {
+                      const res = await fetch("/api/profile/erase", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ confirm: eraseConfirm }),
+                      });
+                      const d = await res.json().catch(() => ({}));
+                      if (res.ok) {
+                        window.location.href = "/login";
+                        return;
+                      }
+                      setEraseMsg(String(d?.error || t("Could not delete your account - try again.")));
+                    } catch {
+                      setEraseMsg(t("Could not delete your account - try again."));
+                    } finally {
+                      setEraseBusy(false);
+                    }
+                  }}
+                  disabled={eraseBusy}
+                  className="btn btn-danger flex-1 rounded-2xl py-2.5 text-[13px]"
+                >
+                  {eraseBusy ? t("Deleting...") : t("Delete everything")}
+                </button>
+              </div>
+            </div>
+          )}
         </section>
 
         {outAllMsg && (

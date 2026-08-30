@@ -230,6 +230,27 @@ export async function getSession(): Promise<Session | null> {
   const rec = await getUser(raw.email);
   if (role !== "owner") {
     if (rec?.status === "blocked") return null;
+    // AN ERASED ACCOUNT DOES NOT KEEP A SESSION. Erasure deletes the app_users
+    // row last - and the revocation horizon goes with it, so a cookie that was
+    // still cached somewhere would otherwise ride out its 30 days over an
+    // account that no longer exists, able to re-create data rows as it goes.
+    // Only a POSITIVE "the row is gone" answer refuses (sbSelectStrict
+    // separates gone from unreadable); an outage fails open like the blocked
+    // gate above, so a DB blip never signs the whole fleet out.
+    if (!rec) {
+      try {
+        const rc = await import("./runtime-config");
+        if (rc.supabaseConfigured?.()) {
+          const read = await rc.sbSelectStrict<{ email: string }>(
+            "app_users",
+            `select=email&email=eq.${encodeURIComponent(raw.email)}&limit=1`
+          );
+          if (read && "rows" in read && read.rows.length === 0) return null;
+        }
+      } catch {
+        /* unreadable - fail open, same direction as the blocked gate */
+      }
+    }
     if (role === "user") plan = normalizePlan(rec?.plan);
   }
   // REVOCATION HORIZON: any cookie issued before sessions_valid_from is dead,

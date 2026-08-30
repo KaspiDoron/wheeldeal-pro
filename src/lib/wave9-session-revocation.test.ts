@@ -11,15 +11,25 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // past the horizon - the renewal now happens only after every gate passes.
 
 vi.mock("server-only", () => ({}));
+
+const state: {
+  rec: { status: string; plan?: string; sessionsValidFrom?: number } | null;
+  /** What the strict app_users probe answers when getUser has no record. */
+  db: "unconfigured" | "present" | "gone" | "unavailable";
+} = { rec: null, db: "unconfigured" };
+
 vi.mock("./runtime-config", () => ({
   getConfig: async () => undefined,
   getConfigFresh: async () => ({ value: undefined }),
   setConfig: async () => {},
+  supabaseConfigured: () => state.db !== "unconfigured",
+  sbSelectStrict: async () =>
+    state.db === "gone"
+      ? { rows: [] }
+      : state.db === "present"
+        ? { rows: [{ email: "a@x.com" }] }
+        : { error: "unavailable" as const },
 }));
-
-const state: {
-  rec: { status: string; plan?: string; sessionsValidFrom?: number } | null;
-} = { rec: null };
 
 vi.mock("./access", () => ({
   getUser: async () => state.rec,
@@ -63,6 +73,7 @@ beforeEach(() => {
   jar.setCalls = 0;
   jar.lastSet = undefined;
   state.rec = { status: "active", plan: "free" };
+  state.db = "unconfigured";
 });
 
 describe("the revocation horizon", () => {
@@ -145,5 +156,39 @@ describe("the absolute lifetime (firstIssuedAt)", () => {
     const c = decodeSetCookie();
     expect(c.firstIssuedAt).toBe(c.issuedAt);
     expect(Date.now() - c.issuedAt).toBeLessThan(5_000);
+  });
+});
+
+describe("an erased account does not keep a session", () => {
+  // Erasure deletes the app_users row LAST - and the revocation horizon goes
+  // with it, so this gate is what refuses the cookie afterwards. Only a
+  // POSITIVE "the row is gone" answer refuses; the fail directions are pinned
+  // below because they are the whole design.
+  beforeEach(() => {
+    state.rec = null; // getUser finds nothing (cache empty, row gone or DB down)
+  });
+
+  it("REPRODUCTION: the erased account's cookie is refused on a confirmed-gone row", async () => {
+    state.db = "gone";
+    jar.value = forgeCookie("a@x.com", Date.now() - 60_000);
+    expect(await getSession()).toBe(null);
+  });
+
+  it("a DB outage FAILS OPEN - a blip must never sign the whole fleet out", async () => {
+    state.db = "unavailable";
+    jar.value = forgeCookie("a@x.com", Date.now() - 60_000);
+    expect((await getSession())?.email).toBe("a@x.com");
+  });
+
+  it("no Supabase (dev) keeps working sessions without rows", async () => {
+    state.db = "unconfigured";
+    jar.value = forgeCookie("a@x.com", Date.now() - 60_000);
+    expect((await getSession())?.email).toBe("a@x.com");
+  });
+
+  it("the OWNER is exempt - env-derived, no row required", async () => {
+    state.db = "gone";
+    jar.value = forgeCookie("kaspidoron@gmail.com", Date.now() - 60_000);
+    expect((await getSession())?.email).toBe("kaspidoron@gmail.com");
   });
 });

@@ -74,6 +74,18 @@ for (const f of files) {
     }
   }
 }
+// SQL writers count too: retention.sql's 'retention-ran' heartbeat is a real
+// writer that lives outside src/ (the prune function inserts it per run). The
+// scan is shaped like the TS one - an insert into agent_events with a literal
+// kind - so a future SQL-side event registers the same way.
+for (const sqlPath of ["supabase/retention.sql", "supabase/schema.sql"]) {
+  const sql = readFileSync(join(process.cwd(), sqlPath), "utf8");
+  for (const m of sql.matchAll(
+    /insert into public\.agent_events[\s\S]{0,200}?values \('([a-z][a-z0-9_-]*)'/g
+  )) {
+    writerEvidence.set(m[1], [...(writerEvidence.get(m[1]) ?? []), sqlPath]);
+  }
+}
 
 describe("agent_events reader/writer reconciliation", () => {
   it("sanity: both extractions found the known population", () => {

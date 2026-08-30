@@ -382,12 +382,34 @@ export async function GET(req: Request) {
     webhookOk30.length === 0 &&
     openSessions.length > 0;
 
+  // RETENTION HEARTBEAT (W9). prune_old_rows writes one 'retention-ran'
+  // agent_events row per run, because the schedule itself is unobservable from
+  // here: pg_cron degrades to a NOTICE nobody reads when the extension is
+  // missing, so a deployment can have ZERO retention and no surface saying so.
+  // Read through sbSelectDark - "never ran" and "could not ask" are different
+  // answers and the tile must say which.
+  const { sbSelectDark } = await import("@/lib/runtime-config");
+  const retentionRows = await sbSelectDark<{ created_at: string }>(
+    "agent_events",
+    "select=created_at&kind=eq.retention-ran&order=created_at.desc&limit=1"
+  );
+  const retentionLastRanAt = retentionRows?.[0]?.created_at ?? null;
+  const retention = {
+    lastRanAt: retentionLastRanAt,
+    unreadable: retentionRows === null,
+    // Nightly job: anything past 48h means the schedule is broken or absent.
+    stale: Boolean(
+      retentionLastRanAt && now - Date.parse(retentionLastRanAt) > 48 * 3600_000
+    ),
+  };
+
   // ---- the numbers the owner needs to see WITHOUT reading a log ------------
   const { pulse, queueDepth, turnLatency, providerErrors, pushBreadcrumbs } = await import(
     "@/lib/ops/vitals"
   );
 
   return NextResponse.json({
+    retention,
     services,
     guardCounters,
     // A null anywhere in guardCounters means that counter is UNKNOWN, not zero.
