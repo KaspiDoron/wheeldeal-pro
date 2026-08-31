@@ -34,6 +34,19 @@ export interface PresentableOffer {
    *   wrong-vehicle - positively a different machine; never presentable
    */
   vehicleStatus?: "confirmed" | "assumed" | "needs-confirmation" | "wrong-vehicle";
+  /**
+   * A SUBSTITUTE the shop offered, waiting on the traveller's Yes/No.
+   *
+   * The substitution read runs ~700 lines after the offers row is written, so
+   * its verdict never reached the price: a shop that answered "no Click today,
+   * but I have an Nmax for 220" had 220 stored as the requested vehicle's
+   * price, wearing UNVERIFIED, and eligible to win BEST PRICE. The traveller
+   * compared it against real Click quotes.
+   *
+   * A price for a machine nobody has agreed to is not a comparable price. It
+   * stays on the card - with the Similar-vehicle label - and never ranks.
+   */
+  alternativeOffer?: { vehicle?: string | null } | null;
 }
 
 /**
@@ -82,6 +95,9 @@ export type VehicleStance = "ok" | "confirming" | "mismatch";
 export function vehicleStance(offer: PresentableOffer | undefined | null): VehicleStance {
   if (!offer) return "ok";
   if (offer.vehicleStatus === "wrong-vehicle") return "mismatch";
+  // A parked substitution is a mismatch the traveller has not resolved yet -
+  // the price is real, the vehicle is not the one they asked for.
+  if (offer.alternativeOffer) return "mismatch";
   if (offer.vehicleStatus === "needs-confirmation" || offer.vehicleStatus === "assumed") {
     return "confirming";
   }
@@ -125,7 +141,11 @@ export function rankPresentable<
         // can take today. It stays on the card (with the honest state); it just
         // never wears BEST PRICE.
         v.stage !== "out-of-stock" &&
-        v.stage !== "declined"
+        v.stage !== "declined" &&
+        // Nor is a price for a DIFFERENT machine the traveller has not accepted.
+        // Ranking it made a substitute the cheapest "deal" in the hunt, which is
+        // the comparison this whole product exists to get right.
+        !v.offer!.alternativeOffer
     )
     .slice()
     .sort((a, b) => a.offer!.pricePerDay - b.offer!.pricePerDay);

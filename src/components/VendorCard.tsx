@@ -206,7 +206,13 @@ function VendorCardInner({
   const stance = vehicleStance(offer);
   // The badge AND its plain-language explanation, from one entry - see
   // lib/offer-badges for why these four words needed a tooltip at all.
-  const badge = offerBadge({ stance, verified: offer?.verified });
+  const badge = offerBadge({
+    stance,
+    verified: offer?.verified,
+    // A parked substitution is the traveller's decision, not a state that
+    // resolves itself - and UNVERIFIED's copy promises the opposite.
+    pendingChoice: Boolean(offer?.alternativeOffer),
+  });
   // The offer's own currency symbol - prices display in the shop's money.
   const curSymbol = offer ? currencySymbol(offer.currency) : "$";
   // Traveller's own currency (item #6) - set after mount so SSR markup stays

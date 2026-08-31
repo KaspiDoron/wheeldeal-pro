@@ -1031,9 +1031,34 @@ export async function processVendorReply(opts: {
   // what the shop stated and what the catalogue knows, and returns one of three
   // states. Only `confirmed` may become an offer - `needs-confirmation` becomes
   // a question the agent has to ask first, and it cannot be skipped.
+  // ACCEPTING A SUBSTITUTION RETARGETS THE NEGOTIATION.
+  //
+  // substitution-store writes `acceptedVehicleCc`/`acceptedVehicle` when the
+  // traveller says Yes - and grep found no production reader for either. What
+  // it ALSO wrote was `vehicleConfirmation: confirmed`, which is read, and
+  // whose only effect is to silence this gate for the rest of the thread. So
+  // "yes, I'll take the Nmax" did not change what we were negotiating for; it
+  // switched off the check that would notice a THIRD substitution. That is the
+  // exact opposite of the contract vehicle/substitution.ts states.
+  //
+  // Judge later turns against the vehicle the traveller actually accepted.
+  let acceptedCc: number | undefined;
+  if (ctx.sender) {
+    try {
+      const { loadThreadState: loadForAccepted, threadKeyFor: keyForAccepted } = await import(
+        "./graph/state"
+      );
+      const st = await loadForAccepted(keyForAccepted(ctx.sender, from)).catch(() => null);
+      const cc = (st?.fields as { acceptedVehicleCc?: unknown } | undefined)?.acceptedVehicleCc;
+      if (typeof cc === "number" && cc > 0) acceptedCc = cc;
+    } catch {
+      // No accepted substitution readable - judge against the original request,
+      // which is the safe direction.
+    }
+  }
   const declared = {
     class: rfq.vehicleClass === "car" ? ("car" as const) : (rfq.vehicleClass as "scooter" | "motorbike"),
-    displacementCc: rfq.engineSizeCc,
+    displacementCc: acceptedCc ?? rfq.engineSizeCc,
     transmission: rfq.transmission === "any" ? undefined : rfq.transmission,
     seats: rfq.seats,
   };
@@ -2350,9 +2375,21 @@ export async function processVendorReply(opts: {
     // let the LLM's own "a different vehicle was offered" judgement (read.offered)
     // drive wrongVehicle - decideSubstitution still gates on closeness/confidence,
     // so a genuine same-vehicle reply is a no-op.
+    // READ WHAT THE SHOP MEANT, NOT ONLY WHAT THEY TYPED.
+    //
+    // This ASCII regex ran against `opts.text` alone, which is blind three ways:
+    // a Thai/Vietnamese/Indonesian "we don't have that, only the Nmax" matches
+    // nothing; a voice note arrives on the Cloud lane with opts.text empty and
+    // its transcript in a sibling field; and a caption-less price board arrives
+    // as "[photo]". The local `text` already carries the transcript, and
+    // `inboundEnglish` is the gloss the sibling call-intent pass on the very
+    // next block already uses. Read both.
+    const substitutionSource = `${text}
+${inboundEnglish ?? ""}
+${extractText ?? ""}`.trim();
     const substitutionHint =
       /\b(?:no|dont|don'?t|out of|sold out|instead|only have|only got|we have|i have|but (?:i|we)|another|other|different|alternative)\b/i.test(
-        opts.text ?? ""
+        substitutionSource
       );
     const assessmentSuspect =
       extraction?.vehicleAssessment != null && extraction.vehicleAssessment.status !== "confirmed";
@@ -2361,7 +2398,9 @@ export async function processVendorReply(opts: {
     if (substitutionSuspected && ctx.sender && ctx.vendorId) {
       const email = ctx.sender;
       const vendorId = ctx.vendorId;
-      const inboundText = opts.text ?? "";
+      // The gloss when we have one, the shop's own words when we do not - the
+      // same rule every other deterministic reader on this path follows.
+      const inboundText = (inboundEnglish || substitutionSource || opts.text) ?? "";
       const threadKey = turnInput.event.threadKey;
       const assessmentWrong = extraction?.vehicleAssessment?.status === "wrong-vehicle";
       await finishBeforeResponse("substitution-offer", async () => {

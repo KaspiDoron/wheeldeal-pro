@@ -273,6 +273,10 @@ export const I18N_EXTRAS: string[] = [
   "Nothing available here right now - your agent asked when one is back.",
   "Shop said no",
   "None available now",
+  // W12d: the Similar-vehicle badge two documents credited as shipped.
+  "SIMILAR VEHICLE",
+  "This shop does not have the exact vehicle you asked for, and offered a close alternative instead. The price is real - it is just for a different machine, so it is not counted as your best deal.",
+  "Say Yes or No on the card. Your agent has paused this conversation until you do.",
   "A duplicate of a message this shop already received was skipped.",
   "This shop already got your request in the last day, so a repeat was skipped.",
   "This shop hasn't answered earlier messages, so a repeat wasn't sent - this protects your WhatsApp number.",
