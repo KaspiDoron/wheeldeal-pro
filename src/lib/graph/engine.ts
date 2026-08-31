@@ -2002,17 +2002,20 @@ export function liveGraphIO(send: LiveSend): GraphIO {
       // drain's whole pipeline. One wait, bounded to a single lane window;
       // cold intros never wait (their minute-scale holds are the anti-ban
       // point, not an artefact).
-      if (
-        !claim.ok &&
-        claim.kind === "pacing" &&
-        isReplySend &&
-        typeof claim.retryAtMs === "number"
-      ) {
+      // A send crosses three lanes, so one wait clears at most one of them.
+      // Waiting once and giving up meant the ordinary case - several shops
+      // answering at once, losing the gap lane and then the fleet lane - parked
+      // anyway, having already spent the wait. Bounded per-loss AND in total,
+      // so a contended lane cannot hold this turn open indefinitely.
+      let inlineWaitBudgetMs = 12_000;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (!isReplySend || claim.ok || claim.kind !== "pacing") break;
+        if (typeof claim.retryAtMs !== "number") break;
         const waitMs = claim.retryAtMs - Date.now();
-        if (waitMs > 0 && waitMs <= 8_000) {
-          await new Promise((res) => setTimeout(res, waitMs + 120 + Math.random() * 380));
-          claim = await claimForSend(senderKey, toNumber, verdict.text, true, isReplySend);
-        }
+        if (!(waitMs > 0) || waitMs > 8_000 || waitMs > inlineWaitBudgetMs) break;
+        inlineWaitBudgetMs -= waitMs;
+        await new Promise((res) => setTimeout(res, waitMs + 120 + Math.random() * 380));
+        claim = await claimForSend(senderKey, toNumber, verdict.text, true, isReplySend);
       }
       if (!claim.ok) {
         if (claim.kind === "duplicate") {
@@ -2022,13 +2025,24 @@ export function liveGraphIO(send: LiveSend): GraphIO {
             finalText: verdict.text,
           };
         }
-        const { jitteredHold } = await import("../wa/pacing");
-        // Lane-proportional: the lane a REPLY lost is measured in seconds (5s
-        // per-shop gap, fleet slot), so it re-parks 20-40s out; a cold intro
-        // keeps the minute-scale hold - velocity to new numbers is the ban
-        // vector, and its lane is 12s+ anyway.
+        const { jitteredHold, RECIPIENT_LOCK_SEC } = await import("../wa/pacing");
+        // LANE-PROPORTIONAL, AND THIS IS THE PATH THAT CARRIES THE REPLY.
+        //
+        // Wave 8's own reasoning - the lanes a reply loses are measured in
+        // SECONDS, so anything beyond them is invented latency - was applied to
+        // the drain and not here, on the INLINE path SPTE actually uses. So the
+        // penalty stack the wave says it killed was still 20-40s for losing a
+        // <=8s lane. The park is now sized to the lane, like the drain's, and
+        // uses the refusing lane's own free-at instant when it named one.
+        // A cold intro keeps the minute-scale hold: velocity to new numbers is
+        // the ban vector, and that lane is 12s+ anyway.
+        const replyParkMs =
+          typeof claim.retryAtMs === "number"
+            ? Math.max(2_000, Math.min(30_000, claim.retryAtMs - Date.now())) +
+              Math.round(Math.random() * 3_000)
+            : RECIPIENT_LOCK_SEC * 1000 + 2_000 + Math.round(Math.random() * 4_000);
         const notBefore = isReplySend
-          ? new Date(Date.now() + 20_000 + Math.round(Math.random() * 20_000)).toISOString()
+          ? new Date(Date.now() + replyParkMs).toISOString()
           : jitteredHold(Date.now(), 1, 2);
         // parkOutboxOnce, NOT a raw insert: the partial unique index rejects a
         // second pending auto row for this (shop, kind), and the bare insert

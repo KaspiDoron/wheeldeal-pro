@@ -400,11 +400,13 @@ export async function claimSendSlots(opts: {
   // The same boundary straddle every other slot here guards: a bucket is a
   // window, not a spacing promise, and two sends either side of its edge are
   // milliseconds apart.
-  const prevRecipient = await sbInsertClaim("wa_send_claims", {
-    sender_key: opts.senderKey,
-    slot_key: recipientSlotFor(recipientBucket - 1),
-  });
-  if (prevRecipient === "lost") {
+  // A READ, NOT A PROBE-WRITE. Claiming the previous bucket to find out whether
+  // it was taken CREATED a row stamped now on every first attempt, and no
+  // refusal path released it - so a later attempt read that row as "the last
+  // send to this shop", and held a shop that had never been messaged for a full
+  // 8s mutex on the strength of an attempt that sent nothing. The spacing was
+  // measured from the first ATTEMPT instead of the last SEND, fleet-wide.
+  {
     const row = await sbSelectStrict<{ created_at: string }>(
       "wa_send_claims",
       `select=created_at&sender_key=eq.${encodeURIComponent(
@@ -452,9 +454,37 @@ export async function claimSendSlots(opts: {
     sender_key: opts.senderKey,
     slot_key: slotFor(bucket),
   });
+  // When the winner of `slot` actually claimed it, or NaN if we cannot say.
+  // A READ, never a write - see the straddle note below.
+  const claimedAt = async (slot: string): Promise<number> => {
+    const row = await sbSelectStrict<{ created_at: string }>(
+      "wa_send_claims",
+      `select=created_at&sender_key=eq.${encodeURIComponent(
+        opts.senderKey
+      )}&slot_key=eq.${encodeURIComponent(slot)}&limit=1`
+    );
+    return "rows" in row ? Date.parse(row.rows[0]?.created_at ?? "") : NaN;
+  };
   if (cur === "lost") {
     await releaseOwn([msgSlot, ownRecipientSlot]); // let the queued retry re-claim it
-    return { ok: false, kind: "pacing", retryAtMs: (bucket + 1) * opts.gapSeconds * 1000 };
+    // THE INSTANT THIS LANE IS REALLY FREE, not the instant the bucket rolls.
+    //
+    // This returned the BUCKET EDGE while the straddle guard below refuses
+    // anything inside `prevAt + gap` - and prevAt sits strictly INSIDE the
+    // previous bucket, so the edge is always early by `prevAt mod gap`, up to a
+    // full gap. The caller takes exactly ONE wait, so it slept to an instant
+    // that was still refused, burned its whole allowance, and re-parked the row
+    // for 20-40s. Wave 8's centrepiece was inert: executed on a 7-shop burst,
+    // 1 reply reached the wire and 6 parked.
+    const winner = await claimedAt(slotFor(bucket));
+    const edge = (bucket + 1) * opts.gapSeconds * 1000;
+    return {
+      ok: false,
+      kind: "pacing",
+      retryAtMs: Number.isFinite(winner)
+        ? Math.max(edge, winner + opts.gapSeconds * 1000)
+        : edge,
+    };
   }
   if (cur === "error") {
     await releaseOwn([msgSlot, ownRecipientSlot]);
@@ -463,26 +493,20 @@ export async function claimSendSlots(opts: {
 
   // Boundary straddle check: if the PREVIOUS bucket was claimed less than a
   // full gap ago, this send would land too close to the previous one.
-  const prev = await sbInsertClaim("wa_send_claims", {
-    sender_key: opts.senderKey,
-    slot_key: slotFor(bucket - 1),
-  });
-  if (prev === "lost") {
-    const row = await sbSelectStrict<{ created_at: string }>(
-      "wa_send_claims",
-      `select=created_at&sender_key=eq.${encodeURIComponent(
-        opts.senderKey
-      )}&slot_key=eq.${encodeURIComponent(slotFor(bucket - 1))}&limit=1`
-    );
-    const prevAt = "rows" in row ? Date.parse(row.rows[0]?.created_at ?? "") : NaN;
-    if (Number.isFinite(prevAt) && now - prevAt < opts.gapSeconds * 1000) {
-      await releaseOwn([msgSlot, ownRecipientSlot, slotFor(bucket)]);
-      return { ok: false, kind: "pacing", retryAtMs: prevAt + opts.gapSeconds * 1000 };
-    }
+  // A READ, NOT A WRITE. This probed the previous bucket with sbInsertClaim,
+  // so on a WIN it CREATED a row stamped now - and no refusal path released it.
+  // The row then answered a later attempt's "when did the previous bucket
+  // send?" with the time of an attempt that never sent anything, holding a shop
+  // that had never been messaged for a full gap. Worse, the probe is written by
+  // the FIRST attempt in each bucket, so the enforced spacing was measured from
+  // the first ATTEMPT rather than the last SEND, on all three lanes.
+  //
+  // A select answers the same question and cannot corrupt the state it reads.
+  const prevAt = await claimedAt(slotFor(bucket - 1));
+  if (Number.isFinite(prevAt) && now - prevAt < opts.gapSeconds * 1000) {
+    await releaseOwn([msgSlot, ownRecipientSlot, slotFor(bucket)]);
+    return { ok: false, kind: "pacing", retryAtMs: prevAt + opts.gapSeconds * 1000 };
   }
-  // prev === "error" is tolerable: the current-bucket claim already
-  // serializes same-window senders; the straddle residue is accepted over
-  // failing a legitimate send on a flaky secondary check.
 
   // REPLY-LANE FLEET CEILING: the per-recipient slot above lets distinct shops
   // send concurrently, which (without this) removed the ONLY atomic cap on total
@@ -500,10 +524,17 @@ export async function claimSendSlots(opts: {
     });
     if (fleet === "lost") {
       await releaseOwn([msgSlot, ownRecipientSlot, slotFor(bucket)]);
+      // The true free-at, for the same reason as the gap lane above: the bucket
+      // edge is always earlier than `winner + gap`, so waiting to it guaranteed
+      // a second refusal with the whole wait allowance already spent.
+      const winner = await claimedAt(fleetSlotFor(fleetBucket));
+      const edge = (fleetBucket + 1) * opts.fleetGapSeconds * 1000;
       return {
         ok: false,
         kind: "pacing",
-        retryAtMs: (fleetBucket + 1) * opts.fleetGapSeconds * 1000,
+        retryAtMs: Number.isFinite(winner)
+          ? Math.max(edge, winner + opts.fleetGapSeconds * 1000)
+          : edge,
       };
     }
     if (fleet === "error") {
@@ -517,26 +548,12 @@ export async function claimSendSlots(opts: {
     // bulk-sender signature the fleet ceiling exists to prevent. Speeding the
     // engaged lane up makes that boundary far more reachable, so it has to
     // close here rather than being left to luck.
-    const prevFleet = await sbInsertClaim("wa_send_claims", {
-      sender_key: opts.senderKey,
-      slot_key: fleetSlotFor(fleetBucket - 1),
-    });
-    if (prevFleet === "lost") {
-      const row = await sbSelectStrict<{ created_at: string }>(
-        "wa_send_claims",
-        `select=created_at&sender_key=eq.${encodeURIComponent(
-          opts.senderKey
-        )}&slot_key=eq.${encodeURIComponent(fleetSlotFor(fleetBucket - 1))}&limit=1`
-      );
-      const prevAt = "rows" in row ? Date.parse(row.rows[0]?.created_at ?? "") : NaN;
-      if (Number.isFinite(prevAt) && now - prevAt < opts.fleetGapSeconds * 1000) {
-        await releaseOwn([msgSlot, ownRecipientSlot, slotFor(bucket), fleetSlotFor(fleetBucket)]);
-        return { ok: false, kind: "pacing", retryAtMs: prevAt + opts.fleetGapSeconds * 1000 };
-      }
+    // A read, never a probe-write - see the gap lane's note.
+    const prevFleetAt = await claimedAt(fleetSlotFor(fleetBucket - 1));
+    if (Number.isFinite(prevFleetAt) && now - prevFleetAt < opts.fleetGapSeconds * 1000) {
+      await releaseOwn([msgSlot, ownRecipientSlot, slotFor(bucket), fleetSlotFor(fleetBucket)]);
+      return { ok: false, kind: "pacing", retryAtMs: prevFleetAt + opts.fleetGapSeconds * 1000 };
     }
-    // prevFleet === "error" is tolerable for the same reason as the gap lane:
-    // the current-bucket claim already serializes the window, and failing a
-    // legitimate reply on a flaky secondary read is the worse trade.
   }
   return { ok: true };
 }

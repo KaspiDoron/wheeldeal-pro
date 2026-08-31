@@ -3932,8 +3932,17 @@ export async function drainOutbox(
       isReplyRow &&
       typeof claim.retryAtMs === "number"
     ) {
-      const waitMs = claim.retryAtMs - Date.now();
-      if (waitMs > 0 && waitMs <= REPLY_WAIT_CEILING_MS && waitMs <= waitAllowanceMs) {
+      // A SEND CROSSES THREE LANES, so one wait can only ever clear one of
+      // them. The loop used to sleep once and give up, which meant losing the
+      // gap lane and then the fleet lane - the ordinary case with several shops
+      // answering at once - re-parked the row anyway, having spent the wait.
+      // Still bounded exactly as before, per-loss and per-invocation; the only
+      // change is that a wait which SUCCEEDS may be followed by another.
+      const MAX_WAITS = 3;
+      for (let attempt = 0; attempt < MAX_WAITS; attempt++) {
+        if (claim.ok || claim.kind !== "pacing" || typeof claim.retryAtMs !== "number") break;
+        const waitMs = claim.retryAtMs - Date.now();
+        if (!(waitMs > 0) || waitMs > REPLY_WAIT_CEILING_MS || waitMs > waitAllowanceMs) break;
         waitAllowanceMs -= waitMs;
         await new Promise((res) => setTimeout(res, waitMs + 120 + Math.random() * 380));
         claim = await claimSendSlots(claimArgs);

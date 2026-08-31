@@ -69,8 +69,14 @@ describe("losing a seconds-scale lane WAITS to its edge instead of re-parking", 
     const guard = readCode("src/lib/wa-guard.ts");
     expect(guard).toMatch(/REPLY_WAIT_CEILING_MS = 8_000/);
     expect(guard).toMatch(/waitAllowanceMs = 15_000/);
-    expect(guard).toMatch(/waitMs <= REPLY_WAIT_CEILING_MS && waitMs <= waitAllowanceMs/);
-    // One re-claim, not a loop: the second loss re-parks as before.
+    expect(guard).toMatch(/waitMs > REPLY_WAIT_CEILING_MS \|\| waitMs > waitAllowanceMs/);
+    // W12h: a send crosses THREE lanes, so one wait can only ever clear one of
+    // them - and losing the gap lane then the fleet lane is the ordinary case
+    // when several shops answer at once. The single wait meant those rows
+    // parked anyway, having already spent the allowance. Bounded exactly as
+    // before (per-loss ceiling AND shared allowance); the only change is that a
+    // wait which succeeds may be followed by another.
+    expect(guard).toMatch(/const MAX_WAITS = 3/);
     expect(guard).toMatch(/claim = await claimSendSlots\(claimArgs\)/);
   });
 
