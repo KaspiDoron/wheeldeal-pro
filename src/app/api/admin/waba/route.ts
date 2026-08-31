@@ -30,11 +30,21 @@ function onOffOrEmpty(v: string): boolean {
 /** The stored value of every architecture toggle, for the card's readout. */
 async function architectureState() {
   const entries = await Promise.all(
-    (Object.keys(ARCHITECTURE_KEYS) as (keyof typeof ARCHITECTURE_KEYS)[]).map(async (k) => ({
-      key: k,
-      value: (await getConfig(k).catch(() => undefined)) ?? "",
-      hint: ARCHITECTURE_KEYS[k].hint,
-    }))
+    (Object.keys(ARCHITECTURE_KEYS) as (keyof typeof ARCHITECTURE_KEYS)[]).map(async (k) => {
+      // FAIL DARK, like every other read on this screen. An unreadable vault
+      // used to collapse into "" and render as "unset (default)" - which for
+      // WABA_KILL reads as "not killed" and for TRANSPORT_MODE as "evolution".
+      // On the one card an owner opens to confirm what is live, a vault
+      // brownout looked identical to a healthy Evolution-only deployment.
+      let value = "";
+      let unreadable = false;
+      try {
+        value = (await getConfig(k)) ?? "";
+      } catch {
+        unreadable = true;
+      }
+      return { key: k, value, unreadable, hint: ARCHITECTURE_KEYS[k].hint };
+    })
   );
   return entries;
 }
@@ -52,7 +62,48 @@ export async function POST(req: Request) {
   const session = await requireOwner();
   if (!session) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
-  const body = (await req.json().catch(() => ({}))) as { key?: unknown; value?: unknown };
+  const body = (await req.json().catch(() => ({}))) as {
+    key?: unknown;
+    value?: unknown;
+    action?: unknown;
+    number?: unknown;
+  };
+
+  // THE PARTNER OPT-IN, WHICH EXISTED ONLY AS A COMMENT.
+  //
+  // admitLead refuses a cold template to any shop without `opted_in_at`, and
+  // the only writer of that column was an agency messaging the business number
+  // FIRST. So on funding day, with every key pasted and the flags flipped,
+  // every dispatchHandoff would answer `fallback-legacy/not-opted-in` and 100%
+  // of traffic would silently stay on Evolution - with no way to fix it but a
+  // hand-written INSERT. The "or the partner form" that schema.sql and
+  // leads.ts both promise is this.
+  //
+  // OWNER only, like every switch on this route: it authorises a cold template
+  // to a business on a rented account.
+  if (String(body.action ?? "") === "opt-in") {
+    const number = String(body.number ?? "").trim();
+    const { nationalTail } = await import("@/lib/wa/phone-key");
+    const tail = nationalTail(number);
+    if (!tail) return NextResponse.json({ error: "Not a usable phone number." }, { status: 400 });
+    const { recordAgencyOptIn, agencyOptedIn } = await import("@/lib/waba/leads");
+    const wrote = await recordAgencyOptIn(tail, number);
+    // HONEST WRITE: the read-back is the answer, never the request.
+    const stored = await agencyOptedIn(tail);
+    return NextResponse.json({
+      ok: wrote && stored,
+      optedIn: stored,
+      tail,
+      ...(stored
+        ? {}
+        : {
+            warning:
+              "The opt-in did not persist - waba_agencies is unwritable or has not been migrated.",
+          }),
+      architecture: await architectureState(),
+    });
+  }
+
   const key = String(body.key ?? "");
   const value = String(body.value ?? "").trim().toLowerCase();
   const spec = (ARCHITECTURE_KEYS as Record<string, { validate: (v: string) => boolean; hint: string }>)[key];
@@ -185,8 +236,22 @@ export async function GET() {
 
   const gov = await governorVerdict();
 
+  const { resolveSiteOrigin } = await import("@/lib/site");
+  const origin = await resolveSiteOrigin();
+
   return NextResponse.json({
     generatedAt: Date.now(),
+    // THE TWO URLS THE OWNER MUST PASTE INTO META, on the screen instead of in
+    // somebody's memory. Resolved from the vaulted APP_DOMAIN so a domain move
+    // needs no redeploy here either - and `linkBaseMatches` catches the silent
+    // killer: an approved template's button base that does not EQUAL
+    // WABA_LINK_BASE is rejected by Meta on every single send, with nothing on
+    // any screen to explain why.
+    setup: {
+      callbackUrl: `${origin}/api/webhooks/waba`,
+      expectedLinkBase: `${origin}/h`,
+      linkBaseMatches: c.linkBase === `${origin}/h`,
+    },
     connection: {
       enabled: c.enabled,
       dryRun: c.dryRun,

@@ -571,6 +571,66 @@ Keep the `GOOGLE_MAPS_API_KEY` in Keys and enable "Places API (New)".
 consents (enforced server-side), and disclaimers across the funnel. Set the real
 legal entity name in `OPERATOR_NAME` (`src/lib/legal.ts`) when you have one.
 
+## WhatsApp Business (WABA) go-live - the funded lane
+
+**Nothing here is needed for the beta.** The app ships 100% on Evolution: with
+`WABA_ENABLED` unset there is no reachable path to a Business-API send, and
+`TRANSPORT_MODE` defaults to `evolution`. This section is the day-you-get-funding
+checklist, and it is deliberately paste-and-flip: every value below is a vault
+key in **Admin -> Keys**, so none of it needs a redeploy.
+
+**Step 1 - get the two URLs.** Open **Admin -> WABA**. The "Paste these into
+Meta" card shows them, resolved from your `APP_DOMAIN`:
+
+- **Callback URL** - `https://<your-domain>/api/webhooks/waba`
+- **Template button base** - `https://<your-domain>/h`. The approved template's
+  button base must EQUAL this. The card turns red if `WABA_LINK_BASE` does not
+  match, because a mismatch is rejected on every send with no other symptom.
+
+**Step 2 - paste the keys** (Admin -> Keys, `messaging` scope):
+
+| Key | What it is |
+|---|---|
+| `WABA_PROVIDER` | `meta` (direct) or `reseller` |
+| `WABA_BASE_URL` | e.g. `https://graph.facebook.com/v20.0`, no trailing slash |
+| `WABA_API_KEY` | system-user token |
+| `WABA_SENDER_ID` | the phone-number id |
+| `WABA_ACCOUNT_ID` | the WhatsApp Business ACCOUNT id - lets the key test verify the template before you send |
+| `WABA_TEMPLATE_FIRST_CONTACT` | the approved template's NAME |
+| `WABA_TEMPLATE_LANGUAGE` | its LANGUAGE code exactly as Meta lists it (`en`, `en_US`, `th`). A mismatch is error 132001 on every send |
+| `WABA_LINK_BASE` | the button base from step 1 |
+| `WABA_WEBHOOK_SECRET` | the signing secret - for Meta this is the **app secret** |
+| `WABA_VERIFY_TOKEN` | any string you also type into Meta's callback form. Do NOT reuse the app secret: this value travels in a URL and lands in access logs |
+| `WABA_TIER_UNIQUE_PER_DAY`, `WABA_QUALITY_RATING` | your live tier and rating - the key test reports drift against Meta |
+| `WABA_DAILY_SPEND_CEILING_USD`, `WABA_TEMPLATE_COST_USD` | the spend governor |
+| `WABA_AGENCY_COOLDOWN_HOURS`, `WABA_HOLD_TIMEOUT_MINUTES`, `WABA_EXPECTATION_TTL_HOURS` | lane pacing |
+
+**Step 3 - press "Test" on the WABA keys.** The probe checks reachability, tier
+and quality drift, AND (with `WABA_ACCOUNT_ID` set) that your template name and
+language are actually APPROVED. Fix anything red before going further.
+
+**Step 4 - opt your partner shops in.** A cold first-contact template may only
+go to a shop that opted in. Use **Admin -> WABA -> "Opt a partner shop in"**;
+a shop that messages your business number opts itself in automatically.
+
+**Step 5 - rehearse.** Set `WABA_ENABLED=on` and leave `WABA_DRY_RUN=on` (its
+default). The whole funnel runs and logs the exact wire text without spending a
+single template. Watch the console.
+
+**Step 6 - go live.** Turn `WABA_DRY_RUN` off, then set `TRANSPORT_MODE` to
+`waba-fallback` (WABA only when the traveller has no Evolution link) or
+`waba-first`. Both taps are red on the Architecture card because both start a
+live sender.
+
+`WABA_KILL=on` is the emergency stop and halts every company-number send,
+first contact and service-window flush alike. Per-thread transport stamps always
+win over the flag, so flipping back to `evolution` never reroutes a conversation
+mid-flight - it only changes where the NEXT first contact goes. The reply leg is
+always the traveller's own wire, in every mode.
+
+`CLOUD_API_ENABLED` is the older, separate Cloud-API sender. It has no dry run
+and no governor - leave it off unless you know you want it.
+
 ## Setting your domain (one key, everywhere)
 
 The live domain is **`wheeldeal.pro`**, and the code default already matches it

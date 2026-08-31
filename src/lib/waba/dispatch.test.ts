@@ -9,6 +9,11 @@ let agencyRows: unknown = { rows: [] };
 /** The compliance gate's read (waba_agencies.opted_in_at). Defaults to opted
  *  in so the lane tests exercise the lanes; the gate has its own cases. */
 let optedIn = true;
+/** The TRAVELLER's consent to having their number disclosed to a shop. Same
+ *  shape as optedIn: granted by default so the lane tests reach the lanes, with
+ *  its own case below - it is the second compliance gate, and it is about the
+ *  person, not the business. */
+let numberSharing = true;
 const inserted: { table: string; rows: Record<string, unknown>[] }[] = [];
 const updated: { table: string; filter: string; values: Record<string, unknown> }[] = [];
 let nextLeadId = 1;
@@ -34,6 +39,11 @@ vi.mock("../runtime-config", () => ({
     updated.push({ table, filter, values });
     return true;
   },
+}));
+
+vi.mock("../consent", () => ({
+  consentFor: async (_e: string, kind: string) =>
+    kind === "number_sharing" ? numberSharing : true,
 }));
 
 const readCode = (p: string) =>
@@ -67,9 +77,43 @@ beforeEach(() => {
   inserted.length = 0;
   updated.length = 0;
   nextLeadId = 1;
+  optedIn = true;
+  numberSharing = true;
 });
 
 const HOUR = 3600_000;
+
+describe("the traveller's own consent gates the disclosure", () => {
+  it("EXECUTED: without number_sharing consent the lane falls back, it does not refuse", async () => {
+    // This lane hands a rental shop the traveller's WhatsApp number and invites
+    // an unsolicited inbound - the exact disclosure `number_sharing` records.
+    // Nothing read it before: the column and the ledger kind were both dead, so
+    // arming the lane disclosed a phone number with no provable consent.
+    //
+    // FALL BACK, never refuse. The enquiry still goes out on the traveller's
+    // own wire, so a missing record costs nobody their search.
+    config.WABA_ENABLED = "on";
+    config.WABA_DRY_RUN = "on";
+    numberSharing = false;
+    const { dispatchHandoff } = await import("./dispatch");
+    const out = await dispatchHandoff(INPUT);
+    expect(out.outcome).toBe("fallback-legacy");
+    expect(out.reason).toBe("no-number-sharing-consent");
+    // Nothing was written: no lead, no template claim, no spend.
+    expect(inserted).toHaveLength(0);
+  });
+
+  it("EXECUTED: the consent is checked BEFORE any budget is spent or read", async () => {
+    // Ordering matters: a governor refusal writes events and a lead write is a
+    // durable row. The consent question is about whether we may act at all.
+    config.WABA_ENABLED = "on";
+    config.WABA_KILL = "on";
+    numberSharing = false;
+    const { dispatchHandoff } = await import("./dispatch");
+    const out = await dispatchHandoff(INPUT);
+    expect(out.reason).toBe("no-number-sharing-consent");
+  });
+});
 
 describe("with the flag off the dispatcher steps aside entirely", () => {
   it("it returns the legacy fallback and writes nothing", async () => {

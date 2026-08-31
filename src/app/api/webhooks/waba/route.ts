@@ -46,8 +46,21 @@ export async function GET(req: Request) {
   const mode = url.searchParams.get("hub.mode");
   const token = url.searchParams.get("hub.verify_token");
   const challenge = url.searchParams.get("hub.challenge");
-  const secret = await getConfig("WABA_WEBHOOK_SECRET");
-  if (mode === "subscribe" && secret && token === secret && challenge) {
+  // THE VERIFY TOKEN IS NOT THE SIGNING SECRET, and conflating them was a real
+  // leak. Meta sends hub.verify_token as a URL QUERY PARAMETER, so whatever
+  // value sits here is written into every access log in the path - Cloud Run's,
+  // the load balancer's, any proxy's. This route demanded it EQUAL
+  // WABA_WEBHOOK_SECRET, which for a Meta-direct WABA is the app secret used to
+  // verify X-Hub-Signature-256 on every POST. So the only way to pass Meta's
+  // handshake was to publish the HMAC key.
+  //
+  // WABA_VERIFY_TOKEN is the arbitrary string typed into Meta's callback form.
+  // The fallback keeps an already-configured reseller (which usually signs
+  // nothing) working with no re-entry.
+  const verify =
+    ((await getConfig("WABA_VERIFY_TOKEN")) ?? "").trim() ||
+    ((await getConfig("WABA_WEBHOOK_SECRET")) ?? "").trim();
+  if (mode === "subscribe" && verify && token === verify && challenge) {
     return new NextResponse(challenge, { status: 200 });
   }
   return NextResponse.json({ error: "forbidden" }, { status: 403 });

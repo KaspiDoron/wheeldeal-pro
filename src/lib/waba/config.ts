@@ -43,6 +43,16 @@ export interface WabaConfig {
   senderId: string;
   templateFirstContact: string;
   templateReengage: string;
+  /**
+   * The approved template's LANGUAGE code, exactly as Meta lists it (`en`,
+   * `en_US`, `th`).
+   *
+   * It was hardcoded "en" at the send site, so an owner whose template was
+   * approved as en_US had no way to correct it without a redeploy - and every
+   * single template send answered error 132001. Unset keeps that old value, so
+   * this key is purely additive.
+   */
+  templateLanguage: string;
   linkBase: string;
   /** Renders and logs the exact wire text, sends nothing. Ships ON. */
   dryRun: boolean;
@@ -70,6 +80,7 @@ export async function wabaConfig(): Promise<WabaConfig> {
     senderId,
     templateFirstContact,
     templateReengage,
+    templateLanguage,
     linkBase,
     dryRun,
   ] = await Promise.all([
@@ -80,6 +91,7 @@ export async function wabaConfig(): Promise<WabaConfig> {
     getConfig("WABA_SENDER_ID"),
     getConfig("WABA_TEMPLATE_FIRST_CONTACT"),
     getConfig("WABA_TEMPLATE_REENGAGE"),
+    getConfig("WABA_TEMPLATE_LANGUAGE"),
     getConfig("WABA_LINK_BASE"),
     getConfig("WABA_DRY_RUN"),
   ]);
@@ -95,6 +107,7 @@ export async function wabaConfig(): Promise<WabaConfig> {
     senderId: (senderId ?? "").trim(),
     templateFirstContact: (templateFirstContact ?? "").trim(),
     templateReengage: (templateReengage ?? "").trim(),
+    templateLanguage: (templateLanguage ?? "").trim() || "en",
     linkBase: (linkBase ?? "").trim().replace(/\/+$/, ""),
     // DRY RUN SHIPS ON, and stays on until someone deliberately turns it off.
     // The whole pipeline is buildable and testable without spending a single

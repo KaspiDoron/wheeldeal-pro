@@ -97,6 +97,14 @@ const HELD_LEAD = {
 
 beforeEach(() => {
   for (const k of Object.keys(config)) delete config[k];
+  // A deployment that has NEVER pasted a WABA credential never reads
+  // waba_leads - that is the flag-off invariant, and it is what the beta runs
+  // as. These are rung-4 tests, so this deployment is one that HAS configured
+  // the lane; whether the switch is currently on is deliberately irrelevant,
+  // because a lane that was turned off (or killed mid-incident) still owes its
+  // held leads a re-dispatch on the traveller's own wire.
+  config.WABA_SENDER_ID = "s";
+  config.WABA_API_KEY = "k";
   heldRows = { rows: [] };
   expireResult = [{ id: 1 }];
   inserted.length = 0;
@@ -127,6 +135,32 @@ describe("the expiry claim is atomic - the flush and the sweep cannot both act",
     const out = await sweepExpiredHolds(Date.parse("2026-08-01T02:00:00Z"));
     expect(out).toEqual({ expired: 0, redispatched: 0 });
     expect(inserted.find((i) => i.table === "wa_outbox")).toBeUndefined();
+  });
+});
+
+describe("the sweep respects the flag-off invariant without stranding anything", () => {
+  it("EXECUTED: a deployment that never configured WABA reads no WABA table", async () => {
+    // waba/config.ts pins the invariant: with the lane unconfigured, no new
+    // table is read and no new request leaves the process. This sweep runs from
+    // the ping every five minutes, so it was quietly breaking that on every
+    // Evolution-only deployment.
+    for (const k of Object.keys(config)) delete config[k];
+    heldRows = { rows: [HELD_LEAD] };
+    const { sweepExpiredHolds } = await import("./dispatch");
+    const out = await sweepExpiredHolds(Date.parse("2026-08-01T02:00:00Z"));
+    expect(out).toEqual({ expired: 0, redispatched: 0 });
+    expect(inserted).toHaveLength(0);
+  });
+
+  it("EXECUTED: a lane switched OFF still re-dispatches its held leads", async () => {
+    // The gate is CONFIGURED, not enabled. Gating on the on/off switch would
+    // strand exactly the leads rung 4 exists to rescue - a held lead whose
+    // shop never answered, whose traveller is still waiting.
+    config.WABA_ENABLED = "off";
+    heldRows = { rows: [HELD_LEAD] };
+    const { sweepExpiredHolds } = await import("./dispatch");
+    const out = await sweepExpiredHolds(Date.parse("2026-08-01T02:00:00Z"));
+    expect(out).toEqual({ expired: 1, redispatched: 1 });
   });
 });
 

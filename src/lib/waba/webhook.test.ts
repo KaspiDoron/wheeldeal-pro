@@ -40,8 +40,18 @@ describe("the webhook authenticates before it acts", () => {
     expect(hook).toMatch(/if \(got\.length !== expected\.length\) return false;/);
   });
 
-  it("the verification handshake will not echo a challenge without the secret", () => {
-    expect(hook).toMatch(/mode === "subscribe" && secret && token === secret && challenge/);
+  it("the verification handshake will not echo a challenge without a verify token", () => {
+    // The property under test is unchanged: no configured value, no challenge
+    // echo. What changed is WHICH value - the verify token and the signing
+    // secret are now separate keys. Conflating them forced the owner to type
+    // the HMAC app secret into Meta's callback form, after which Meta sent it
+    // back as a URL QUERY PARAMETER on every re-verification, writing the
+    // signing key into every access log in the path.
+    expect(hook).toMatch(/mode === "subscribe" && verify && token === verify && challenge/);
+    expect(hook).toMatch(/getConfig\("WABA_VERIFY_TOKEN"\)/);
+    // The fallback keeps an already-configured reseller working with no
+    // re-entry - they usually sign nothing and set only the one key.
+    expect(hook).toMatch(/getConfig\("WABA_WEBHOOK_SECRET"\)\) \?\? ""\)\.trim\(\)/);
   });
 
   it("with the flag off it does no work but does not make the provider retry", () => {

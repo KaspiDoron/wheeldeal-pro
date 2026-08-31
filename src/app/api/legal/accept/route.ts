@@ -59,6 +59,26 @@ export async function POST(req: Request) {
       version: TERMS_VERSION,
       context: body.context,
     });
+    // ONE ACCEPTANCE ACTION, FOUR RECORDED CONSENTS.
+    //
+    // legal.ts documents the signup consents as collected through a single
+    // clearly-labelled action whose label names each of them - but only
+    // `terms` was ever written. So `consentFor(email, "number_sharing")` was
+    // false for every user alive, and the WABA handoff (which exists to hand a
+    // shop the traveller's number) had no provable consent for the one
+    // disclosure it makes. Best-effort siblings: a lost row must never bar
+    // somebody from the app, and the `terms` row above is the one that gates
+    // entry.
+    if (kind === "terms") {
+      for (const sibling of ["wa_risk", "ai_responsibility", "number_sharing"] as ConsentKind[]) {
+        await recordConsent({
+          email: session.email,
+          kind: sibling,
+          version: TERMS_VERSION,
+          context: { via: "terms-clickwrap" },
+        }).catch(() => false);
+      }
+    }
     // The three signup consents also carry a version on the user row, which is
     // what `needsReacceptance` reads on every entry.
     if (kind === "terms" || kind === "wa_risk" || kind === "ai_responsibility") {
