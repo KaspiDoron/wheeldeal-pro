@@ -555,6 +555,9 @@ export async function runGraphTurn(
           currency: input.currency,
           vehicleKey: vehicleKeyFor(input.rfq),
           belowPrice: f.pricePerDay!,
+          // Omitted, so every package-derived rival was dropped even when this
+          // rental covers the package - see the type's note.
+          durationDays: input.rfq.durationDays,
         })
         .catch(() => undefined);
     }
@@ -632,6 +635,12 @@ export async function runGraphTurn(
         });
     }
     let choice: DirectorChoice;
+    // SCOPE THE SESSION TABLE TO THE SAME MACHINE. This call passed no vehicle
+    // key at all, so the director's rival board could hold a price for a
+    // different machine entirely - a 150cc quoted in another thread, cited at a
+    // shop that quoted a 125cc. Leverage has to compare like with like.
+    const { vehicleKeyFor: sessionVehicleKeyFor } = await import("../market");
+    const sessionVehicleKey = sessionVehicleKeyFor(input.rfq);
     if (nodeOn("director")) {
       choice = await runDirector({
         input,
@@ -640,7 +649,12 @@ export async function runGraphTurn(
         legal,
         session:
           input.ctx.sender && io.llmAllowed
-            ? await io.sessionTable(input.ctx.sender, input.ctx.vendorId).catch(() => [])
+            ? await io
+                .sessionTable(input.ctx.sender, input.ctx.vendorId, sessionVehicleKey, {
+                  engineSizeCc: input.rfq.engineSizeCc,
+                  durationDays: input.rfq.durationDays,
+                })
+                .catch(() => [])
             : [],
         settings: spec.settings,
         instructions: nodesById.get("director")?.instructions ?? "",
@@ -1571,16 +1585,39 @@ export function liveGraphIO(send: LiveSend): GraphIO {
   return {
     loadState: loadThreadState,
     saveState: saveThreadState,
-    async cheapestRival({ userEmail, vendorId, currency, vehicleKey, belowPrice }) {
+    async cheapestRival({ userEmail, vendorId, currency, vehicleKey, belowPrice, durationDays }) {
       // REAL session boundary (latest search, 18h-clamped) + the shared pure
       // predicate - the same function the playground filters through, so
       // owner tests exercise production selection logic byte-for-byte.
       const { cheapestRivalFor } = await import("../search-session");
-      return cheapestRivalFor(userEmail, { vendorId, currency, vehicleKey, belowPrice });
+      return cheapestRivalFor(userEmail, {
+        vendorId,
+        currency,
+        vehicleKey,
+        belowPrice,
+        durationDays,
+      });
     },
-    async sessionTable(userEmail, thisVendorId, vehicleKey) {
-      const { sessionSinceIso } = await import("../search-session");
+    async sessionTable(userEmail, thisVendorId, vehicleKey, spec) {
+      const { sessionSinceIso, currentSession } = await import("../search-session");
       const since = await sessionSinceIso(userEmail);
+      // SCOPED BY SEARCH, NOT ONLY BY CLOCK.
+      //
+      // This filtered on user + vehicle + an 18h window and nothing else, while
+      // the sibling rival path enforces an exact `search_id` and calls that
+      // scoping "leak-proof where the 18h time window is not". Two hunts for
+      // the same vehicle class in different cities inside 18h therefore
+      // cross-contaminated the PRIMARY engine's leverage - a Krabi price cited
+      // at a Canggu shop. `search_id` has been on the offers table the whole
+      // time and this read ignored it.
+      //
+      // Null-tolerant: rows written before the column was populated have no id
+      // and must not vanish from a running hunt's board.
+      const session = await currentSession(userEmail).catch(() => null);
+      const sameSearch =
+        session?.id != null
+          ? `&or=(search_id.eq.${encodeURIComponent(String(session.id))},search_id.is.null)`
+          : "";
       // SAME VEHICLE OR IT IS NOT A RIVAL. Without this predicate a quote for a
       // different machine - another search inside the same window - could be
       // cited at a shop as a competing price for THIS one. Leverage has to
@@ -1614,7 +1651,7 @@ export function liveGraphIO(send: LiveSend): GraphIO {
         userEmail
       )}&simulated=eq.false&created_at=gte.${encodeURIComponent(
         since
-      )}${sameVehicle}&order=created_at.desc&limit=200`;
+      )}${sameVehicle}${sameSearch}&order=created_at.desc&limit=200`;
       const strictOffers = await sbSelectStrict<OfferRow>(
         "offers",
         `select=vendor_id,vendor_name,price_per_day,currency,duration_days,quote_basis_days${offerWhere}`
@@ -1768,7 +1805,7 @@ export function liveGraphIO(send: LiveSend): GraphIO {
           // negotiation a number nobody could book, and moved their floor to
           // match it. Only the panel honoured the flag; the two places that
           // turn a reading into a NUMBER did not (this one and /api/replies).
-          const { cheapestQuotable } = await import("../media/reading");
+          const { pickBoardPrice } = await import("../media/reading");
           const readRows = await sbSelect<{
             from_number: string | null;
             raw: {
@@ -1792,9 +1829,23 @@ export function liveGraphIO(send: LiveSend): GraphIO {
                 // ...and a message whose ONLY rows are struck out must not
                 // claim this shop, or the newest such message shadows an older
                 // one that really did carry a quotable board.
-                cheapestQuotable(m.raw?.reading?.prices) !== null
+                pickBoardPrice(
+                  m.raw?.reading?.prices,
+                  spec?.engineSizeCc ?? 0,
+                  spec?.durationDays ?? 0
+                ) !== null
             );
-            const cheapest = cheapestQuotable(read?.raw?.reading?.prices);
+            // THE SAME CELL THE CARD SHOWS. cheapestQuotable filters only
+            // crossed-out rows, so the cheapest LONG-STAY tier - a column a
+            // short traveller cannot buy - became this shop's rival price, and
+            // the cite-the-rival rail then obliged the agent to name it at
+            // another shop. Leverage has to compare like with like or it is
+            // fiction, and a tier the traveller cannot book is fiction.
+            const cheapest = pickBoardPrice(
+              read?.raw?.reading?.prices,
+              spec?.engineSizeCc ?? 0,
+              spec?.durationDays ?? 0
+            );
             if (cheapest && typeof cheapest.pricePerDay === "number" && cheapest.pricePerDay > 0) {
               rows.set(r.vendorId, {
                 ...r,
@@ -2002,17 +2053,20 @@ export function liveGraphIO(send: LiveSend): GraphIO {
       // drain's whole pipeline. One wait, bounded to a single lane window;
       // cold intros never wait (their minute-scale holds are the anti-ban
       // point, not an artefact).
-      if (
-        !claim.ok &&
-        claim.kind === "pacing" &&
-        isReplySend &&
-        typeof claim.retryAtMs === "number"
-      ) {
+      // A send crosses three lanes, so one wait clears at most one of them.
+      // Waiting once and giving up meant the ordinary case - several shops
+      // answering at once, losing the gap lane and then the fleet lane - parked
+      // anyway, having already spent the wait. Bounded per-loss AND in total,
+      // so a contended lane cannot hold this turn open indefinitely.
+      let inlineWaitBudgetMs = 12_000;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (!isReplySend || claim.ok || claim.kind !== "pacing") break;
+        if (typeof claim.retryAtMs !== "number") break;
         const waitMs = claim.retryAtMs - Date.now();
-        if (waitMs > 0 && waitMs <= 8_000) {
-          await new Promise((res) => setTimeout(res, waitMs + 120 + Math.random() * 380));
-          claim = await claimForSend(senderKey, toNumber, verdict.text, true, isReplySend);
-        }
+        if (!(waitMs > 0) || waitMs > 8_000 || waitMs > inlineWaitBudgetMs) break;
+        inlineWaitBudgetMs -= waitMs;
+        await new Promise((res) => setTimeout(res, waitMs + 120 + Math.random() * 380));
+        claim = await claimForSend(senderKey, toNumber, verdict.text, true, isReplySend);
       }
       if (!claim.ok) {
         if (claim.kind === "duplicate") {
@@ -2022,13 +2076,24 @@ export function liveGraphIO(send: LiveSend): GraphIO {
             finalText: verdict.text,
           };
         }
-        const { jitteredHold } = await import("../wa/pacing");
-        // Lane-proportional: the lane a REPLY lost is measured in seconds (5s
-        // per-shop gap, fleet slot), so it re-parks 20-40s out; a cold intro
-        // keeps the minute-scale hold - velocity to new numbers is the ban
-        // vector, and its lane is 12s+ anyway.
+        const { jitteredHold, RECIPIENT_LOCK_SEC } = await import("../wa/pacing");
+        // LANE-PROPORTIONAL, AND THIS IS THE PATH THAT CARRIES THE REPLY.
+        //
+        // Wave 8's own reasoning - the lanes a reply loses are measured in
+        // SECONDS, so anything beyond them is invented latency - was applied to
+        // the drain and not here, on the INLINE path SPTE actually uses. So the
+        // penalty stack the wave says it killed was still 20-40s for losing a
+        // <=8s lane. The park is now sized to the lane, like the drain's, and
+        // uses the refusing lane's own free-at instant when it named one.
+        // A cold intro keeps the minute-scale hold: velocity to new numbers is
+        // the ban vector, and that lane is 12s+ anyway.
+        const replyParkMs =
+          typeof claim.retryAtMs === "number"
+            ? Math.max(2_000, Math.min(30_000, claim.retryAtMs - Date.now())) +
+              Math.round(Math.random() * 3_000)
+            : RECIPIENT_LOCK_SEC * 1000 + 2_000 + Math.round(Math.random() * 4_000);
         const notBefore = isReplySend
-          ? new Date(Date.now() + 20_000 + Math.round(Math.random() * 20_000)).toISOString()
+          ? new Date(Date.now() + replyParkMs).toISOString()
           : jitteredHold(Date.now(), 1, 2);
         // parkOutboxOnce, NOT a raw insert: the partial unique index rejects a
         // second pending auto row for this (shop, kind), and the bare insert
@@ -2529,14 +2594,18 @@ export async function buildTurnFromThread(
   // vendor. `extraction` stays null: that really is "no new information", and
   // conflating the two is what produced the bug.
   let threadPrice: number | undefined;
+  let storedCurrency: string | null = null;
   if (ctx.sender && ctx.vendorId) {
-    const priced = await sbSelect<{ price_per_day: number | string | null }>(
+    const priced = await sbSelect<{ price_per_day: number | string | null; currency?: string | null }>(
       "offers",
-      `select=price_per_day&user_email=eq.${encodeURIComponent(ctx.sender)}` +
+      // `currency` rides along - the row's own resolved currency is the
+      // strongest evidence there is, and this read ignored it.
+      `select=price_per_day,currency&user_email=eq.${encodeURIComponent(ctx.sender)}` +
         `&vendor_id=eq.${encodeURIComponent(ctx.vendorId)}` +
         `&order=created_at.desc&limit=1`
     ).catch(() => []);
     const n = Number(priced[0]?.price_per_day);
+    storedCurrency = (priced[0]?.currency as string | undefined) ?? null;
     // A missing or unreadable offer leaves it undefined - the state this code
     // had unconditionally, so the failure direction is exactly today's
     // behaviour rather than a worse one.
@@ -2545,10 +2614,26 @@ export async function buildTurnFromThread(
 
   const rfq = resolved.rfq; // non-null: guarded by `if (!resolved.rfq) return null`
   const { floorPriceFor } = await import("../market");
-  const { currencyForRegion } = await import("../agents");
-  const cur = currencyForRegion(ctx.region || undefined) || "USD";
-  const floor = await floorPriceFor(ctx.region || undefined, rfq).catch(() => null);
-  const floorSameCur = floor && floor.currency === cur ? floor : null;
+  // NOT `currencyForRegion(region) || "USD"`.
+  //
+  // currencyForRegion returns null for every label the geocoder actually
+  // produces - "Ao Nang", "Krabi", "Canggu", "Da Nang", "Siargao", a raw
+  // "8.0000, 98.0000" - so this resolved USD on the tick and user-action paths.
+  // That USD then became SPTE's session currency, went into the prompt the
+  // model composes from ("they have already quoted 250 USD/day"), went out on
+  // the WIRE in the next bargain, and OVERWROTE the thread's correct stored
+  // currency. The shared chain prefers what the thread already resolved, then
+  // the region, then the shop's phone prefix, and leaves it UNDEFINED rather
+  // than inventing dollars.
+  const { resolveLocalCurrency } = await import("../local-currency");
+  const cur = await resolveLocalCurrency({
+    stored: storedCurrency,
+    region: ctx.region,
+    shopDigits: toDigits,
+  });
+  const floorRegion = ctx.region || undefined;
+  const floor = await floorPriceFor(floorRegion, rfq).catch(() => null);
+  const floorSameCur = floor && cur && floor.currency === cur ? floor : null;
 
   return {
     event: {
@@ -2570,7 +2655,10 @@ export async function buildTurnFromThread(
     // ...but the price the thread already established is not new information
     // either - it is the standing fact the wait was scheduled around.
     usablePrice: threadPrice,
-    currency: cur,
+    // Empty rather than a fabricated "USD": every money renderer treats a
+    // falsy code as unknown and prints a bare number with a chip, which is
+    // honest. A wrong symbol is the trust-killer the owner reported.
+    currency: cur ?? "",
     floorPrice: floorSameCur?.floor,
     floorTypical: floorSameCur?.typical ?? undefined,
     sessionClosed,

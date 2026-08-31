@@ -536,9 +536,12 @@ export async function GET(req: Request) {
     case "WABA_BASE_URL":
     case "WABA_API_KEY":
     case "WABA_SENDER_ID":
+    case "WABA_ACCOUNT_ID":
     case "WABA_WEBHOOK_SECRET":
+    case "WABA_VERIFY_TOKEN":
     case "WABA_TEMPLATE_FIRST_CONTACT":
     case "WABA_TEMPLATE_REENGAGE":
+    case "WABA_TEMPLATE_LANGUAGE":
     case "WABA_LINK_BASE":
     case "WABA_QUALITY_RATING":
     case "WABA_TIER_UNIQUE_PER_DAY":
@@ -578,6 +581,14 @@ export async function GET(req: Request) {
         } catch {
           shapeProblems.push("WABA_LINK_BASE is not a valid URL");
         }
+      }
+      // A locale, not a language. Meta stores an approved template under the
+      // exact code it was created with, and anything else is 132001 on every
+      // send - a failure whose message names no key.
+      if (!/^[a-z]{2}(_[A-Z]{2})?$/.test(c.templateLanguage)) {
+        shapeProblems.push(
+          `WABA_TEMPLATE_LANGUAGE "${c.templateLanguage}" is not a Meta locale (en, en_US, th)`
+        );
       }
       if (shapeProblems.length) {
         result = { ok: false, detail: [...lines, `Shape: ${shapeProblems.join("; ")}.`].join("\n") };
@@ -646,6 +657,44 @@ export async function GET(req: Request) {
         } else if (storedTier) {
           lines.push(
             `Messaging tier: ${storedTier}/24h from the vault - the provider did not report one, so this number is owner-maintained and can drift.`
+          );
+        }
+        // THE TEMPLATE CHECK, WHICH NOTHING COULD DO. The phone-number probe
+        // above proves the credentials; only the ACCOUNT node can prove that
+        // the template name and its language are approved - the two values
+        // that decide whether the very first real send is a 132001, and the
+        // one failure this console previously had no way to predict.
+        const wabaId = ((await getConfig("WABA_ACCOUNT_ID")) ?? "").trim();
+        if (c.provider === "meta" && wabaId && c.templateFirstContact) {
+          const tRes = await fetch(
+            `${c.baseUrl}/${wabaId}/message_templates?name=${encodeURIComponent(
+              c.templateFirstContact
+            )}&limit=20`,
+            { headers: { Authorization: `Bearer ${c.apiKey}` }, cache: "no-store" }
+          );
+          const td = (await tRes.json().catch(() => ({}))) as {
+            data?: { name?: string; language?: string; status?: string }[];
+          };
+          const hits = (td.data ?? []).filter((t) => t.name === c.templateFirstContact);
+          const exact = hits.find((t) => t.language === c.templateLanguage);
+          lines.push(
+            !tRes.ok
+              ? `TEMPLATE: could not be checked (HTTP ${tRes.status}) - WABA_ACCOUNT_ID or the token's scope may be wrong.`
+              : !hits.length
+                ? `TEMPLATE: "${c.templateFirstContact}" does not exist on this account.`
+                : !exact
+                  ? `TEMPLATE: "${c.templateFirstContact}" exists in ${hits
+                      .map((t) => t.language)
+                      .join(", ")} - NOT in ${c.templateLanguage}. Every send would answer 132001. Set WABA_TEMPLATE_LANGUAGE to one of those.`
+                  : exact.status === "APPROVED"
+                    ? `TEMPLATE: "${c.templateFirstContact}"/${c.templateLanguage} is APPROVED.`
+                    : `TEMPLATE: "${c.templateFirstContact}"/${c.templateLanguage} is ${
+                        exact.status ?? "in an unknown state"
+                      } - not sendable yet.`
+          );
+        } else if (c.provider === "meta" && !wabaId) {
+          lines.push(
+            "TEMPLATE: unverified - set WABA_ACCOUNT_ID to confirm the template name and language are approved BEFORE the first real send."
           );
         }
         result = { ok: true, detail: lines.join("\n") };
@@ -726,9 +775,26 @@ export async function GET(req: Request) {
         result = { ok: false, detail: "A Google App Password is 16 characters (spaces are ignored). Generate one at myaccount.google.com/apppasswords." };
         break;
       }
-      result = gu
-        ? { ok: true, detail: "Format OK (16 chars). Live SMTP is verified on the first email sent." }
-        : { ok: false, detail: "Set GMAIL_USER (your Gmail address) as well." };
+      if (!gu) {
+        result = { ok: false, detail: "Set GMAIL_USER (your Gmail address) as well." };
+        break;
+      }
+      // A LIVE AUTH, not a character count. This said "Format OK (16 chars)"
+      // and deferred the real answer to "the first email sent" - which is a
+      // traveller's signup code. A revoked App Password is exactly 16
+      // characters, so the one failure that matters passed the test and
+      // surfaced as a person unable to receive their code. emailLiveProbe
+      // opens the real SMTP session and AUTHs without sending anything, so
+      // this is safe to press repeatedly; it already backs the Health tile.
+      const { emailLiveProbe } = await import("@/lib/email");
+      const probes = await emailLiveProbe();
+      const gmail = probes.find((x) => x.provider === "gmail");
+      result = gmail?.live
+        ? { ok: true, detail: gmail.detail }
+        : {
+            ok: false,
+            detail: gmail?.detail ?? "The live SMTP check could not be run.",
+          };
       break;
     }
     case "EVOLUTION_PROXY": {

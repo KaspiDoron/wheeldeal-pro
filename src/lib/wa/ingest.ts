@@ -1474,6 +1474,14 @@ export async function processEvolutionWebhook(
   // at once stalls everything". Scope each drain to a sender this batch actually
   // touched (replyOnly - the cold lane is driven by the tick kick below), and
   // bound both under a 3s race so a slow host delays only its own thread.
+  // A RACE DOES NOT CANCEL. Promise.race resolves the awaiter and leaves the
+  // loser RUNNING - and on Cloud Run the container's CPU is throttled to ~0 the
+  // instant the response flushes (lib/after.ts says so in as many words). A
+  // detached drain freezes mid-flight holding claimOutboxRow leases, and those
+  // rows are then invisible and unsendable for the full 3-minute lease: the
+  // owner's "replies queueing for minutes", caused by the very code meant to
+  // deliver them fast. So the drain carries its OWN deadline that matches the
+  // race, instead of running to its 45s default behind it.
   const DRAIN_BUDGET_MS = 3_000;
   const boundedDrain = <T,>(p: Promise<T>) =>
     Promise.race([p, new Promise((r) => setTimeout(r, DRAIN_BUDGET_MS))]);
@@ -1484,6 +1492,7 @@ export async function processEvolutionWebhook(
         drainOutbox((senderKey, to, text, lane) => sendFromUser(senderKey, to, text, true, { lane }), {
           replyOnly: true,
           senderKey: sender,
+          budgetMs: DRAIN_BUDGET_MS,
         }).catch(() => 0)
       );
     } catch {

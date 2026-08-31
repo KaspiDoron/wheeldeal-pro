@@ -221,8 +221,12 @@ export function EngineInspector() {
         {health?.guardCounters &&
           Object.values(health.guardCounters).some((n) => n === null || (n ?? 0) > 0) && (
             <div className="rounded-2xl border border-line bg-card p-3">
+              {/* The window is whatever /api/admin/health measures - 24h
+                  (health/route.ts sinceIso). This label said 6h, so the exact
+                  same integer read four times worse here than on the Health
+                  panel, which labels the identical payload "(24h)". */}
               <div className="mb-2 text-[12px] font-extrabold uppercase text-soft">
-                Refused in the last 6h
+                Refused in the last 24h
               </div>
               <div className="flex flex-wrap gap-1.5">
                 {Object.entries(health.guardCounters)

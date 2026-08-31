@@ -123,11 +123,19 @@ describe("every >2min hold a reply could hit is now lane-proportional", () => {
     );
   });
 
-  it("5. the inline claim-loss re-park is 20-40s for a reply, minutes for cold", () => {
+  it("5. the inline claim-loss re-park is sized to the LANE, minutes for cold", () => {
     const engine = readCode("src/lib/graph/engine.ts");
-    expect(engine).toMatch(
-      /const notBefore = isReplySend\s*\?\s*new Date\(Date\.now\(\) \+ 20_000 \+ Math\.round\(Math\.random\(\) \* 20_000\)\)\.toISOString\(\)\s*:\s*jitteredHold\(Date\.now\(\), 1, 2\)/
-    );
+    // W12h: this pinned a flat 20-40s, which was itself the defect. Wave 8's
+    // own reasoning - the lanes a reply loses are measured in SECONDS, so
+    // anything beyond them is invented latency - had been applied to the drain
+    // and NOT to this inline path, the one SPTE actually uses for a live reply.
+    // The park now uses the refusing lane's own free-at instant, and falls back
+    // to the recipient mutex's length rather than to a flat guess.
+    expect(engine).toMatch(/const replyParkMs =/);
+    expect(engine).toMatch(/Math\.max\(2_000, Math\.min\(30_000, claim\.retryAtMs - Date\.now\(\)\)\)/);
+    expect(engine).toMatch(/RECIPIENT_LOCK_SEC \* 1000 \+ 2_000/);
+    // Cold intros keep the minute-scale hold - unchanged, and load-bearing.
+    expect(engine).toMatch(/: jitteredHold\(Date\.now\(\), 1, 2\)/);
   });
 });
 

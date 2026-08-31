@@ -66,7 +66,12 @@ describe("the card renders from the vocabulary, not from its own strings", () =>
   const card = readCode("src/components/VendorCard.tsx");
 
   it("one badge element, driven by the shared entry", () => {
-    expect(card).toMatch(/const badge = offerBadge\(\{ stance, verified: offer\?\.verified \}\);/);
+    // W12d: the call gained `pendingChoice` - a parked substitution is the
+    // traveller's decision, and UNVERIFIED's copy ("it resolves itself") was
+    // the opposite of true while the thread sat waiting on them.
+    expect(card).toMatch(/const badge = offerBadge\(\{/);
+    expect(card).toMatch(/stance,\s*\n\s*verified: offer\?\.verified,/);
+    expect(card).toMatch(/pendingChoice: Boolean\(offer\?\.alternativeOffer\)/);
     expect(card).toMatch(/\{t\(badge\.label\)\}/);
   });
 

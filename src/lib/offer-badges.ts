@@ -14,7 +14,7 @@
 // ONE VOCABULARY, so the badge and its explanation cannot drift: the label the
 // card renders and the sentence the tooltip shows come from the same entry.
 
-export type OfferStance = "mismatch" | "confirming" | "verified" | "quote";
+export type OfferStance = "mismatch" | "similar" | "confirming" | "verified" | "quote";
 
 export interface OfferBadge {
   /** Stable id - the InfoTip's single-open key, and the test's anchor. */
@@ -48,6 +48,19 @@ export const OFFER_BADGES: Record<OfferStance, OfferBadge> = {
       "The price is real and lockable. Your agent is asking the shop to confirm exactly which model it covers, and this badge flips to VERIFIED on its own when it answers.",
     next: "Nothing to do - it resolves itself, usually within a few minutes.",
   },
+  // A SUBSTITUTE THE SHOP OFFERED, waiting on the traveller's Yes/No. Distinct
+  // from `mismatch`, which is a shop quoting the wrong bike by accident or
+  // misunderstanding: this shop is actively trying to do business, and the
+  // traveller has a decision in front of them. Two documents credited this tag
+  // as shipped and it did not exist - the substitute simply wore UNVERIFIED,
+  // which reads as "resolves itself" over a choice only a person can make.
+  similar: {
+    id: "similar",
+    label: "SIMILAR VEHICLE",
+    what:
+      "This shop does not have the exact vehicle you asked for, and offered a close alternative instead. The price is real - it is just for a different machine, so it is not counted as your best deal.",
+    next: "Say Yes or No on the card. Your agent has paused this conversation until you do.",
+  },
   mismatch: {
     id: "mismatch",
     label: "DIFFERENT VEHICLE",
@@ -67,8 +80,15 @@ export const OFFER_BADGES: Record<OfferStance, OfferBadge> = {
 export function offerBadge(input: {
   stance?: string | null;
   verified?: boolean | null;
+  /** A substitution is parked on this thread, waiting on the traveller. */
+  pendingChoice?: boolean | null;
 }): OfferBadge {
-  if (input.stance === "mismatch") return OFFER_BADGES.mismatch;
+  if (input.stance === "mismatch") {
+    // A parked substitution is its own state - the shop offered something, and
+    // the traveller has a Yes/No to make. `mismatch` copy says the agent is
+    // handling it, which is false while the thread is paused on them.
+    return input.pendingChoice ? OFFER_BADGES.similar : OFFER_BADGES.mismatch;
+  }
   if (input.stance === "confirming") return OFFER_BADGES.confirming;
   return input.verified ? OFFER_BADGES.verified : OFFER_BADGES.quote;
 }

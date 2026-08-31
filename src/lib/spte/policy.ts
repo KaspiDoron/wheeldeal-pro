@@ -82,19 +82,31 @@ export function legalMovesFor(ctx: TurnContext): MoveKind[] {
   // vehicle class. It used to fire on "unclear" too, which is how a shop
   // answering "Normal scooters? Some models 200 and some new 250/day" got a
   // goodbye instead of a question.
+  // A PENDING CHOICE PAUSES THE THREAD, WHATEVER SIGNAL FOUND IT.
+  //
+  // This lived INSIDE `if (v.wrongVehicle)`, and wrongVehicle is the pre-union
+  // signal only (`vehicleVerdict === "mismatch"` or `matchesSpec === false`).
+  // The whole point of the trigger union is the case where NEITHER fires - the
+  // shop says "no Click, only Nmax" with matchesSpec true and the verdict
+  // "unclear" - so on exactly the case the union exists for, the pause was
+  // unreachable and the agent kept haggling for a vehicle the shop had said it
+  // did not have, while the traveller's Yes/No sat unanswered on the card. The
+  // shipped copy promises the opposite in as many words: "the thread is paused
+  // while this sits here; the agent haggles nothing until the traveller
+  // answers."
+  //
+  // Its own rung now, keyed on the parked choice alone. The TTL that stops a
+  // stale choice holding the thread forever lives in vehicle/substitution.ts,
+  // and the digest applies it before this ever sees it.
+  if (ctx.thread.digest.alternativeOffer) {
+    moves.push("silent");
+    return dedupe(moves);
+  }
+
   if (v.wrongVehicle) {
-    // A SHOP THAT OFFERS SOMETHING ELSE IS NOT A SHOP THAT SAID NO.
-    //
-    // While a substitution choice is waiting on the traveller, this thread
-    // goes SILENT rather than closing. Haggling someone else's bike, or
-    // thanking a shop that is actively trying to do business, are both wrong
-    // answers to "no 125 today, but I have a 150 for 220". The decision rules
-    // (and the TTL that stops a stale choice holding the thread forever) live
-    // in vehicle/substitution.ts.
-    if (ctx.thread.digest.alternativeOffer) {
-      moves.push("silent");
-      return dedupe(moves);
-    }
+    // A SHOP THAT OFFERS SOMETHING ELSE IS NOT A SHOP THAT SAID NO - handled
+    // by the rung above. Reaching here means a mismatch with NO parked choice:
+    // the shop named a different vehicle and offered nothing to decide on.
     moves.push(hasClosed(ctx) ? "silent" : "redirect-close");
     return dedupe(moves);
   }

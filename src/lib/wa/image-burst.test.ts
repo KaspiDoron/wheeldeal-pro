@@ -278,8 +278,18 @@ describe("a board photographed in thread A is leverage in thread B", () => {
     // renting - and this table is quoted AT other shops as "another shop does
     // 150", so one strike moved every rival negotiation's floor.
     const engine = readCode("src/lib/graph/engine.ts");
-    expect(engine).toMatch(/const cheapest = cheapestQuotable\(read\?\.raw\?\.reading\?\.prices\)/);
-    expect(engine).toMatch(/cheapestQuotable\(m\.raw\?\.reading\?\.prices\) !== null/);
+    // W12f: THIS TEST PINNED THE DEFECT IN PLACE. It asserted the RIVAL path
+    // used `cheapestQuotable`, which filters ONLY crossed-out rows - while the
+    // three assertions below it correctly demanded the CARD path pick through
+    // cc and duration. So the cheapest LONG-STAY tier, a column a short
+    // traveller cannot buy, became this shop's cross-thread rival price, and
+    // the cite-the-rival rail then obliged the agent to name it at another
+    // shop. pickBoardPrice's own docstring names that exact victim. Both paths
+    // pick the same cell now.
+    expect(engine).toMatch(/const cheapest = pickBoardPrice\(/);
+    expect(engine).toMatch(/spec\?\.engineSizeCc \?\? 0/);
+    expect(engine).toMatch(/spec\?\.durationDays \?\? 0/);
+    expect(engine).not.toMatch(/cheapestQuotable/);
     expect(engine).not.toMatch(/reading\?\.prices\?\.\[0\]/);
     // ...and the card-facing route picks through the same shared arithmetic -
     // now via the ONE effective-price resolver (owner report 6 D2), which

@@ -32,6 +32,10 @@ vi.mock("../wa-guard", () => ({
 vi.mock("../search-session", () => ({
   sessionSinceIso: async () => new Date(1_700_000_000_000 - 3 * 3600_000).toISOString(),
   cheapestRivalFor: async () => undefined,
+  // W12f: the session table is scoped by search_id now, not by the clock alone
+  // - two hunts for the same vehicle class inside 18h used to cross-contaminate
+  // the primary engine's leverage. These rows all belong to one hunt.
+  currentSession: async () => ({ id: 1 }),
 }));
 
 import { planSiblingRebargain, MAX_FANOUT, STAGGER_MIN, FIRST_DELAY_MIN } from "./rebargain";

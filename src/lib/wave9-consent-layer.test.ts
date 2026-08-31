@@ -248,7 +248,12 @@ describe("legal text and plumbing agree", () => {
   const legal = read("src/lib/legal.ts");
 
   it("TERMS_VERSION was bumped so every user re-accepts the rewritten policy", () => {
-    expect(legal).toMatch(/TERMS_VERSION = "2026-08-30"/);
+    // Bumped again 2026-08-31 (beta-30 wave): section 2 now discloses the
+    // messaging layer's transient copy of messages on the linked number. The
+    // pin follows the CURRENT version - what it guards is that the version
+    // MOVES whenever the policy text does, since needsReacceptance is the
+    // only thing that walks existing users through new terms.
+    expect(legal).toMatch(/TERMS_VERSION = "2026-08-31"/);
   });
 
   it("section 8 replaced the blanket 'not sold' with the honest carve-out", () => {

@@ -52,6 +52,15 @@ function ownerEmailLocal(): string {
   return (process.env.OWNER_EMAIL || "kaspidoron@gmail.com").trim().toLowerCase();
 }
 
+/**
+ * The owner's address, normalised. Exported for surfaces that must EXCLUDE the
+ * owner from a population - the monetization panel's stall buckets, where an
+ * account the warm-up gate does not apply to is not a stalled account.
+ */
+export function ownerEmail(): string {
+  return ownerEmailLocal();
+}
+
 /** The gate is ON unless explicitly disabled - safe by default for the beta. */
 export function betaLockEnabled(): boolean {
   return (process.env.BETA_LOCK ?? "on").trim().toLowerCase() !== "off";
@@ -113,8 +122,17 @@ export async function betaAllowlist(): Promise<BetaEntry[]> {
 /** The invited plan for an email, or null when the email is NOT allowed. */
 export async function allowedPlanFor(email: string): Promise<PlanId | null> {
   const key = email.trim().toLowerCase();
-  if (!betaLockEnabled()) return "free"; // gate off: anyone allowed (no pin)
   if (key === ownerEmailLocal()) return "ultra";
+  if (!betaLockEnabled()) {
+    // Gate off: anyone may enter - but a LISTED account keeps its listed plan.
+    // The old unconditional "free" here meant flipping BETA_LOCK off actively
+    // DOWNGRADED every invited pro/ultra tester: the login routes pin
+    // `invitedPlan` with setPlan on every sign-in, so the moment the gate
+    // opened, each listed tester's next login overwrote their paid tier with
+    // free. Opening the doors must never demote the people already inside.
+    const listed = (await betaAllowlist()).find((e) => e.email === key);
+    return listed ? listed.plan : "free";
+  }
   const hit = (await betaAllowlist()).find((e) => e.email === key);
   return hit ? hit.plan : null;
 }

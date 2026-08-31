@@ -49,7 +49,7 @@ export interface RateExpr {
 // ONE source for the currency vocabulary - price-extract.ts imports these
 // instead of keeping a drifting copy (the two lists disagreeing is how a
 // pattern fix lands in one engine and not the other).
-export const CUR_SYM = "[$€฿₱₹₫]";
+export const CUR_SYM = "[$€฿₱₹₫₩₪﷼៛₭]";
 export const CUR_WORDS =
   "usd|idr|rp|eur|thb|rm|php|inr|vnd|myr|aud|nzd|sgd|mxn|try|ils|zar|brl|mad|egp|lkr|npr|twd|jpy|krw" +
   // The MISSPELLINGS shops actually type. "Special price 900 bath for 4 day"
@@ -57,7 +57,30 @@ export const CUR_WORDS =
   // the structural tail (capped at 3) could not save it, and the price
   // vanished from the card. Spelling is not meaning - the vocabulary's job is
   // to recognize what people write, not what dictionaries prefer.
-  "|baht|bath|bht|pesos?|piso|rupiah|rupees?|dong|ringgit|dollars?|euros?|shekels?|dirhams?";
+  "|baht|bath|bht|pesos?|piso|rupiah|rupees?|dong|ringgit|dollars?|euros?|shekels?|dirhams?" +
+  // NATIVE-SCRIPT MONEY WORDS.
+  //
+  // Every entry above is Latin, and this app's biggest markets do not type in
+  // Latin. Executed against fourteen real phrasings from Thailand, Vietnam and
+  // Indonesia, the readers returned NOTHING for all fourteen - including
+  // "250฿/วัน", where the ฿ was recognised and the unit word beside it was not.
+  // The digit fold that turns ๒๕๐ into 250 was already wired and inert for the
+  // same reason: a folded number next to an unreadable unit is still not a rate.
+  //
+  // Written without \b guards on purpose: word boundaries are defined for Latin
+  // letters, and Thai script has no spaces between words.
+  "|บาท|฿|ดอง|đồng|dồng|nghìn|nghin|ngàn|ngan|rupiah|ribu|rb|juta|jt|kip|riel|រៀល|piso|₱";
+/**
+ * DAY / WEEK / MONTH in the languages the shops actually write in.
+ *
+ * The unit half of a rate was English-only (`days?|weeks?|months?`), which is
+ * why "250 บาท/วัน", "150k/ngày" and "70rb/hari" all read as no rate at all.
+ * Each group is its own alternation so the unit's MEANING survives - a Thai
+ * "เดือน" has to divide as a month, not be lumped in with days.
+ */
+export const DAY_WORDS_NATIVE = "วัน|ngày|ngay|hari|arawa?|araw|dia|día|ngày";
+export const WEEK_WORDS_NATIVE = "สัปดาห์|อาทิตย์|tuần|tuan|minggu|linggo|semana";
+export const MONTH_WORDS_NATIVE = "เดือน|tháng|thang|bulan|buwan|mes";
 // Letter boundaries are not optional - "rp" in "airport", "mad" in "nomad".
 export const CUR_LEAD = `${CUR_SYM}|\\b(?:${CUR_WORDS})(?![a-z])`;
 export const CUR_TRAIL = `${CUR_SYM}|(?:${CUR_WORDS})(?![a-z])`;
@@ -78,14 +101,57 @@ export const CUR_TAIL_GENERIC = `(?!(?:${RESERVED_TAIL})(?![a-z]))[a-z]{1,3}\\.?
 
 // What can stand between the money and the unit. Up to three because shops type
 // "600.-/DAY" as one token, and dropping any of them loses the whole rate.
-const SEP = `(?:[-/.@]|per\\b|each\\b|a\\b)`;
+// "per" in the languages the shops write in: ต่อ (Thai), một/mỗi (Vietnamese),
+// kada/sa (Filipino), setiap (Indonesian/Malay), por (Spanish). Without them
+// "ราคา 250 บาท ต่อ วัน" and "500 pesos kada araw" read as no rate at all.
+const SEP = `(?:[-/.@]|per\\b|each\\b|a\\b|ต่อ|một|mot|mỗi|moi|kada|setiap|por\\b|sa\\b)`;
 
-const UNIT = `(days?|d(?![a-z])|24\\s*h(?:rs?|ours?)?|weeks?|wks?(?![a-z])|months?|mths?(?![a-z]))`;
+/**
+ * THOUSANDS AND MILLIONS WRITTEN AS A SUFFIX.
+ *
+ * "150k", "70rb", "200 ribu", "2jt" are how prices are written in Vietnam and
+ * Indonesia - and reading "70rb/hari" as SEVENTY was worse than reading
+ * nothing: a 70-rupiah scooter is a phantom bargain that would have won BEST
+ * PRICE against every real quote. The suffix is part of the number.
+ */
+const MAGNITUDE: Record<string, number> = {
+  k: 1_000,
+  rb: 1_000,
+  ribu: 1_000,
+  nghin: 1_000,
+  "nghìn": 1_000,
+  ngan: 1_000,
+  "ngàn": 1_000,
+  jt: 1_000_000,
+  juta: 1_000_000,
+  tr: 1_000_000,
+  trieu: 1_000_000,
+  "triệu": 1_000_000,
+  m: 1_000_000,
+};
+const MAG_WORDS = Object.keys(MAGNITUDE)
+  .sort((a, b) => b.length - a.length)
+  .join("|");
+export const MAGNITUDE_TAIL = `(?:${MAG_WORDS})`;
+
+/** Apply a magnitude suffix to a parsed amount, when one sits beside it. */
+export function applyMagnitude(amount: number, suffix: string | undefined): number {
+  if (!suffix) return amount;
+  const mult = MAGNITUDE[suffix.trim().toLowerCase()];
+  // `m` is only a million when it is glued to a NUMBER; on its own it is the
+  // month unit, which the caller has already separated out by group.
+  return mult ? amount * mult : amount;
+}
+
+const UNIT =
+  `(days?|d(?![a-z])|24\\s*h(?:rs?|ours?)?|${DAY_WORDS_NATIVE}` +
+  `|weeks?|wks?(?![a-z])|${WEEK_WORDS_NATIVE}` +
+  `|months?|mths?(?![a-z])|${MONTH_WORDS_NATIVE})`;
 
 // 1 currency-lead | 2 amount | 3 currency-trail (known word OR structural
 // marker tail) | 4 separators | 5 quantity | 6 unit
 const RATE = new RegExp(
-  `(${CUR_LEAD})?\\s*(${NUM})\\s*(${CUR_TRAIL}|${CUR_TAIL_GENERIC})?\\s*((?:${SEP}\\s*){0,3})(?:(\\d{1,3})\\s*)?${UNIT}`,
+  `(${CUR_LEAD})?\\s*(${NUM})\\s*(${MAGNITUDE_TAIL}(?![a-z]))?\\s*(${CUR_TRAIL}|${CUR_TAIL_GENERIC})?\\s*((?:${SEP}\\s*){0,3})(?:(\\d{1,3})\\s*)?${UNIT}`,
   "gi"
 );
 
@@ -110,8 +176,20 @@ export function amountIndexIn(text: string, amount: number): number {
   return text.indexOf(s);
 }
 
+// The native unit words, matched WHOLE - a first-letter test cannot classify
+// "เดือน" or "minggu" (which starts with an m and means week).
+const NATIVE_WEEK = new RegExp(`^(?:${WEEK_WORDS_NATIVE})$`, "i");
+const NATIVE_MONTH = new RegExp(`^(?:${MONTH_WORDS_NATIVE})$`, "i");
+const NATIVE_DAY = new RegExp(`^(?:${DAY_WORDS_NATIVE})$`, "i");
+
 function unitOf(token: string): RateUnit {
-  const t = token.toLowerCase();
+  const t = token.toLowerCase().trim();
+  // Native words first: "minggu" is a WEEK and starts with m; "mes" is a MONTH
+  // and starts with m; "tuần" is a week and starts with t. The Latin
+  // first-letter shortcut below is only safe for English.
+  if (NATIVE_MONTH.test(t)) return "month";
+  if (NATIVE_WEEK.test(t)) return "week";
+  if (NATIVE_DAY.test(t)) return "day";
   if (t.startsWith("w")) return "week";
   if (t.startsWith("m")) return "month";
   return "day";
@@ -140,11 +218,16 @@ export function scanRates(text: string): RateExpr[] {
   // rails ship blind (owner report 11 B1).
   text = normalizeDigits(text);
   for (const m of text.matchAll(RATE)) {
-    const [whole, curLead, rawAmount, curTrail, seps, rawQty, rawUnit] = m;
-    const amount = parseAmount(rawAmount);
+    const [whole, curLead, rawAmount, rawMag, curTrail, seps, rawQty, rawUnit] = m;
+    // "150k", "70rb", "2jt" - the suffix IS part of the number. Reading
+    // "70rb/hari" as seventy produced a phantom bargain that would have won
+    // BEST PRICE against every real quote in the hunt.
+    const amount = applyMagnitude(parseAmount(rawAmount), rawMag);
     if (!(amount > 0)) continue;
 
-    const hasCurrency = Boolean(curLead || curTrail);
+    // A magnitude suffix is itself money-shaped evidence: nobody writes "3k
+    // days". It joins currency, separator and quantity as a rate signal.
+    const hasCurrency = Boolean(curLead || curTrail || rawMag);
     const hasSeparator = Boolean(seps && seps.trim());
     const hasQuantity = Boolean(rawQty);
     if (!hasCurrency && !hasSeparator && !hasQuantity) continue; // a duration, not a rate

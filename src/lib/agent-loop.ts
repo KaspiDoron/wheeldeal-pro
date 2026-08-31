@@ -264,6 +264,24 @@ export async function processVendorReply(opts: {
   // that delay even started - was never recorded. This stamps the real number
   // at each terminal point so the doctor can show p50/p95 instead of a promise.
   const turnStartedAt = Date.now();
+  // ONE WALL CLOCK FOR THE WHOLE TURN.
+  //
+  // Every stage had its OWN budget and they summed past the request ceiling. An
+  // image turn on the Next route (the production path - the vision offload is
+  // worker-only) runs media retries 0+2s+5s, then readImages at 45s, then a
+  // failure-class re-read at 14s that fires precisely on the SLOW cases, and
+  // only THEN starts the SPTE turn with a fresh 45s. 7+45+14+45 = 111s against
+  // Cloud Run's --timeout 90.
+  //
+  // What a kill costs is the real problem: the inbound claim is a 10-MINUTE
+  // lease, so the shop's photo goes unanswered until the dead-turn sweep
+  // reaches that sender. A slow reply became a lost one.
+  //
+  // 72s leaves headroom under 90 for the response itself and for the drain the
+  // route runs after. Every downstream budget is now min(its own, what's left).
+  const TURN_WALL_MS = 72_000;
+  const turnDeadlineAt = turnStartedAt + TURN_WALL_MS;
+  const msLeft = () => Math.max(0, turnDeadlineAt - Date.now());
   let text = opts.text.trim();
   const images = opts.images ?? [];
   const transcript = opts.transcript ?? null;
@@ -316,7 +334,12 @@ export async function processVendorReply(opts: {
   // no card can ever find.
   if (ctx && !ctx.vendorId && resolved.vendorId) ctx.vendorId = resolved.vendorId;
   if (ctx && !ctx.vendorId) {
+    // NOT A DROP - this path falls through and the turn runs. It rides the
+    // `inbound-dropped` kind only because that was the nearest breadcrumb
+    // available; `notDropped: true` lets the health split tell an integrity
+    // warning from a lost reply instead of counting it as a muted shop.
     void noteInboundDropped(opts.senderEmail, from, "derived-unattributed", {
+      notDropped: true,
       note: "thread carries no vendorId - derived rows would be invisible to cards",
     });
   }
@@ -827,7 +850,8 @@ export async function processVendorReply(opts: {
       extractText || "(the shop sent a price-list photo)",
       images,
       history,
-      ctx.region || undefined
+      ctx.region || undefined,
+      msLeft
     ));
   // NOTE: evaluated lazily (a getter-style function, not a const) because the
   // vehicle gate + thread-confirmation blocks below may still upgrade or
@@ -1007,9 +1031,34 @@ export async function processVendorReply(opts: {
   // what the shop stated and what the catalogue knows, and returns one of three
   // states. Only `confirmed` may become an offer - `needs-confirmation` becomes
   // a question the agent has to ask first, and it cannot be skipped.
+  // ACCEPTING A SUBSTITUTION RETARGETS THE NEGOTIATION.
+  //
+  // substitution-store writes `acceptedVehicleCc`/`acceptedVehicle` when the
+  // traveller says Yes - and grep found no production reader for either. What
+  // it ALSO wrote was `vehicleConfirmation: confirmed`, which is read, and
+  // whose only effect is to silence this gate for the rest of the thread. So
+  // "yes, I'll take the Nmax" did not change what we were negotiating for; it
+  // switched off the check that would notice a THIRD substitution. That is the
+  // exact opposite of the contract vehicle/substitution.ts states.
+  //
+  // Judge later turns against the vehicle the traveller actually accepted.
+  let acceptedCc: number | undefined;
+  if (ctx.sender) {
+    try {
+      const { loadThreadState: loadForAccepted, threadKeyFor: keyForAccepted } = await import(
+        "./graph/state"
+      );
+      const st = await loadForAccepted(keyForAccepted(ctx.sender, from)).catch(() => null);
+      const cc = (st?.fields as { acceptedVehicleCc?: unknown } | undefined)?.acceptedVehicleCc;
+      if (typeof cc === "number" && cc > 0) acceptedCc = cc;
+    } catch {
+      // No accepted substitution readable - judge against the original request,
+      // which is the safe direction.
+    }
+  }
   const declared = {
     class: rfq.vehicleClass === "car" ? ("car" as const) : (rfq.vehicleClass as "scooter" | "motorbike"),
-    displacementCc: rfq.engineSizeCc,
+    displacementCc: acceptedCc ?? rfq.engineSizeCc,
     transmission: rfq.transmission === "any" ? undefined : rfq.transmission,
     seats: rfq.seats,
   };
@@ -1240,8 +1289,40 @@ export async function processVendorReply(opts: {
   // divides into a plausible daily price over the rental length, it was a
   // total: divide it. (The extraction prompt now rules this too; this is the
   // arithmetic backstop for when the model slips.)
-  const floor = await floorPriceFor(ctx.region || undefined, rfq);
+  // THE FLOOR MUST BE RESOLVED THROUGH THE SAME CHAIN AS THE CURRENCY.
+  //
+  // Wave 3 taught the currency to fall back from the free-text region to the
+  // SHOP'S PHONE PREFIX, because `currencyForRegion` returns null for every
+  // realistic geocoder label - "Ao Nang", "Krabi", "Canggu", "Siargao", raw
+  // coordinates. The floor lookup was left on region-only, so the two disagreed
+  // exactly where the owner reported the problem: for a +66 shop in "Ao Nang,
+  // Krabi" the price of record resolved THB while the floor resolved USD, the
+  // currencies did not match, and that single null silently switched OFF the
+  // total-vs-per-day divide, the implausible-price rail AND the credible-floor
+  // clamp, and sent floorPrice: undefined into the engine. Every safety net on
+  // this path was dark for the precise regions that motivated it.
+  const floorRegion = ctx.region || _countryForShop(from) || undefined;
+  const floor = await floorPriceFor(floorRegion, rfq);
   let floorSameCur = floor && floor.currency === cur ? floor : null;
+  if (floor && !floorSameCur) {
+    // Still mismatched: say so rather than going quiet. A dark net that nobody
+    // can see is how this survived a whole wave.
+    void sbInsert("agent_events", [
+      {
+        kind: "floor-currency-mismatch",
+        user_email: ctx.sender ?? null,
+        to_number: from,
+        vendor_id: ctx.vendorId ?? "",
+        vendor_name: ctx.vendorName ?? "",
+        detail: JSON.stringify({
+          region: floorRegion ?? null,
+          floorCurrency: floor.currency,
+          priceCurrency: cur,
+          note: "price sanity nets are inert for this thread",
+        }).slice(0, 400),
+      },
+    ]).catch(() => {});
+  }
   if (usablePrice && rfq.durationDays > 1 && floorSameCur) {
     const typical = floorSameCur.typical ?? Math.round(floorSameCur.floor * 1.6);
     const perDayIfTotal = Math.round(usablePrice / rfq.durationDays);
@@ -1321,9 +1402,49 @@ export async function processVendorReply(opts: {
   //   - the price is DERIVED        -> the total is in the text (priceBasisDays)
   //   - the number (or number x days) is verbatim in the shop's reply
   //   - the number is in the recent conversation (a proposal the shop agreed to)
-  if (usablePrice && extractText && images.length === 0 && priceBasisDays === undefined) {
+  //
+  // THREE OF THOSE EXEMPTIONS USED TO EXCUSE THE PHANTOMS THEMSELVES.
+  //
+  // `images.length === 0` excused any reply with a photo attached - INCLUDING
+  // one whose vision read failed, where agents.ts falls back to reading the
+  // CAPTION with the same phantom-prone text extractor. A storefront photo
+  // captioned "We are open 7 days 9am to 6pm" produced a price with the rail
+  // structurally unreachable. A photo only excuses grounding when the photo was
+  // actually read.
+  //
+  // `priceBasisDays === undefined` excused every DIVISION - which is the exact
+  // class the Wave-0 phantom guards exist for. "Minimum rental 3 days 500
+  // deposit" divides to 167/day; "Reopen in 2 days at 9" to 5/day; "back to you
+  // in 2 days 100%" to 50/day. In every one of those the dividend is a deposit,
+  // a clock time or a percent - and grounding would have caught it, if it ran.
+  // The DIVIDEND is what must be grounded for a derived price.
+  const photoWasRead =
+    images.length > 0 && extraction.imageRead?.seen === true && !extraction.imageRead?.modelFailure;
+  if (usablePrice && extractText && !photoWasRead) {
     const { isPriceGrounded } = await import("./wa/price-grounding");
-    if (!isPriceGrounded(usablePrice, rfq.durationDays, [extractText, history])) {
+    // The shop's words and OUR words are different evidence, and the window
+    // renders both. A figure we proposed grounds a price only when the shop's
+    // current message agrees with it - see wa/price-grounding.
+    const inboundBodies = mine
+      .filter((m) => m.direction !== "outbound")
+      .slice(0, 40)
+      .map((m) => m.body ?? "");
+    const outboundBodies = mine
+      .filter((m) => m.direction === "outbound")
+      .slice(0, 40)
+      .map((m) => m.body ?? "");
+    // A DERIVED price is grounded through its dividend: the total the shop
+    // actually stated, not the per-day figure we computed from it.
+    const groundPrice =
+      priceBasisDays && priceBasisDays > 0 ? usablePrice * priceBasisDays : usablePrice;
+    const groundDays = priceBasisDays && priceBasisDays > 0 ? 1 : rfq.durationDays;
+    if (
+      !isPriceGrounded(groundPrice, groundDays, {
+        shopText: extractText,
+        shopHistory: inboundBodies,
+        ourHistory: outboundBodies,
+      })
+    ) {
       await sbInsert("agent_events", [
         {
           kind: "price-ungrounded",
@@ -1554,13 +1675,47 @@ export async function processVendorReply(opts: {
       delivers,
     };
     // Session attribution for exact rival grouping (analytics + deals).
+    // THE THREAD'S OWN SEARCH, NOT THE NEWEST ONE.
+    //
+    // This read `searches` newest-first at REPLY time, so a shop answering an
+    // hour after the traveller started a second hunt filed its offer under the
+    // NEW search - and cross-shop leverage is scoped by search_id. A Krabi
+    // scooter price could therefore be cited at a Canggu shop, wearing the new
+    // hunt's id. The thread knows which search it belongs to; ask it first and
+    // fall back to newest-first only for threads written before the stamp
+    // existed.
     let searchId: number | null = null;
     if (ctx.sender) {
-      const s = await sbSelect<{ id: number }>(
-        "searches",
-        `select=id&user_email=eq.${encodeURIComponent(ctx.sender)}&order=created_at.desc&limit=1`
-      ).catch(() => []);
-      searchId = s[0]?.id ?? null;
+      // THE SEARCH THIS THREAD BELONGS TO, when the thread can tell us.
+      //
+      // This read `searches` newest-first at REPLY time, so a shop answering
+      // after the traveller had started a SECOND hunt filed its offer under the
+      // new search - and cross-shop leverage is scoped by search_id, so a Krabi
+      // price could then be cited at a Canggu shop wearing the new hunt's id.
+      // An earlier round of this same thread already carries the right id;
+      // reuse it rather than re-deriving one from the clock.
+      //
+      // Round one still falls back to newest-first, which is correct unless the
+      // very first reply arrives after a new hunt began - the residual case,
+      // and the one a search stamp on the thread itself would close.
+      if (ctx.vendorId) {
+        const prior = await sbSelect<{ search_id: number | null }>(
+          "offers",
+          `select=search_id&user_email=eq.${encodeURIComponent(
+            ctx.sender
+          )}&vendor_id=eq.${encodeURIComponent(
+            ctx.vendorId
+          )}&search_id=not.is.null&order=created_at.asc&limit=1`
+        ).catch(() => []);
+        searchId = prior[0]?.search_id ?? null;
+      }
+      if (searchId == null) {
+        const s = await sbSelect<{ id: number }>(
+          "searches",
+          `select=id&user_email=eq.${encodeURIComponent(ctx.sender)}&order=created_at.desc&limit=1`
+        ).catch(() => []);
+        searchId = s[0]?.id ?? null;
+      }
     }
     // THE GUARD THAT WAS DECLARED, READ, AND NEVER WRITTEN (owner report 5 #2).
     //
@@ -1624,6 +1779,24 @@ export async function processVendorReply(opts: {
     // session aggregates (lowest-rival ZSET + OFFERS IN / BARGAINED HSET) and
     // publish the delta for the SSE stream. REDIS_URL-gated no-op when unset;
     // never throws; Postgres above remains the source of truth.
+    // A SHOP THAT SAID NO IS NOT LEVERAGE. Nothing ever evicted from this
+    // cache, so a declined or out-of-stock shop stayed a citable rival for the
+    // whole TTL - and the hot path short-circuits the Postgres query whose
+    // dead-phase filter would have excluded it. The agent could tell one shop
+    // to beat a price from a shop that had already refused to rent.
+    if (
+      searchId != null &&
+      ctx.vendorId &&
+      (extraction.shopDeclined === true || extraction.shopUnavailable === true)
+    ) {
+      const { dropSessionOffer } = await import("./rival-cache");
+      await dropSessionOffer({
+        searchId,
+        vendorId: ctx.vendorId,
+        vehicleKey,
+        currency: cur,
+      }).catch(() => {});
+    }
     if (searchId != null) {
       const { recordSessionOffer } = await import("./rival-cache");
       await recordSessionOffer({
@@ -1635,6 +1808,11 @@ export async function processVendorReply(opts: {
         // First write pins the list anchor; later rounds only lower the score.
         listPricePerDay: usablePrice,
         durationDays: rfq.durationDays ?? 1,
+        // The Postgres row two blocks up already refuses to publish a package
+        // rate the traveller's rental does not cover. This write did not carry
+        // the basis at all, so the hot path - which SHORT-CIRCUITS Postgres -
+        // could cite exactly the number the slow path had rejected.
+        priceBasisDays: priceBasisDays,
       }).catch(() => {});
     }
   }
@@ -1981,16 +2159,23 @@ export async function processVendorReply(opts: {
       // only the automated answer is withheld, and it resumes once readable.
       const takeover = await isThreadTakenOver(ctx.sender, from);
       if (takeover !== false) {
-        // Distinguish a genuine takeover from an unreadable store (which also
-        // fails closed): a Supabase blip silently muting every reply is exactly
-        // the kind of failure this trace surfaces.
-        void noteInboundDropped(opts.senderEmail, from, "takeover-hold", {
-          state: takeover === true ? "taken-over" : "unreadable",
-        });
+        // ONE REASON STRING WAS CARRYING TWO OPPOSITE FACTS. "taken-over" is
+        // benign by design (the traveller is typing); "unreadable" is OUR store
+        // failing closed and silently muting a real shop reply. Both wrote
+        // `takeover-hold`, which BENIGN_DROP_REASONS filters out of the safety
+        // verdict AND the activity feed - so a Supabase blip could mute every
+        // reply in the fleet with every honesty surface reading green. The
+        // `state` field distinguished them, and nothing read it.
+        void noteInboundDropped(
+          opts.senderEmail,
+          from,
+          takeover === true ? "takeover-hold" : "takeover-unreadable",
+          { state: takeover === true ? "taken-over" : "unreadable" }
+        );
         return;
       }
     } catch {
-      void noteInboundDropped(opts.senderEmail, from, "takeover-hold", { state: "error" });
+      void noteInboundDropped(opts.senderEmail, from, "takeover-unreadable", { state: "error" });
       return; // unreadable -> fail closed (do not auto-reply)
     }
   }
@@ -2005,13 +2190,18 @@ export async function processVendorReply(opts: {
       // absolute, so an unknown pause state withholds the auto-reply.
       const paused = await isSessionPaused(ctx.sender);
       if (paused !== false) {
-        void noteInboundDropped(opts.senderEmail, from, "pause-hold", {
-          state: paused === true ? "paused" : "unreadable",
-        });
+        // Same split as the takeover gate above: a user pause is a deliberate
+        // outcome, an unreadable pause flag is a muted shop reply.
+        void noteInboundDropped(
+          opts.senderEmail,
+          from,
+          paused === true ? "pause-hold" : "pause-unreadable",
+          { state: paused === true ? "paused" : "unreadable" }
+        );
         return;
       }
     } catch {
-      void noteInboundDropped(opts.senderEmail, from, "pause-hold", { state: "error" });
+      void noteInboundDropped(opts.senderEmail, from, "pause-unreadable", { state: "error" });
       return; // unreadable -> fail closed
     }
   }
@@ -2119,7 +2309,10 @@ export async function processVendorReply(opts: {
     },
     humanDelay: Boolean(opts.humanDelay && ctx.sender),
     transcript: opts.transcript ?? null,
-    deadlineAt: Date.now() + 45_000,
+    // The SPTE turn gets what the media and extraction stages LEFT, never a
+    // fresh 45s on top of them. A floor of 12s so a turn that arrives late
+    // still composes something rather than dying with nothing to show.
+    deadlineAt: Date.now() + Math.max(12_000, Math.min(45_000, msLeft())),
   };
   const io = liveGraphIO(opts.send);
 
@@ -2182,9 +2375,21 @@ export async function processVendorReply(opts: {
     // let the LLM's own "a different vehicle was offered" judgement (read.offered)
     // drive wrongVehicle - decideSubstitution still gates on closeness/confidence,
     // so a genuine same-vehicle reply is a no-op.
+    // READ WHAT THE SHOP MEANT, NOT ONLY WHAT THEY TYPED.
+    //
+    // This ASCII regex ran against `opts.text` alone, which is blind three ways:
+    // a Thai/Vietnamese/Indonesian "we don't have that, only the Nmax" matches
+    // nothing; a voice note arrives on the Cloud lane with opts.text empty and
+    // its transcript in a sibling field; and a caption-less price board arrives
+    // as "[photo]". The local `text` already carries the transcript, and
+    // `inboundEnglish` is the gloss the sibling call-intent pass on the very
+    // next block already uses. Read both.
+    const substitutionSource = `${text}
+${inboundEnglish ?? ""}
+${extractText ?? ""}`.trim();
     const substitutionHint =
       /\b(?:no|dont|don'?t|out of|sold out|instead|only have|only got|we have|i have|but (?:i|we)|another|other|different|alternative)\b/i.test(
-        opts.text ?? ""
+        substitutionSource
       );
     const assessmentSuspect =
       extraction?.vehicleAssessment != null && extraction.vehicleAssessment.status !== "confirmed";
@@ -2193,7 +2398,9 @@ export async function processVendorReply(opts: {
     if (substitutionSuspected && ctx.sender && ctx.vendorId) {
       const email = ctx.sender;
       const vendorId = ctx.vendorId;
-      const inboundText = opts.text ?? "";
+      // The gloss when we have one, the shop's own words when we do not - the
+      // same rule every other deterministic reader on this path follows.
+      const inboundText = (inboundEnglish || substitutionSource || opts.text) ?? "";
       const threadKey = turnInput.event.threadKey;
       const assessmentWrong = extraction?.vehicleAssessment?.status === "wrong-vehicle";
       await finishBeforeResponse("substitution-offer", async () => {

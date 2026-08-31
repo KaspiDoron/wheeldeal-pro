@@ -59,7 +59,13 @@ export async function GET(req: Request) {
   try {
     const { drainOutbox } = await import("@/lib/wa-guard");
     const { sendFromUser } = await import("@/lib/evolution");
-    drained = await drainOutbox((senderKey, to, text, lane) => sendFromUser(senderKey, to, text, true, { lane }));
+    // 50s: the ping is the fleet-wide drain and the only heartbeat
+    // production has, so it gets the widest budget that still lands inside
+    // Cloud Run's 90s kill with the response.
+    drained = await drainOutbox(
+      (senderKey, to, text, lane) => sendFromUser(senderKey, to, text, true, { lane }),
+      { budgetMs: 50_000 }
+    );
     const { drainGraphWakeups } = await import("@/lib/graph/engine");
     await drainGraphWakeups((senderKey, to, text) => sendFromUser(senderKey, to, text, true, { lane: "reply" })).catch(
       () => {}

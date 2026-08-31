@@ -62,7 +62,9 @@ interface Data {
   senders?: { id: string; label: string; live: boolean; detail: string }[];
   /** The architecture toggles with their STORED values (what the vault holds,
    *  not what anyone last requested). */
-  architecture?: { key: string; value: string; hint: string }[];
+  architecture?: { key: string; value: string; hint: string; unreadable?: boolean }[];
+  /** The two URLs the owner must paste into Meta, resolved from APP_DOMAIN. */
+  setup?: { callbackUrl: string; expectedLinkBase: string; linkBaseMatches: boolean };
   governor: {
     allowed: boolean;
     binding: string | null;
@@ -118,6 +120,8 @@ export function WabaConsole() {
   const [err, setErr] = useState<string | null>(null);
   const [archMsg, setArchMsg] = useState<string | null>(null);
   const [flipping, setFlipping] = useState<string | null>(null);
+  const [optIn, setOptIn] = useState("");
+  const [optMsg, setOptMsg] = useState<string | null>(null);
 
   useEffect(() => {
     fetch("/api/admin/waba", { cache: "no-store" })
@@ -155,6 +159,31 @@ export function WabaConsole() {
       setArchMsg("Could not reach the server - nothing was changed.");
     } finally {
       setFlipping(null);
+    }
+  };
+
+  // A shop may only receive a COLD template once it has opted in, and until
+  // this existed the only way to record that was a hand-written database row -
+  // so on funding day every dispatch would have answered "not-opted-in" and
+  // silently stayed on Evolution with nothing on screen to explain it.
+  const optInShop = async () => {
+    setOptMsg(null);
+    try {
+      const r = await fetch("/api/admin/waba", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "opt-in", number: optIn }),
+      });
+      const j = (await r.json()) as {
+        ok?: boolean;
+        error?: string;
+        warning?: string;
+        tail?: string;
+      };
+      setOptMsg(j.error ?? j.warning ?? (j.ok ? `Opted in (${j.tail}).` : "Did not persist."));
+      if (j.ok) setOptIn("");
+    } catch {
+      setOptMsg("Could not reach the server - nothing was changed.");
     }
   };
 
@@ -207,10 +236,19 @@ export function WabaConsole() {
           <div className="text-[13px] font-extrabold text-strong">Architecture</div>
           <p className="mt-0.5 text-[11px] font-bold text-faint">
             One negotiation engine; these choose the wire. Changes apply within ~30s, no redeploy.
+            Red taps start or stop a LIVE sender: the legacy Cloud sender has no dry run and no
+            governor, and turning the dry run off means the next lead really sends.
           </p>
           <div className="mt-2 space-y-2">
             {(d.architecture ?? []).map((t) => {
               const kill = t.key === "WABA_KILL";
+              // ARMING A LIVE SENDER IS A DANGER TAP TOO. CLOUD_API_ENABLED
+              // has no dry run, no governor and no anti-ban lane budget: one
+              // neutral-looking tap starts a second live sender across
+              // outreach, mass outreach and the Cloud webhook's auto-reply.
+              // Turning the dry run OFF is the same class of decision.
+              const arms =
+                t.key === "CLOUD_API_ENABLED" ? "on" : t.key === "WABA_DRY_RUN" ? "off" : null;
               return (
                 <div key={t.key} className="rounded-xl bg-card2 p-2">
                   <div className="flex items-baseline justify-between gap-2">
@@ -218,14 +256,18 @@ export function WabaConsole() {
                       {ARCH_LABELS[t.key] ?? t.key}
                     </span>
                     <span className="shrink-0 text-[10px] font-bold text-faint">
-                      {t.value ? `stored: ${t.value}` : "unset (default)"}
+                      {t.unreadable
+                        ? "\u2014 unreadable"
+                        : t.value
+                          ? `stored: ${t.value}`
+                          : "unset (default)"}
                     </span>
                   </div>
                   <div className="mt-1 text-[10px] font-bold text-faint">{t.hint}</div>
                   <div className="mt-1.5 flex flex-wrap gap-1.5">
                     {(ARCH_OPTIONS[t.key] ?? []).map((v) => {
                       const active = t.value === v;
-                      const danger = kill && v === "on";
+                      const danger = (kill && v === "on") || (arms !== null && v === arms);
                       return (
                         <button
                           key={v}
@@ -251,11 +293,64 @@ export function WabaConsole() {
               );
             })}
           </div>
+          {/* THE PARTNER OPT-IN. A cold first-contact template may only reach a
+              shop that opted in, and the only other way to record that is the
+              shop messaging the business number first - so without this the
+              lane could not make a single first contact on day one. */}
+          <div className="mt-3 border-t border-line pt-2">
+            <div className="text-[12px] font-extrabold text-strong">Opt a partner shop in</div>
+            <p className="mt-0.5 text-[11px] font-bold text-faint">
+              A cold first-contact template may only go to a shop that opted in. A shop that
+              messages the business number opts itself in automatically.
+            </p>
+            <div className="mt-1.5 flex gap-1.5">
+              <input
+                value={optIn}
+                onChange={(e) => setOptIn(e.target.value)}
+                inputMode="tel"
+                placeholder="+66 81 234 5678"
+                className="min-w-0 flex-1 rounded-xl border-2 border-line bg-card px-2 py-1 text-[16px] font-bold text-strong"
+              />
+              <button
+                type="button"
+                onClick={optInShop}
+                disabled={!optIn.trim()}
+                className="shrink-0 rounded-full bg-brandgreen px-3 py-1 text-[11px] font-extrabold text-white disabled:opacity-50"
+              >
+                Opt in
+              </button>
+            </div>
+            {optMsg && <p className="mt-1 text-[11px] font-extrabold text-soft">{optMsg}</p>}
+          </div>
           {archMsg && (
             <p className="mt-2 rounded-xl bg-brandred-soft p-2 text-[11px] font-extrabold text-brandred">
               {archMsg}
             </p>
           )}
+        </div>
+      )}
+
+      {/* THE TWO URLS THAT GO INTO META. They appeared on no screen and in no
+          document, and a WABA_LINK_BASE that does not equal the approved
+          template's button base is rejected on every send with nothing here to
+          explain why. */}
+      {d.setup && (
+        <div className="rounded-blob border-2 border-line bg-card p-3">
+          <div className="text-[13px] font-extrabold text-strong">Paste these into Meta</div>
+          <div className="mt-1.5 space-y-1 text-[11px] font-bold">
+            <div className="break-all text-soft">
+              <span className="text-faint">Callback URL:</span> {d.setup.callbackUrl}
+            </div>
+            <div className="break-all text-soft">
+              <span className="text-faint">Template button base (= WABA_LINK_BASE):</span>{" "}
+              {d.setup.expectedLinkBase}
+            </div>
+            {!d.setup.linkBaseMatches && (
+              <div className="text-brandred">
+                WABA_LINK_BASE does not equal this - every template send would be rejected.
+              </div>
+            )}
+          </div>
         </div>
       )}
 

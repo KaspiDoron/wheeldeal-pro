@@ -105,19 +105,45 @@ describe("testAllProviders contract (source pins)", () => {
     expect(ai).toMatch(/Math\.max\(2_000, deadline - Date\.now\(\)\)/);
   });
 
-  it("sambanova is demoted below the fast tiers in BOTH order tables", () => {
-    // Correct ids, slow free tier: on the 6-9s callers it either never gets
-    // reached or gets the 2s floor that guarantees an abort. It earns its
-    // keep on long-budget callers, so it moves behind deepseek/together
-    // rather than out of the chain.
+  it("the free chain is ordered cheapest-failure-first, and PAID rungs sit behind it", () => {
+    // TWO ORDER TABLES, ONE RULE (rewritten W-beta30; the pin used to require
+    // "deepseek before sambanova", which was the old fast-tier reasoning).
+    //
+    // sambanova keeps its demotion - the owner's live probe answered 429 on
+    // BOTH its pools, so reaching it early spends two dead round trips out of
+    // SPTE's 9s reply budget - but it moved further back still, behind the
+    // free rungs that actually answer.
+    //
+    // And deepseek left the free block entirely, which is the stronger fix:
+    // it spends the owner's pay-as-you-go BALANCE, and sitting second in the
+    // chain meant every minute groq's RPM was spent, the whole fleet's
+    // spillover silently billed the owner before five free rungs were tried.
+    // A paid rung must never be reached by accident.
     const open = ai.indexOf("= [", ai.indexOf("PROVIDER_NAMES"));
     const table = ai.slice(open, ai.indexOf("]", open));
-    expect(table.indexOf('"deepseek"')).toBeLessThan(table.indexOf('"sambanova"'));
-    expect(table.indexOf('"together"')).toBeLessThan(table.indexOf('"sambanova"'));
-    const dsBlock = ai.indexOf('name: "deepseek"');
-    const sambaBlock = ai.indexOf('name: "sambanova"');
-    expect(dsBlock).toBeGreaterThan(0);
-    expect(dsBlock, "allProviders() must list deepseek before sambanova").toBeLessThan(sambaBlock);
+    const at = (name: string) => table.indexOf(`"${name}"`);
+    // Fast free rungs lead sambanova...
+    expect(at("groq")).toBeLessThan(at("sambanova"));
+    expect(at("together")).toBeLessThan(at("sambanova"));
+    expect(at("gemini")).toBeLessThan(at("sambanova"));
+    // ...and every free rung leads every paid one.
+    for (const free of ["groq", "together", "openrouter", "mistral", "huggingface", "gemini"]) {
+      for (const paid of ["deepseek", "anthropic", "openai"]) {
+        expect(at(free), `${free} must precede paid ${paid}`).toBeLessThan(at(paid));
+      }
+    }
+    // allProviders() (the real chain) agrees with the name table.
+    const block = (name: string) => ai.indexOf(`name: "${name}"`);
+    expect(block("deepseek")).toBeGreaterThan(0);
+    expect(block("gemini"), "allProviders() must list gemini before sambanova").toBeLessThan(
+      block("sambanova")
+    );
+    expect(block("sambanova"), "allProviders() must list free rungs before paid deepseek").toBeLessThan(
+      block("deepseek")
+    );
+    // The paid flag is what makes tier:"premium" able to hoist it deliberately.
+    const dsBlock = ai.slice(block("deepseek"), block("deepseek") + 900);
+    expect(dsBlock).toMatch(/paid: true/);
   });
 
   it("EXECUTED: 429 primary -> fallback answers; both-fail names BOTH ids", async () => {

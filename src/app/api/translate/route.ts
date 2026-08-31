@@ -113,7 +113,9 @@ export async function POST(req: Request) {
   const session = await getSession();
   if (!session) return NextResponse.json({ map: {} }, { status: 401 });
   const { checkDailyLimit } = await import("@/lib/usage");
-  const gate = await checkDailyLimit("translate", session.email, "LIMIT_TRANSLATE_PER_DAY");
+  const gate = await checkDailyLimit("translate", session.email, "LIMIT_TRANSLATE_PER_DAY", {
+    plan: session.plan,
+  });
   if (!gate.allowed) return NextResponse.json({ map: {} }, { status: 429 });
 
   const body = await req.json().catch(() => ({}));

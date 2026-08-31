@@ -122,6 +122,29 @@ export async function dispatchHandoff(input: DispatchInput): Promise<DispatchOut
     };
   }
 
+  // THE TRAVELLER'S OWN CONSENT TO THE DISCLOSURE, checked before any budget.
+  //
+  // This lane hands a rental shop the traveller's WhatsApp number and invites
+  // an unsolicited inbound. That is the exact disclosure `number_sharing`
+  // exists to record (legal.ts) - and nothing read it: the column and the
+  // ledger kind were both dead, so arming the lane would have disclosed a
+  // phone number with no provable consent behind it.
+  //
+  // FALL BACK, never refuse. Without the consent the enquiry still goes out on
+  // the traveller's own wire exactly as it does today, so a missing or
+  // unreadable record costs nobody their search.
+  {
+    const { consentFor } = await import("../consent");
+    if (!(await consentFor(input.userEmail, "number_sharing"))) {
+      return {
+        leadId: null,
+        outcome: "fallback-legacy",
+        reason: "no-number-sharing-consent",
+        userMessage: say(USER_COPY.fallback, shop),
+      };
+    }
+  }
+
   // THE FLEET-WIDE BUDGETS, checked before the per-agency lane decision.
   // Ordered this way on purpose: there is no point resolving which lane an
   // agency qualifies for if the account may not send at all, and the reason the
@@ -215,6 +238,36 @@ export async function sendForLead(
   const c = await wabaConfig();
   const shop = input.agencyName ?? lead.agency_name ?? "";
 
+  // THE EMERGENCY STOP APPLIES TO EVERY LANE, not just first contact.
+  //
+  // dispatchHandoff consults the governor before it ever reaches here, but this
+  // function has a SECOND entry point - onAgencyReplied's service-window flush,
+  // reached straight from the webhook - and that one put free-form messages on
+  // the rented number while WABA_KILL was on. The console calls that switch
+  // EMERGENCY STOP and the route's hint says "halt all company-number first
+  // contact NOW"; a flush is a company-number send.
+  //
+  // ONLY the kill binding is honoured here, on purpose: the tier and spend
+  // ceilings meter the PAID template lane, and a flush inside an already-open
+  // service window costs neither.
+  {
+    const { governorVerdict } = await import("./governor");
+    const gov = await governorVerdict();
+    if (!gov.allowed && gov.binding === "kill-switch") {
+      await noteWabaEvent("held", {
+        leadId: lead.id,
+        agencyTail: lead.agency_tail,
+        raw: { reason: "kill-switch" },
+      });
+      return {
+        leadId: lead.id,
+        outcome: "held",
+        reason: "kill-switch",
+        userMessage: say(USER_COPY.held, shop),
+      };
+    }
+  }
+
   // THE TEMPLATE-LANE CLAIM. templateAllowed is a check-then-act on
   // last_template_at, so two travellers dispatching the same cold agency in
   // the same second both read "no recent template" and BOTH pay - and the
@@ -254,7 +307,11 @@ export async function sendForLead(
           lane: "template",
           to: lead.agency_number,
           templateName: c.templateFirstContact,
-          language: input.language ?? "en",
+          // NOT a hardcoded "en". Meta stores an approved template under the
+          // exact locale it was created with (en_US, en_GB, th), and a
+          // mismatch is error 132001 on 100% of sends - previously fixable
+          // only by a redeploy.
+          language: input.language ?? c.templateLanguage,
           variables: templateVariables({
             agencyName: input.agencyName ?? lead.agency_name,
             vehicle: input.vehicle,
@@ -442,6 +499,19 @@ export async function onAgencyReplied(
  * Runs from the ping (the one periodic runner production has). Never throws.
  */
 export async function sweepExpiredHolds(now = Date.now()): Promise<{ expired: number; redispatched: number }> {
+  // THE FLAG-OFF INVARIANT (waba/config.ts): with WABA_ENABLED unset, not one
+  // code path changes behaviour and NO NEW TABLE IS READ. This sweep runs
+  // unconditionally from the ping every five minutes, so the invariant was
+  // quietly false on every Evolution-only deployment.
+  //
+  // The gate is CONFIGURED, not `enabled`, and the difference matters: a lane
+  // that was on and got switched off (or killed mid-incident) still has real
+  // held leads, and rung 4's whole job is to re-dispatch those on the
+  // traveller's own Evolution wire. Gating on the on/off switch would strand
+  // exactly the leads the fallback exists for. A deployment that never pasted a
+  // credential has no waba_leads rows to sweep, which is the beta.
+  const cfg = await wabaConfig();
+  if (!cfg.senderId && !cfg.apiKey) return { expired: 0, redispatched: 0 };
   const due = await expiredHolds(now).catch(() => [] as Lead[]);
   let expired = 0;
   let redispatched = 0;

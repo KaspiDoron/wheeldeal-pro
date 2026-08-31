@@ -7,6 +7,7 @@ const FLOW: { key: TrackerStage; label: string }[] = [
   { key: "locating-contact", label: "Locating" },
   { key: "rfq-sent", label: "RFQ Sent" },
   { key: "awaiting-response", label: "Awaiting" },
+  { key: "replied", label: "Replied" },
   { key: "negotiating", label: "Negotiating" },
   { key: "offer-received", label: "Offer" },
 ];
@@ -17,6 +18,7 @@ const ORDER: TrackerStage[] = [
   "found",
   "rfq-sent",
   "awaiting-response",
+  "replied",
   "negotiating",
   "offer-received",
   "counter-offer",
@@ -41,6 +43,10 @@ export function StageBadge({ stage }: { stage: TrackerStage }) {
       text: "Awaiting reply",
       cls: "bg-brandyellow-soft text-warn",
     },
+    // The shop answered and we are reading it. Blue, not red: nothing is being
+    // haggled yet, and colouring it like negotiation is what made a greeting
+    // look like a live price fight.
+    replied: { text: "Replied", cls: "bg-brandblue-soft text-brandblue" },
     negotiating: { text: "Negotiating", cls: "bg-brandred-soft text-brandred" },
     "offer-received": { text: "Offer in", cls: "bg-savings-soft text-savings" },
     "counter-offer": { text: "Counter sent", cls: "bg-brandred-soft text-brandred" },
@@ -55,6 +61,7 @@ export function StageBadge({ stage }: { stage: TrackerStage }) {
   };
   const s = map[stage];
   const live =
+    stage === "replied" ||
     stage === "negotiating" ||
     stage === "counter-offer" ||
     stage === "awaiting-response" ||
@@ -93,6 +100,11 @@ export function stageCaption(stage: TrackerStage): { emoji: string; text: string
       return { emoji: "📨", text: "Your agent messaged the shop asking for the best price." };
     case "awaiting-response":
       return { emoji: "⏳", text: "Waiting for the shop to reply - your agent is watching for it." };
+    case "replied":
+      // HONEST, AND SPECIFICALLY NOT "pinning the exact price down" - the
+      // caption the owner photographed over a shop that had said hello. At
+      // this stage the ledger has an inbound and no actionable fact yet.
+      return { emoji: "💬", text: "The shop answered - your agent is reading their reply." };
     case "negotiating":
       return { emoji: "🤝", text: "Your agent is haggling with the shop for a lower price." };
     case "offer-received":

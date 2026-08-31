@@ -166,7 +166,15 @@ describe("the numbers are honest about their own limits", () => {
     // in all three buckets makes every bucket look equally broken and points at
     // nothing.
     expect(lifecycle).toMatch(/else if \(!searchers\.has\(e\)\)/);
-    expect(lifecycle).toMatch(/else if \(\(reachedBy\.get\(e\) \?\? 0\) < 3\)/);
+    // W-beta30b: the threshold is no longer the literal 3. It was hard-coded
+    // here while the gate card on the SAME screen printed the owner-configured
+    // WARMUP_MIN_ENGAGED, so loosening the gate from Keys made the two halves
+    // of one panel describe different rules and the chart point at the wrong
+    // work. The bucketing rule this test exists for - FIRST unmet term, one
+    // else-if chain - is unchanged and still pinned above.
+    expect(lifecycle).toMatch(/else if \(\(reachedBy\.get\(e\) \?\? 0\) < th\.minEngaged\)/);
+    expect(lifecycle).toMatch(/else if \(\(repliedBy\.get\(e\) \?\? 0\) < th\.minReplies\)/);
+    expect(lifecycle).toMatch(/warmupThresholds/);
   });
 
   it("a holdout arm below the sample floor shows the fraction, not a rate", () => {

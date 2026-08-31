@@ -357,10 +357,10 @@ DATABASE_ENABLED         = true
 DATABASE_PROVIDER        = postgresql
 DATABASE_CONNECTION_URI  = <a DEDICATED Evolution Postgres - NOT the app's Supabase>
 DATABASE_SAVE_DATA_INSTANCE     = true
-DATABASE_SAVE_DATA_NEW_MESSAGE  = false
+DATABASE_SAVE_DATA_NEW_MESSAGE  = true
 DATABASE_SAVE_DATA_MESSAGE_UPDATE = false
 DATABASE_SAVE_DATA_CONTACTS     = false
-DATABASE_SAVE_DATA_CHATS        = false
+DATABASE_SAVE_DATA_CHATS        = true
 CACHE_LOCAL_ENABLED      = true
 CACHE_REDIS_ENABLED      = false
 CONFIG_SESSION_PHONE_CLIENT = Mac OS
@@ -373,11 +373,15 @@ CONFIG_SESSION_PHONE_NAME   = Chrome
 > not only the rental-shop threads. Two hard rules: (1) use a **dedicated**
 > Evolution Postgres (the `wd-evo-db` in `render.yaml` is exactly this), never
 > the app's Supabase - co-locating puts those private tables in a schema with no
-> RLS, readable via the anon API key; (2) keep `SAVE_DATA_NEW_MESSAGE` and
-> `SAVE_DATA_CONTACTS` **false** - nothing on the app's live path reads
-> Evolution's `Message`/`Contact` tables (the recovery sweep pulls a short live
-> tail from the API, not the store), so persisting them only creates a private
-> data store the privacy policy promises does not exist. `INSTANCE` stays true:
+> RLS, readable via the anon API key; (2) `SAVE_DATA_NEW_MESSAGE`/`CHATS` stay
+> **true** (owner report 8) because the missed-reply recovery sweep reads a
+> 10-row tail per chat via `/chat/findMessages` - and that endpoint serves FROM
+> this store, so turning it off silently breaks the rescue of shop replies the
+> webhook lost. The price is a transient copy of every message on the linked
+> number (personal chats included), which is why the **7-day prune cron is
+> MANDATORY on every host** (`wd-evo-prune` on Render, `deploy/prune` on fleet
+> lanes) and the Privacy Policy discloses the transient store. `CONTACTS` and
+> `MESSAGE_UPDATE` stay false - nothing reads them. `INSTANCE` stays true:
 > that is the Baileys auth state (the link itself), not message content.
 
 Docker image for every host: `evoapicloud/evolution-api:v2.3.7` (newest stable v2 is
@@ -566,6 +570,66 @@ Keep the `GOOGLE_MAPS_API_KEY` in Keys and enable "Places API (New)".
 **Legal:** public `/terms` and `/privacy` pages, three mandatory signup
 consents (enforced server-side), and disclaimers across the funnel. Set the real
 legal entity name in `OPERATOR_NAME` (`src/lib/legal.ts`) when you have one.
+
+## WhatsApp Business (WABA) go-live - the funded lane
+
+**Nothing here is needed for the beta.** The app ships 100% on Evolution: with
+`WABA_ENABLED` unset there is no reachable path to a Business-API send, and
+`TRANSPORT_MODE` defaults to `evolution`. This section is the day-you-get-funding
+checklist, and it is deliberately paste-and-flip: every value below is a vault
+key in **Admin -> Keys**, so none of it needs a redeploy.
+
+**Step 1 - get the two URLs.** Open **Admin -> WABA**. The "Paste these into
+Meta" card shows them, resolved from your `APP_DOMAIN`:
+
+- **Callback URL** - `https://<your-domain>/api/webhooks/waba`
+- **Template button base** - `https://<your-domain>/h`. The approved template's
+  button base must EQUAL this. The card turns red if `WABA_LINK_BASE` does not
+  match, because a mismatch is rejected on every send with no other symptom.
+
+**Step 2 - paste the keys** (Admin -> Keys, `messaging` scope):
+
+| Key | What it is |
+|---|---|
+| `WABA_PROVIDER` | `meta` (direct) or `reseller` |
+| `WABA_BASE_URL` | e.g. `https://graph.facebook.com/v20.0`, no trailing slash |
+| `WABA_API_KEY` | system-user token |
+| `WABA_SENDER_ID` | the phone-number id |
+| `WABA_ACCOUNT_ID` | the WhatsApp Business ACCOUNT id - lets the key test verify the template before you send |
+| `WABA_TEMPLATE_FIRST_CONTACT` | the approved template's NAME |
+| `WABA_TEMPLATE_LANGUAGE` | its LANGUAGE code exactly as Meta lists it (`en`, `en_US`, `th`). A mismatch is error 132001 on every send |
+| `WABA_LINK_BASE` | the button base from step 1 |
+| `WABA_WEBHOOK_SECRET` | the signing secret - for Meta this is the **app secret** |
+| `WABA_VERIFY_TOKEN` | any string you also type into Meta's callback form. Do NOT reuse the app secret: this value travels in a URL and lands in access logs |
+| `WABA_TIER_UNIQUE_PER_DAY`, `WABA_QUALITY_RATING` | your live tier and rating - the key test reports drift against Meta |
+| `WABA_DAILY_SPEND_CEILING_USD`, `WABA_TEMPLATE_COST_USD` | the spend governor |
+| `WABA_AGENCY_COOLDOWN_HOURS`, `WABA_HOLD_TIMEOUT_MINUTES`, `WABA_EXPECTATION_TTL_HOURS` | lane pacing |
+
+**Step 3 - press "Test" on the WABA keys.** The probe checks reachability, tier
+and quality drift, AND (with `WABA_ACCOUNT_ID` set) that your template name and
+language are actually APPROVED. Fix anything red before going further.
+
+**Step 4 - opt your partner shops in.** A cold first-contact template may only
+go to a shop that opted in. Use **Admin -> WABA -> "Opt a partner shop in"**;
+a shop that messages your business number opts itself in automatically.
+
+**Step 5 - rehearse.** Set `WABA_ENABLED=on` and leave `WABA_DRY_RUN=on` (its
+default). The whole funnel runs and logs the exact wire text without spending a
+single template. Watch the console.
+
+**Step 6 - go live.** Turn `WABA_DRY_RUN` off, then set `TRANSPORT_MODE` to
+`waba-fallback` (WABA only when the traveller has no Evolution link) or
+`waba-first`. Both taps are red on the Architecture card because both start a
+live sender.
+
+`WABA_KILL=on` is the emergency stop and halts every company-number send,
+first contact and service-window flush alike. Per-thread transport stamps always
+win over the flag, so flipping back to `evolution` never reroutes a conversation
+mid-flight - it only changes where the NEXT first contact goes. The reply leg is
+always the traveller's own wire, in every mode.
+
+`CLOUD_API_ENABLED` is the older, separate Cloud-API sender. It has no dry run
+and no governor - leave it off unless you know you want it.
 
 ## Setting your domain (one key, everywhere)
 

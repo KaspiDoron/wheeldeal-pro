@@ -285,7 +285,16 @@ describe("the traveller is never told 'All good' from a reading we did not get",
     const card = readCode("src/components/VendorCard.tsx");
     // askDone (and queued) get the muted, non-interactive treatment; only a
     // live "Ask for price" wears bg-savings. The green-button trap is gone.
-    expect(card).toMatch(/\(queuedActive \|\| askDone\) && rfqState !== "sending"/);
+    // W12a: the muted-chip set grew by one. A DECLINED or OUT-OF-STOCK card
+    // kept a live green "Ask for price" over copy saying nothing had been
+    // asked - the shop had answered and refused. That is the same trap the
+    // queued chip fixed, one state later.
+    expect(card).toMatch(
+      /\(queuedActive \|\| askDone \|\| cardTerminal\) && rfqState !== "sending"/
+    );
+    expect(card).toMatch(
+      /const cardTerminal = vendor\.stage === "declined" \|\| vendor\.stage === "out-of-stock"/
+    );
     expect(card).toMatch(/cursor-default bg-card2 text-soft/);
     // Once a reply has landed the passive label stops promising one.
     expect(card).toMatch(/vendor\.lastInboundAt \? t\("Reply received"\)/);

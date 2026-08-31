@@ -106,8 +106,30 @@ begin
           or coalesce((raw ->> 'ok')::text, '') = 'priced');
   get diagnostics deident = row_count;
 
-  delete from public.agent_events where created_at < cutoff;
+  -- THE PAYMENT TRAIL IS NOT OPERATIONAL EXHAUST.
+  --
+  -- `subscription-activated` rows are the ONLY record in this system that both
+  -- means money changed hands (PayPal was asked server-side with the secret)
+  -- and names the payer - billing_events has no user_email column at all. This
+  -- blanket delete destroyed them at 90 days, which silently (a) moved every
+  -- customer older than a quarter from Paid to Comped on the monetization
+  -- panel, and (b) disarmed the PayPal reconcile sweep, whose activationsFor()
+  -- then returns [] and classifies the account "unknown" forever.
+  --
+  -- The subscription lifecycle kinds are kept for the LONG window alongside the
+  -- other user-visible history. They are a handful of rows per paying customer,
+  -- not exhaust.
+  delete from public.agent_events
+   where created_at < cutoff
+     and kind not in ('subscription-activated', 'subscription-suspended',
+                      'subscription-resumed');
   get diagnostics events = row_count;
+
+  delete from public.agent_events
+   where created_at < cutoff_long
+     and kind in ('subscription-activated', 'subscription-suspended',
+                  'subscription-resumed');
+  get diagnostics n = row_count; others := others || jsonb_build_object('billing_events_pruned', n);
 
   delete from public.agent_traces where created_at < cutoff;
   get diagnostics traces = row_count;

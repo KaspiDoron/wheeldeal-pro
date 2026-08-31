@@ -116,6 +116,10 @@ describe("the vision ladder is current and hot-fixable", () => {
     expect(ai.match(/visionCeiling\(images\.length, raiseCeiling\)/g)?.length).toBe(3);
     expect(ai).toMatch(/responseMimeType: "application\/json"/);
     expect(ai).toMatch(/response_format: \{ type: "json_object" \}/);
-    expect(readCode("src/lib/agents.ts")).toMatch(/\{ json: true \}/);
+    // W12g: the primary board read now also carries a budget derived from the
+    // TURN's remaining wall clock, so the object is spread rather than a bare
+    // literal. What matters here is unchanged - the extractor asks for JSON.
+    expect(readCode("src/lib/agents.ts")).toMatch(/json: true/);
+    expect(readCode("src/lib/agents.ts")).toMatch(/const visionBudget = msLeft/);
   });
 });

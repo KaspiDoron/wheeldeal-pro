@@ -37,6 +37,11 @@ export const AGENT_EVENT_KINDS = [
   "vague-reply", // reply understood as content-free
   "ambiguous-inbound", // could not attribute/parse an inbound frame
   "price-ungrounded", // extractor price absent from the shop's own words
+  // The market floor resolved a different currency than the price of record,
+  // so every price-sanity net on that thread is inert. Previously silent - and
+  // it was silent for exactly the regions ("Ao Nang", "Krabi") whose bad prices
+  // the nets were built for.
+  "floor-currency-mismatch",
   "price-implausible", // sanity rail rejected a read price
   "price-reconciled", // divided-total corrected to a per-day rate
   "price-arbiter-odd", // the two extraction passes disagreed oddly
@@ -92,6 +97,9 @@ export const AGENT_EVENT_KINDS = [
   "retention-ran", // nightly prune heartbeat - WRITTEN BY supabase/retention.sql
   "engine-disabled", // both engines off by hand; reply stored but unanswered
   "ai-budget-exhausted", // provider budget refused an AI call
+  "ai-chain-exhausted", // EVERY rung refused: the fleet is running deterministic
+  "drain-budget-stop", // the drain hit its wall clock and left rows for the next run
+  "claims-table-missing", // wa_send_claims absent: atomic pacing is inert
   "localize-fallback", // localization fell back to English
   "user-persist-failed", // user-profile write failed
   "booking-write-failed", // all booking insert tiers failed

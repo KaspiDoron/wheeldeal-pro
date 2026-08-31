@@ -112,6 +112,11 @@ describe("em/en dashes appear only in shop-text parsers", () => {
     "src/lib/wa/rate-ladder.test.ts",
     "src/lib/media/reading.ts", // price-board range reads
     "src/lib/wa/price-extract.ts",
+    // A shop writing its availability types the dash it has on its keyboard:
+    // "27 <endash> 1", "27/12 <emdash> 1/1". Reading them is the entire point
+    // of the module - it exists so those digits become a SPAN instead of a
+    // pair of phantom prices.
+    "src/lib/wa/shop-date-range.ts",
     "src/lib/wa/rental-params.ts",
     "src/lib/public-content.test.ts", // asserts ON the ban
     "src/lib/search-summary.test.ts",

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getSession } from "@/lib/session";
-import { sbSelect, sbSelectStrict } from "@/lib/runtime-config";
+import { sbSelect, sbSelectStrict, sbInsert } from "@/lib/runtime-config";
+import { isPriceGrounded } from "@/lib/wa/price-grounding";
 import { identityKey } from "@/lib/wa/phone-key";
 import { clampSince } from "@/lib/session-life";
 import { searchSessionTtlMs } from "@/lib/session-life-config";
@@ -211,8 +212,17 @@ export async function GET(req: Request) {
     )}&order=updated_at.desc&limit=40`
   ).catch(() => [] as ThreadRow[]);
   const stateByVendor = new Map<string, ThreadRow["fields"]>();
+  // The thread's CURRENCY OF RECORD, resolved once by the engine through the
+  // region -> shop-prefix chain and persisted. Reading a menu without it meant
+  // every price here was interpreted in whatever the text happened to name, or
+  // in nothing - a second place the "$250 scooter" could come from.
+  const threadCurrencyByVendor = new Map<string, string | undefined>();
   for (const th of threads) {
     if (th.vendor_id && !stateByVendor.has(th.vendor_id)) stateByVendor.set(th.vendor_id, th.fields);
+    if (th.vendor_id && !threadCurrencyByVendor.has(th.vendor_id)) {
+      const c = (th.fields as { currency?: unknown } | null)?.currency;
+      threadCurrencyByVendor.set(th.vendor_id, typeof c === "string" && c ? c : undefined);
+    }
   }
   // ONE PREDICATE, SHARED (W6.1). This was a local closure - unexported and
   // therefore unreachable - while the Trips re-check, which the owner scoped to
@@ -331,6 +341,14 @@ export async function GET(req: Request) {
       }
       const bodies = digits ? bodiesByNumber.get(identityKey(digits)) : undefined;
       if (!bodies?.length) continue;
+      // THE RAILS TRAVEL WITH THE READ, or this route re-invents the price the
+      // writer just refused.
+      //
+      // This recomputed a menu from the shop's RAW bodies with no duration, no
+      // local currency and none of agent-loop's grounding - and effectivePrice
+      // picks the CHEAPEST menu row, so a phantom harvested here overrode the
+      // ungrounded rail's own drop one layer downstream. The traveller saw a
+      // price the writer had already decided was not real.
       const opts = optionsFromThread(bodies, {
         vehicleClass:
           specClass === "car" || specClass === "scooter" || specClass === "motorbike"
@@ -338,10 +356,34 @@ export async function GET(req: Request) {
             : undefined,
         engineSizeCc: specCc > 0 ? specCc : undefined,
         transmission: specTx === "automatic" || specTx === "manual" ? specTx : undefined,
+        // Without these, a total was divided by 1 and every price was read in
+        // whatever currency the text happened to name - or none.
+        durationDays: specDays > 0 ? specDays : undefined,
+        localCurrency: threadCurrencyByVendor.get(vendorId),
       });
+      // Every row must still trace to the shop's own words. A menu row is
+      // derived by definition, so it is grounded through its per-day figure AND
+      // through the total it could have come from.
+      const grounded = opts.filter((o) =>
+        isPriceGrounded(o.pricePerDay, specDays > 0 ? specDays : undefined, {
+          shopText: bodies.join("\n"),
+        })
+      );
+      if (grounded.length !== opts.length) {
+        void sbInsert("agent_events", [
+          {
+            kind: "price-ungrounded",
+            user_email: session.email,
+            to_number: digits ?? "",
+            vendor_id: vendorId,
+            vendor_name: "",
+            detail: `replies-menu dropped ${opts.length - grounded.length} of ${opts.length} rows with no source in the shop's words`,
+          },
+        ]).catch(() => {});
+      }
       // A SINGLE option is still a price (D2): the old `>= 2` gate kept a
       // shop that named exactly one model with one price on "No price yet".
-      if (opts.length >= 1) optionsByVendor.set(vendorId, opts);
+      if (grounded.length >= 1) optionsByVendor.set(vendorId, grounded);
       // Did this shop ASK where the traveller is? Same rows, no extra query.
       // We keep their own wording so the card can say WHY they want it rather
       // than guessing on the traveller's behalf.

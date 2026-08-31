@@ -273,11 +273,44 @@ describe("the gloss dead band is closed", () => {
     expect(chatMock.fn).not.toHaveBeenCalled();
   });
 
-  it("ONE constant governs both decisions", () => {
+  it("EXECUTED: the gloss gate is 'not English', not 'not Latin script'", async () => {
+    // W12g: THE DEAD BAND HAD ONLY MOVED. Gating the gloss on Latin-dominance
+    // meant Indonesian, Malay, unaccented Vietnamese, Filipino and Spanish -
+    // all ~100% ASCII - were never translated at all. That is not cosmetic:
+    // every deterministic detector downstream (classifyActs, shopAskedQuestion,
+    // shopAskedLocation, shopAskedLicense) is English-only regex reading
+    // `gloss ?? raw`, so with no gloss they ALL returned false. An Indonesian
+    // shop asking "how many days, can I deliver to your hotel?" produced
+    // askedQuestion=false - so `answer` was not even a legal move and the agent
+    // asked for a price again.
+    const { looksEnglish } = await import("./agents");
+    // These are the messages the audit executed. None of them is English.
+    for (const t of [
+      "Mau sewa berapa hari? Bisa antar ke hotel bos",
+      "Kamu nginap dimana? kirim lokasi ya",
+      "Ban xe may gia bao nhieu mot ngay",
+      "Cuantos dias quiere alquilar la moto",
+      "Nak sewa berapa hari bang?",
+    ]) {
+      expect(looksEnglish(t), t).toBe(false);
+    }
+    // ...and real English still needs no gloss.
+    for (const t of [
+      "How many days do you want the scooter for?",
+      "Yes we have it available, the price is 250 per day",
+    ]) {
+      expect(looksEnglish(t), t).toBe(true);
+    }
+  });
+
+  it("the gloss gate reads looksEnglish, not a script ratio", () => {
     const agents = readCode("src/lib/agents.ts");
     expect(agents).toMatch(/export const LATIN_DOMINANT = 0\.9/);
+    // looksEnglish still uses the ratio as ONE of its terms (another script
+    // dominating is a fast no); the gloss no longer uses it alone.
     expect(agents).toMatch(/ascii\.length \/ letters\.length < LATIN_DOMINANT/);
-    expect(agents).toMatch(/ascii\.length \/ letters\.length >= LATIN_DOMINANT/);
+    expect(agents).toMatch(/if \(looksEnglish\(t\)\) return null;/);
+    expect(agents).not.toMatch(/ascii\.length \/ letters\.length >= LATIN_DOMINANT/);
   });
 });
 

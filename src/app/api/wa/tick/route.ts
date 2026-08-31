@@ -84,7 +84,13 @@ export async function GET(req: Request) {
       // fast=true: skip the long typing simulation - these rows already served
       // their stagger, and the guard (not presence cosmetics) enforces gaps.
       // Keeps a 5-row drain safely inside the 60s invocation ceiling.
-      drained += await drainOutbox((k, to, text, lane) => sendFromUser(k, to, text, true, { lane }));
+      // 40s: the tick self-chains, so leaving rows for the next hop is
+      // cheaper than being killed mid-send at Cloud Run's 90s ceiling and
+      // stranding leased rows for the 3-minute claim lease.
+      drained += await drainOutbox(
+        (k, to, text, lane) => sendFromUser(k, to, text, true, { lane }),
+        { budgetMs: 40_000 }
+      );
       const { drainGraphWakeups } = await import("@/lib/graph/engine");
       drained += await drainGraphWakeups((k, to, text) => sendFromUser(k, to, text, true, { lane: "reply" }));
     } catch (e) {

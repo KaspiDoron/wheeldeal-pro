@@ -27,7 +27,7 @@ import type { IntroBudgetBind } from "@/lib/wa-guard";
 //
 // CAPACITY: each search session contacts at most the plan's rolling-window
 // capacity in total (sent + queued), enforced HERE - the UI cap is a courtesy,
-// this is the truth. free 10 / pro 15 / ultra 40 (see wa/capacity.ts).
+// this is the truth. free 10 / pro 15 / ultra 24 (see wa/capacity.ts).
 
 export async function POST(req: Request) {
   const session = await getSession();
@@ -539,9 +539,16 @@ export async function POST(req: Request) {
       const { resolveTransport } = await import("@/lib/wa/transports");
       const resolved = await resolveTransport(session.email, digits).catch(() => null);
       if (resolved && resolved.transport.kind === "waba") {
+        // SELECTION IS NOT A WIRE. Everything below this can still fall through
+        // to Evolution - a dry-run rehearsal, a shop that never opted in, any
+        // servable refusal - so recording "waba" here stamped a transport on
+        // the event ledger AND the consent-gated product_events projection that
+        // nothing actually carried. The single Ask already stamps `evolution`
+        // at selection for exactly this reason; the wire that really carried
+        // the RFQ is stamped at `contacted`, by whichever lane delivered it.
         const { advanceThreadStage } = await import("@/lib/funnel/stages");
         await advanceThreadStage(
-          { userEmail: session.email, toNumber: digits, vendorId: String(v.id), vendorName: v.name, transport: "waba" },
+          { userEmail: session.email, toNumber: digits, vendorId: String(v.id), vendorName: v.name, transport: "evolution" },
           "selected",
           "mass outreach included this shop"
         ).catch(() => {});

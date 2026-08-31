@@ -98,7 +98,13 @@ describe("the form stops throwing the answer away", () => {
   const builder = readCode("src/components/RequestBuilder.tsx");
 
   it("extras are written to accessories, not only to notes", () => {
-    expect(builder).toMatch(/accessories: parseExtras\(storageBox, custom\)/);
+    // W12e: the dates are stripped first. A traveller who typed "27 to 1" had
+    // it appended verbatim to an opener that already stated the picker's
+    // window, so the shop was asked about two different rentals in one
+    // message. The window is a chip now, not an accessory.
+    expect(builder).toMatch(
+      /accessories: parseExtras\(storageBox, withoutWindowText\(custom\)\)/
+    );
     expect(builder).not.toMatch(/accessories: \[\]/);
     // `notes` survives as the traveller's raw words - provenance, and the
     // fallback if the split ever reads a sentence wrongly.

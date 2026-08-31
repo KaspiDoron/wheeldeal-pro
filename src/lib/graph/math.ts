@@ -34,6 +34,21 @@ export function niceRound(x: number): number {
 }
 
 /**
+ * The nicest round number STRICTLY BELOW `ceiling`.
+ *
+ * `niceRound` rounds to the nearest step, so an ask of 199 against a rival of
+ * 200 rounds back up ONTO the rival - turning a beating ask into a match at the
+ * last arithmetic step. Where a value must stay under a bound, round down into
+ * it instead of nearest-and-hope.
+ */
+export function niceRoundBelow(x: number, ceiling: number): number {
+  const step = ceiling >= 1000 ? 50 : ceiling >= 200 ? 10 : ceiling >= 50 ? 5 : 1;
+  const capped = Math.min(x, ceiling - 1);
+  const down = Math.floor(capped / step) * step;
+  return Math.max(1, down > 0 && down < ceiling ? down : Math.max(1, Math.ceil(ceiling) - 1));
+}
+
+/**
  * The target price for the current bargain round - the owner's launch
  * playbook, made GAP-AWARE so the ladder keeps chasing the floor whenever
  * realistic room remains (it used to dead-end when the shop's concession
@@ -50,6 +65,8 @@ export function niceRound(x: number): number {
  * A cheaper REAL rival offer caps the ask (honest leverage, never invented).
  * Returns undefined when no ask below the quote is possible.
  */
+import { beatRivalTarget } from "../negotiation/beat-rival";
+
 export function computeRoundTarget(args: {
   quoted: number;
   floorPrice?: number;
@@ -77,7 +94,30 @@ export function computeRoundTarget(args: {
   // Never re-ask BELOW an earlier ask (the ladder concedes upward, it does not
   // zigzag), and a cheaper real rival caps the ask.
   if (lastTarget && rounds > 0 && base < lastTarget) base = lastTarget;
-  const target = rivalPrice && rivalPrice < base ? Math.max(floorPrice ?? 0, rivalPrice) : base;
-  const nice = niceRound(target);
+  // BEAT THE RIVAL, NEVER MATCH IT.
+  //
+  // `Math.max(floorPrice, rivalPrice)` had no strict-below clamp, so with a
+  // floor of 250 and a rival at 200 the ladder recorded 250 - an ask ABOVE the
+  // price it was simultaneously citing - and with no floor it recorded exactly
+  // the rival, a match. The message number was rescued downstream by
+  // composeBargain's beatRivalTarget, but this value is what the ladder banks
+  // as lastTarget and what the next round builds on, so the ladder drifted
+  // upward against its own leverage. beat-rival.ts owns this arithmetic; use
+  // it rather than a second, weaker copy.
+  let target = base;
+  if (rivalPrice && rivalPrice > 0 && rivalPrice < base) {
+    const beat = beatRivalTarget({
+      rivalPricePerDay: rivalPrice,
+      quotePerDay: quoted,
+      floorPerDay: floorPrice,
+    });
+    target = beat > 0 ? Math.min(beat, base) : rivalPrice;
+  }
+  let nice = niceRound(target);
+  if (rivalPrice && rivalPrice > 0 && nice >= rivalPrice) {
+    // niceRound rounds to the NEAREST step, so a beating ask of 199 against a
+    // rival of 200 rounded straight back onto it. Round down into the bound.
+    nice = niceRoundBelow(target, rivalPrice);
+  }
   return nice >= quoted ? undefined : nice;
 }

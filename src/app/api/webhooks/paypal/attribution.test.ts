@@ -62,6 +62,10 @@ async function loadHook(s: Scenario = {}) {
     },
     SUSPENDED_KIND: "subscription-suspended",
     RESUMED_KIND: "subscription-resumed",
+    // The webhook grant now writes an ATTRIBUTED activation row - the redirect
+    // checkout is the one path where the traveller never returns to the app, so
+    // it was the only real payment leaving no record naming the payer.
+    ACTIVATION_KIND: "subscription-activated",
   }));
   vi.doMock("@/lib/access", async (orig) => {
     const actual = (await orig()) as Record<string, unknown>;

@@ -244,15 +244,44 @@ export async function checkRateLimit(
   const memDay = lane === "intro" ? recent.length : 0;
 
   if (lastHour + memHour >= maxHour) {
+    // THE REAL HORIZON, NOT A FLAT QUARTER HOUR (W-beta30).
+    //
+    // This returned waitSeconds: 900 unconditionally, and the drain re-parks
+    // by it - so a traveller one send over a ROLLING hourly cap went silent
+    // for 15 minutes mid-negotiation, which a shop reads as the customer
+    // losing interest. The window is rolling, so the honest answer is
+    // computable: a slot frees the moment the OLDEST send inside it ages out.
+    // One tiny ordered read, only on the refusal path (rare by construction),
+    // and it degrades to the old flat wait when unreadable.
+    let waitSeconds = 900;
+    try {
+      const { sbSelect } = await import("./runtime-config");
+      const oldest = await sbSelect<{ received_at: string }>(
+        "whatsapp_messages",
+        `select=received_at&${rateBase}&received_at=gte.${encodeURIComponent(
+          hourIso
+        )}&order=received_at.asc&limit=1`
+      );
+      const at = oldest[0]?.received_at ? Date.parse(oldest[0].received_at) : NaN;
+      if (Number.isFinite(at)) {
+        const freesAt = at + 3600_000;
+        // +5s so the retry lands just PAST the boundary, never exactly on it;
+        // clamped to [30s, 900s] so a clock skew cannot produce a silly wait.
+        waitSeconds = Math.max(30, Math.min(900, Math.ceil((freesAt - now) / 1000) + 5));
+      }
+    } catch {
+      /* unreadable - the flat wait above is the safe fallback */
+    }
+    const mins = Math.max(1, Math.round(waitSeconds / 60));
     return {
       allowed: false,
       rateLimited: true,
       lane,
       reason:
         lane === "reply"
-          ? `Reply cap reached (${maxHour}/h). Answers resume shortly.`
+          ? `Reply cap reached (${maxHour}/h). Answers resume in about ${mins} min.`
           : `Hourly cap on NEW conversations reached (${maxHour}/h). Replies to shops already talking to you are unaffected.`,
-      waitSeconds: 900,
+      waitSeconds,
     };
   }
   if (lastDay + memDay >= maxDay) {
@@ -2830,9 +2859,26 @@ export async function sendFromUser(
     // re-POSTing it would risk a duplicate message (a velocity/uniformity ban
     // signal). Ambiguous timeouts propagate as {ok:false} and the drain's
     // transient re-queue handles recovery.
+    // THE SAME THEATRE, PAID TWICE.
+    //
+    // Evolution honours `delay` by HOLDING the send server-side for 1.2-4.5s.
+    // We have already performed the composing presence locally by this point -
+    // on the fast path a burst plus a ~1.2s wait, on the slow path the full
+    // simulation - so the server hold adds that much again to every reply for
+    // theatre the shop has already seen. On the reply lane, where the whole
+    // point is answering fast, it was pure latency: it sits on top of SPTE's
+    // 10s human pause and the Poisson gap.
+    //
+    // Kept on the SLOW path, which is the cold-intro lane: there the extra hold
+    // is part of a deliberately unhurried first contact and costs nobody a
+    // faster answer.
     const r = await evo(email, `/message/sendText/${instance}`, {
       method: "POST",
-      body: JSON.stringify({ number, text: message, delay: typingDelayForLength(message.length) }),
+      body: JSON.stringify({
+        number,
+        text: message,
+        ...(fast ? {} : { delay: typingDelayForLength(message.length) }),
+      }),
     });
     // ONLY a host that rejected the v2 BODY SHAPE can be helped by the v1 body.
     //

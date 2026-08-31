@@ -64,6 +64,16 @@ export type TrackerStage =
   | "sending"
   | "rfq-sent"
   | "awaiting-response"
+  // THE SHOP ANSWERED, AND WE HAVE NOT UNDERSTOOD IT YET.
+  //
+  // Without this the card had no way to say "they replied" that was not also
+  // "we are negotiating", so any inbound - a greeting, a sticker, "hello" -
+  // promoted the card to `negotiating` under the caption "your agent is
+  // pinning the exact price down" (owner problem 2). The funnel ledger has
+  // always drawn this line (`replied` vs `understood`, on whether a
+  // vendor_replies row carries an actionable fact); the card vocabulary just
+  // could not express it.
+  | "replied"
   | "negotiating"
   | "offer-received"
   | "counter-offer" // agent countered the shop's quote - active price haggling

@@ -240,7 +240,30 @@ function buildDigest(
   // its pre-filter) may land before the comprehension counter has - ensure at
   // least 1 on the turn it fires so "last price" counts immediately.
   const curFirm = Boolean((input.extraction as { shopFirm?: boolean } | null)?.shopFirm);
-  const firmCount = curFirm ? Math.max(facts.firmCount, 1) : facts.firmCount;
+  // A DETERMINISTIC BACKSTOP FOR WHEN THE MODEL IS NOT THERE.
+  //
+  // Firmness is single-sourced on the LLM: comprehension's `firm` verdict and
+  // the extractor's `shopFirm`, both riding the SAME provider chain. Chain
+  // exhaustion is a modelled, instrumented production state - so with the
+  // providers down, firmCount reads 0, `bargain` stays legal, the pass falls
+  // through to its deterministic template, and the agent asks "any chance you
+  // can do a bit better?" of a shop that just said "last price, cannot lower".
+  // Repeatedly, up to maxRounds.
+  //
+  // The old FIRM_RX was deleted because it fired on an opening "best price".
+  // This one cannot: it needs a standing quote already on the table AND an
+  // explicit refusal shape, and it only ever ADDS firmness. It reads detText,
+  // so it inherits the English gloss.
+  const REFUSAL =
+    /\b(?:cannot|can'?t|no|not)\s+(?:lower|reduce|discount|go\s+lower|come\s+down)\b|\b(?:last|final|best|fixed|net)\s+price\b|\bno\s+(?:discount|bargain|negotiat)/i;
+  // A standing quote is the guard that keeps this off an opening "best price":
+  // either this turn carries a price, or the thread already had one.
+  const quoteOnTable =
+    Boolean((input.extraction as { pricePerDay?: number } | null)?.pricePerDay) ||
+    (input.usablePrice ?? 0) > 0;
+  const deterministicFirm = quoteOnTable && REFUSAL.test(curInbound);
+  const firmCount =
+    curFirm || deterministicFirm ? Math.max(facts.firmCount, 1) : facts.firmCount;
   // THE SHOP'S MENU, read across the WHOLE thread - a tier named three messages
   // ago is still on the table. Derived, never stored, for the same reason the
   // facts above are: the conversation is the state.
@@ -325,7 +348,10 @@ async function buildSession(
     // SAME VEHICLE. A quote for a different machine is not a rival, and citing
     // one at a shop is an argument we made up.
     const rows = await io
-      .sessionTable(email, thisVendor, vehicleKeyFor(input.rfq))
+      .sessionTable(email, thisVendor, vehicleKeyFor(input.rfq), {
+        engineSizeCc: input.rfq.engineSizeCc,
+        durationDays: input.rfq.durationDays,
+      })
       .catch(() => []);
     // WHICH CURRENCY IS THIS SESSION IN? Comparing across currencies without FX
     // would invent leverage, so the filter below is strict equality - but when
@@ -699,7 +725,8 @@ async function buildTurnContext(
     // replays leave it unset and keep pure turn arithmetic.
     nowMs: io.now(),
     tail: buildTail(input),
-    inbound: { text, verified },
+    // The gloss the app already paid for, finally reaching the composer.
+    inbound: { text, english: (input.inboundEnglish ?? "").trim() || undefined, verified },
     legalMoves: [], // computed deterministically inside runTurn (legalMovesFor)
     guards: {
       floorPerDay: input.floorPrice,
@@ -860,7 +887,13 @@ async function persistThreadOutcome(args: {
     }
     if (typeof input.usablePrice === "number" && input.usablePrice > 0) {
       fields.pricePerDay = input.usablePrice;
-      fields.currency = input.currency;
+      // A RESOLVED CURRENCY IS NEVER OVERWRITTEN BY A GUESS. The tick and
+      // user-action paths used to resolve USD for any region the geocoder
+      // labelled without a country token ("Ao Nang", "Canggu", raw coords), and
+      // this line then wrote that USD over the correct value the inbound path
+      // had already established from the shop's phone prefix. One tick was
+      // enough to turn a THB thread into a dollar thread for good.
+      if (input.currency) fields.currency = input.currency;
       // Provenance travels with the number (owner report 6 C3): without it,
       // the thread row wins the sessionTable merge and a divided package
       // per-day re-enters every sibling as a quoted daily rate.
@@ -1689,7 +1722,10 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
       const newLow = tc.inbound.verified.pricePerDay;
       if (typeof newLow === "number" && newLow > 0) {
         const rows = await io
-          .sessionTable(input.ctx.sender, input.ctx.vendorId ?? "", vehicleKeyFor(input.rfq))
+          .sessionTable(input.ctx.sender, input.ctx.vendorId ?? "", vehicleKeyFor(input.rfq), {
+            engineSizeCc: input.rfq.engineSizeCc,
+            durationDays: input.rfq.durationDays,
+          })
           .catch(() => []);
         const { planSiblingRebargain } = await import("../negotiation/rebargain");
         const { threadKeyFor } = await import("../graph/state");

@@ -16,7 +16,13 @@
 // prune now enforces, the DSAR endpoints, and the honest market-statistics
 // carve-out replacing the blanket "not sold" line. The re-acceptance gate
 // (needsReacceptance) puts every existing user through the new text once.
-export const TERMS_VERSION = "2026-08-30";
+//
+// Bumped 2026-08-31: section 2 now discloses the messaging layer's transient
+// (max 7 days) copy of messages on the linked number - the reply-recovery
+// store render.yaml has always actually configured. The policy said that
+// store "does not exist"; the fix was to make the policy true, not the code
+// blind (turning the store off silently kills missed-reply recovery).
+export const TERMS_VERSION = "2026-08-31";
 export const OPERATOR_NAME = "the Operator"; // TODO: replace with the legal entity name
 export const GOVERNING_LAW = "the State of Israel";
 export const JURISDICTION = "the competent courts of Tel Aviv, Israel";
@@ -250,7 +256,8 @@ export const PRIVACY_SECTIONS: LegalSection[] = [
     n: "2",
     title: "Data we collect",
     body:
-      "Account details (email, phone number), your searches, your device location when you allow it (including any location you choose to share with a rental shop for pickup), the content of WhatsApp messages in the rental-shop threads you open through the app - which may include messages written by your contacts (the shops) - any images or voice notes exchanged in those threads, bookings, feedback, and technical/usage logs.",
+      "Account details (email, phone number), your searches, your device location when you allow it (including any location you choose to share with a rental shop for pickup), the content of WhatsApp messages in the rental-shop threads you open through the app - which may include messages written by your contacts (the shops) - any images or voice notes exchanged in those threads, bookings, feedback, and technical/usage logs. " +
+      "In addition, the messaging infrastructure that keeps your WhatsApp link alive holds a TRANSIENT copy of messages arriving on your linked number - including personal chats outside rental threads - in a dedicated, isolated database, solely so that a rental-shop reply lost in transit can be recovered; these copies are automatically deleted after at most 7 days, are never read, analysed or used for any other purpose, and never enter the app's own data store unless they belong to a rental-shop thread you opened.",
   },
   {
     n: "3",

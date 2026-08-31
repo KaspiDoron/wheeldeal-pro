@@ -73,7 +73,10 @@ describe("the panel renders what it already fetched", () => {
   it("REPRODUCTION: guardCounters are no longer fetched and thrown away", () => {
     // One `health.guardCounters` reference existed - inside the type. Now it is
     // rendered, and the two most alarming kinds are coloured as such.
-    expect(ui).toMatch(/Refused in the last 6h/);
+    // The window is 24h (health/route.ts sinceIso), and this label said 6h -
+    // so the identical payload read four times worse here than on the Health
+    // panel, which has always labelled it "(24h)".
+    expect(ui).toMatch(/Refused in the last 24h/);
     expect(ui).toMatch(/Object\.entries\(health\.guardCounters\)/);
     // The alarming colour now also covers `n === null` - a counter we could not
     // READ is at least as urgent as a counter with a number in it - so the

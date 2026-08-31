@@ -95,7 +95,26 @@ describe("the drop taxonomy - deliberate outcomes never alarm", () => {
   });
 
   it("the benign set is the exception list, not the rule", () => {
-    expect(BENIGN_DROP_REASONS.size).toBeLessThan(10);
+    // The bound exists so "benign" cannot quietly become the default. It was 10
+    // against a set of 7; three outcomes that were always benign BY DESIGN (a
+    // coalesced burst frame whose leader ran the turn, a group/status JID that
+    // is never a shop, an expired hunt whose user-cleared twin was already
+    // benign) joined it, so the ceiling moves once - each entry still has to
+    // argue for itself.
+    expect(BENIGN_DROP_REASONS.size).toBeLessThan(13);
+  });
+
+  it("the three by-design outcomes are benign, and the unreadable holds are LOUD", () => {
+    for (const r of ["image-coalesced", "non-chat-jid", "session-expired"]) {
+      expect(isLoudDrop(r), r).toBe(false);
+    }
+    // The mirror image, and the whole point of splitting the reason strings: a
+    // hold taken because OUR OWN STORE was unreadable is a muted shop reply,
+    // not a deliberate outcome. Before the split both wrote the benign spelling,
+    // so a Supabase blip could mute the fleet with every surface reading green.
+    for (const r of ["takeover-unreadable", "pause-unreadable"]) {
+      expect(isLoudDrop(r), r).toBe(true);
+    }
   });
 });
 

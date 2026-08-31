@@ -191,10 +191,12 @@ export async function GET(req: Request) {
     // PayPal billing.
     (async (): Promise<ServiceHealth> => {
       const { getConfig } = await import("@/lib/runtime-config");
-      const [id, secret, env] = await Promise.all([
+      const [id, secret, env, planPro, planUltra] = await Promise.all([
         getConfig("PAYPAL_CLIENT_ID"),
         getConfig("PAYPAL_CLIENT_SECRET"),
         getConfig("PAYPAL_ENV"),
+        getConfig("PAYPAL_PLAN_PRO"),
+        getConfig("PAYPAL_PLAN_ULTRA"),
       ]);
       if (!id || !secret) {
         return { id: "billing", label: "PayPal (billing)", status: "off", latencyMs: null, detail: "Not configured - plans stay free." };
@@ -213,6 +215,26 @@ export async function GET(req: Request) {
         });
         return res.ok;
       });
+      // VALID CREDENTIALS ARE NOT A WORKING CHECKOUT. The plan ids are what
+      // tierForPaypalPlan matches an approved subscription against, so with
+      // one missing the tile read HEALTHY right up until a real traveller
+      // reached checkout and it failed - the exact shape of failure this panel
+      // exists to catch before a customer does.
+      const missingPlans = [
+        planPro?.trim() ? null : "PAYPAL_PLAN_PRO",
+        planUltra?.trim() ? null : "PAYPAL_PLAN_ULTRA",
+      ].filter(Boolean) as string[];
+      if (r.out === true && missingPlans.length) {
+        return {
+          id: "billing",
+          label: "PayPal (billing)",
+          status: "degraded",
+          latencyMs: r.ms,
+          detail: `Credentials valid, but ${missingPlans.join(" and ")} ${
+            missingPlans.length === 1 ? "is" : "are"
+          } not set - a real checkout for that tier cannot complete.`,
+        };
+      }
       return {
         id: "billing",
         label: "PayPal (billing)",
@@ -281,6 +303,17 @@ export async function GET(req: Request) {
     // An inbound that never became a turn, with its reason - the difference
     // between "the shop went quiet" and "we dropped their message".
     "inbound-dropped",
+    // EVERY AI rung refused (spent minute, spent day, dead keys). Non-zero
+    // means the fleet is negotiating from deterministic templates right now -
+    // the "agents got stupid" state that previously had no number anywhere.
+    "ai-chain-exhausted",
+    // The drain ran out of wall clock and left due rows for the next
+    // invocation. A steady non-zero means the cadence or the fleet size needs
+    // attention - previously this state was a Cloud Run kill instead.
+    "drain-budget-stop",
+    // wa_send_claims is missing, so every atomic pacing guarantee is inert.
+    // Any non-zero here is a launch blocker: run supabase/schema.sql.
+    "claims-table-missing",
   ];
   // ONE BUDGET SHARED BY TWELVE COUNTERS IS ELEVEN COUNTERS THAT CAN BE STARVED.
   //
@@ -403,6 +436,26 @@ export async function GET(req: Request) {
     ),
   };
 
+  // ONE SCARY NUMBER IS TWO DIFFERENT FACTS.
+  //
+  // `inbound-dropped` counts the privacy gate refusing the traveller's OWN
+  // personal chats - which on a personal WhatsApp number must fire constantly,
+  // and is the product working - in the SAME integer as a shop reply that never
+  // became a turn. The owner reading "79 in 24h" cannot tell hygiene from loss,
+  // and the reason has been sitting in `detail` the whole time. Split it
+  // through the SAME taxonomy the per-user safety verdict already uses
+  // (wa/safety-signals BENIGN_DROP_REASONS), and report the magnitude the trace
+  // throttle collapsed (`alsoSuppressed`) rather than only rows - a row can
+  // stand for N events, so rows alone UNDERSTATE chatter and overstate loss.
+  const { summarizeInboundDrops, DROP_SCAN_LIMIT } = await import("@/lib/wa/drop-summary");
+  const dropRows = await sbSelectDark<{ detail: string | null }>(
+    "agent_events",
+    `select=detail&kind=eq.inbound-dropped&created_at=gte.${encodeURIComponent(
+      sinceIso
+    )}&order=created_at.desc&limit=${DROP_SCAN_LIMIT}`
+  );
+  const inboundDrops = summarizeInboundDrops(dropRows, DROP_SCAN_LIMIT);
+
   // ---- the numbers the owner needs to see WITHOUT reading a log ------------
   const { pulse, queueDepth, turnLatency, providerErrors, pushBreadcrumbs } = await import(
     "@/lib/ops/vitals"
@@ -416,6 +469,10 @@ export async function GET(req: Request) {
     // Flagged separately so a client can label the whole block at a glance
     // rather than having to notice one dash among twelve numbers.
     guardCountersUnreadable,
+    // The `inbound-dropped` counter above, split benign-by-design vs
+    // needing-attention with a per-reason histogram. `unreadable: true` means
+    // we could not ask - never a confident zero.
+    inboundDrops,
     webhookSilent,
     webhookLastAcceptedAt: webhookOk30[0]?.created_at ?? null,
     // I4: THE PANELS' OWN BLIND SPOT. Every telemetry write is best-effort by

@@ -148,9 +148,15 @@ Bootstrap env vars in GCP Secret Manager: `SUPABASE_URL`,
 THREE SQL files: `supabase/schema.sql`, `supabase/perf-indexes.sql`,
 `supabase/retention.sql` (the health panel's retention tile stays red until
 the nightly prune has actually run). Evolution runs against its OWN database -
-never the app's Supabase project - with
-`DATABASE_SAVE_DATA_NEW_MESSAGE/CONTACTS/CHATS=false`; the admin anon-probe
-(`/api/admin/rpc-exposure`) alarms if foreign tables ever appear. All other
+never the app's Supabase project. Its save-data posture (render.yaml, owner
+report 8): `CONTACTS=false`, `MESSAGE_UPDATE=false`, but `NEW_MESSAGE=true` +
+`CHATS=true` - the missed-reply recovery sweep reads a 10-row tail per chat
+via `/chat/findMessages`, and turning the store off silently breaks that
+rescue. The price is a transient copy of EVERY message on the linked number
+(personal chats included) in the dedicated DB, so the 7-day `wd-evo-prune`
+cron is MANDATORY, and the Privacy Policy discloses the transient store. The
+admin anon-probe (`/api/admin/rpc-exposure`) alarms if foreign tables ever
+appear in the app's own Supabase. All other
 keys can be pasted in Admin -> Keys (`OPERATOR_NAME` renders red until set).
 See `GUIDE.md` for the step-by-step. GCP (Cloud Run web + gateway + workers)
 is the primary target; `render.yaml` + `deploy/*` remain the live Render half

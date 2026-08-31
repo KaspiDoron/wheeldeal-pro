@@ -84,6 +84,27 @@ async function threshold(name: keyof typeof WARMUP_DEFAULTS): Promise<number> {
   return Number.isFinite(raw) && raw >= 0 ? raw : WARMUP_DEFAULTS[name];
 }
 
+/**
+ * The gate's LIVE thresholds, for surfaces that explain the gate.
+ *
+ * The monetization panel's stall buckets used to hard-code `< 3` and `< 1`
+ * while the gate card on the same screen printed these owner-configured
+ * values, so loosening the gate from Keys made the two halves of one screen
+ * describe different rules. Anything that reports on the gate reads it here.
+ */
+export async function warmupThresholds(): Promise<{
+  minSearches: number;
+  minEngaged: number;
+  minReplies: number;
+}> {
+  const [minSearches, minEngaged, minReplies] = await Promise.all([
+    threshold("WARMUP_MIN_SEARCHES"),
+    threshold("WARMUP_MIN_ENGAGED"),
+    threshold("WARMUP_MIN_REPLIES"),
+  ]);
+  return { minSearches, minEngaged, minReplies };
+}
+
 /** Owner switch. "off" disables the gate and every plan is purchasable. */
 export async function warmupGateOn(): Promise<boolean> {
   const v = ((await getConfig("WARMUP_GATE")) ?? "").trim().toLowerCase();
