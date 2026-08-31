@@ -277,6 +277,9 @@ export const I18N_EXTRAS: string[] = [
   "SIMILAR VEHICLE",
   "This shop does not have the exact vehicle you asked for, and offered a close alternative instead. The price is real - it is just for a different machine, so it is not counted as your best deal.",
   "Say Yes or No on the card. Your agent has paused this conversation until you do.",
+  // W12e: the date/duration conflict chip - two rental windows in one opener.
+  "You typed",
+  "shops will be told",
   "A duplicate of a message this shop already received was skipped.",
   "This shop already got your request in the last day, so a repeat was skipped.",
   "This shop hasn't answered earlier messages, so a repeat wasn't sent - this protects your WhatsApp number.",

@@ -32,6 +32,7 @@ import {
   applyMagnitude,
 } from "./rate-expr";
 import { normalizeDigits } from "../integrity/translation";
+import { readShopDateRange, hasTotalScaleAmount } from "./shop-date-range";
 import { CURRENCIES } from "../currency";
 
 // The set of ISO codes the app can actually display and convert. A currency
@@ -704,6 +705,29 @@ export function extractQuotedPrices(
   // model sees a reply's referent; the deterministic rails must skip it - a
   // shop quoting OUR message would otherwise turn our numbers into its offer.
   text = text.replace(/\n?\(quoting: [\s\S]{0,320}?\)(?=\s*(?:\n|$))/g, " ");
+  // THE SHOP'S OWN DATES ARE NOT MONEY, AND THEY SET THE DIVISOR.
+  //
+  // "27 to 1 the is 1250" is a real reply - available the 27th to the 1st,
+  // 1250 for the lot - and the readers made three different mistakes on it,
+  // none of them "read the price": the bare form lost the 1250 entirely, and
+  // the dated forms turned the DATE digits into THB 2/day and THB 5/day tiers.
+  //
+  // Blanking the range does both jobs at once: those digits can no longer be
+  // harvested by any pattern below, and the span they describe becomes the
+  // divisor for a total the shop stated - THEIR span, not the traveller's, so
+  // the derived rate is the one that shop would actually honour.
+  const dateRange = readShopDateRange(text, {
+    // The bare "27 to 1" shape needs a package-scale amount beside it, or a
+    // genuine two-tier quote ("250 or 300") would be read as a date and a real
+    // cheaper tier discarded.
+    requireTotalNear: hasTotalScaleAmount(text),
+  });
+  if (dateRange) {
+    text =
+      text.slice(0, dateRange.index) +
+      " ".repeat(dateRange.length) +
+      text.slice(dateRange.index + dateRange.length);
+  }
   const wantClass = opts.vehicleClass;
   const days = opts.durationDays && opts.durationDays > 0 ? opts.durationDays : 1;
   const lines = text
@@ -851,7 +875,13 @@ export function extractQuotedPrices(
     // is what turns "1000 or 1250 total" into a real two-tier menu.
     const totalWord = days > 1 ? line.match(PRICE_TOTAL_WORD) : null;
     if (totalWord) {
-      const at = amountIndex(line, totalWord, 1);
+      // PRICE_TOTAL_WORD is bidirectional ("1250 total" AND "total 1250"), so
+      // the amount lands in group 1 or group 2 depending on which spelling
+      // matched. Reading group 1 unconditionally crashed on the word-first
+      // form the bidirectional pattern was added to support.
+      const totalGroup = totalWord[1] != null ? 1 : 2;
+      const totalAmount = parseAmount(totalWord[totalGroup]);
+      const at = amountIndex(line, totalWord, totalGroup);
       // THE SHOP'S OWN SPAN DIVIDES THE SHOP'S OWN TOTAL.
       //
       // "5 days 1250 total" from a traveller asking for 4 divided 1250 by FOUR
@@ -859,11 +889,13 @@ export function extractQuotedPrices(
       // never priced. When the shop names the span in the same breath as the
       // total, that span is the divisor; the traveller's duration is only the
       // fallback for a bare "1250 total".
-      const statedSpan = spanNamedIn(line);
+      // The shop's own words first: an explicit "5 days", then a date range it
+      // stated, then - only if it named neither - the traveller's rental.
+      const statedSpan = spanNamedIn(line) ?? dateRange?.spanDays;
       const span = statedSpan ?? days;
       const amounts = [
-        { amount: parseAmount(totalWord[1]), index: at },
-        ...alternatesBefore(line, at, parseAmount(totalWord[1])),
+        { amount: totalAmount, index: at },
+        ...alternatesBefore(line, at, totalAmount),
       ];
       let took = false;
       for (const a of amounts) {
@@ -990,6 +1022,41 @@ export function extractQuotedPrices(
           listPrice: isListPriceAt(line, amtAt),
         });
         continue;
+      }
+    }
+    // A BARE TOTAL BESIDE A DATE RANGE THE SHOP STATED.
+    //
+    // "27 to 1 the is 1250" and "Dec 27 to Jan 1 is 1250 baht" carry no "total"
+    // word and no day COUNT, so every pattern above declines - and the shop's
+    // real 1250 was simply lost. The dates were the count all along; they are
+    // blanked from this text precisely because they are not money, and the span
+    // they describe is what the amount beside them is divided by. THEIR span,
+    // so the derived rate is one that shop would honour.
+    if (dateRange && dateRange.spanDays > 1) {
+      const bare = line.match(new RegExp(`(?:${CUR_LEAD})?\\s*${NUM}\\s*(?:${CUR_TRAIL})?`, "i"));
+      if (bare) {
+        const at = amountIndex(line, bare, 1);
+        const amount = parseAmount(bare[1]);
+        const perDay = Math.round(amount / dateRange.spanDays);
+        // Package-scale only, and never against an explicitly marked daily.
+        if (
+          amount > dateRange.spanDays * 10 &&
+          perDay > 0 &&
+          !isDurationConditionAt(line, at, bare[0]) &&
+          !contradictsExplicitDaily(perDay)
+        ) {
+          hits.push({
+            pricePerDay: perDay,
+            currency: currencyIn(line) ?? opts.localCurrency,
+            line: rawLine,
+            classMatch: cls ? cls === wantClass : undefined,
+            listPrice: isListPriceAt(line, at),
+            // The SHOP's span, so the like-for-like rival guard can discount a
+            // package the traveller's own rental does not cover.
+            derivedFromDays: dateRange.spanDays,
+          });
+          continue;
+        }
       }
     }
     // A MONTHLY quote -> per-day over the real rental length when it is a

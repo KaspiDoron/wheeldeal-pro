@@ -11,6 +11,7 @@ import type { StructuredRFQ, VehicleClass, Transmission } from "@/lib/types";
 import { useI18n } from "@/lib/i18n";
 import { addDays } from "@/lib/rental-window";
 import { formatDateRange } from "@/lib/clock";
+import { windowConflict, withoutWindowText } from "@/lib/request-window-conflict";
 import { Icon } from "./icons";
 
 const SCOOTER_CC = [110, 125, 150, 160] as const;
@@ -204,7 +205,12 @@ export function RequestBuilder({
       // typed "child seat" got an opener that never mentioned one, twice over:
       // buildMessage reads `accessories`, and the server-side compileOpener
       // (which replaces the client's text entirely) read neither until now.
-      accessories: parseExtras(storageBox, custom),
+      // THE DATES ARE NOT AN ACCESSORY. A traveller who typed "27 to 1" in the
+      // free-text field had it appended verbatim to an opener that ALREADY
+      // states the picker's window, so the shop received two different rentals
+      // in one message. The window is surfaced as a chip instead (below) and
+      // stripped from what the shops are told.
+      accessories: parseExtras(storageBox, withoutWindowText(custom)),
       fulfillment: delivery,
     };
     if (isTwoWheel && cc) fields.engineSizeCc = cc;
@@ -364,11 +370,27 @@ export function RequestBuilder({
                   nobody reads at a glance, and it disagreed in shape with every
                   other surface that states the window. */}
               <span className="rounded-full bg-card px-3 py-1 text-[12px] font-bold text-soft">{formatDateRange(startDate, returnDate)}</span>
+              {/* TWO WINDOWS, ONE MESSAGE. Free text that states its own rental
+                  length used to be appended verbatim to an opener that already
+                  stated the picker's - so the shop was asked about two
+                  different rentals at once. The chip says which one the shops
+                  will actually be told, in the traveller's own words, while
+                  they can still change it. */}
+              {(() => {
+                const clash = windowConflict(custom, days);
+                if (!clash) return null;
+                return (
+                  <span className="rounded-full bg-brandyellow-soft px-3 py-1 text-[12px] font-extrabold text-warn">
+                    {t("You typed")} &ldquo;{clash.typed.text}&rdquo; -{" "}
+                    {t("shops will be told")} {days} {t("days")}
+                  </span>
+                );
+              })()}
               {helmets > 0 && <span className="rounded-full bg-card px-3 py-1 text-[12px] font-bold text-soft">{helmets} 🪖</span>}
               {/* FORMATTED, like every other number the traveller sees. "<30000km"
                   is not a quantity anybody reads at a glance. */}
               {maxMileage && <span className="rounded-full bg-card px-3 py-1 text-[12px] font-bold text-soft">&lt; {maxMileage.toLocaleString()} km</span>}
-              {parseExtras(storageBox, custom).slice(0, 3).map((x) => (
+              {parseExtras(storageBox, withoutWindowText(custom)).slice(0, 3).map((x) => (
                 <span key={x} className="rounded-full bg-card px-3 py-1 text-[12px] font-bold text-soft">{x}</span>
               ))}
               {delivery !== "any" && <span className="rounded-full bg-card px-3 py-1 text-[12px] font-bold text-soft">{delivery === "hotel-delivery" ? t("Delivered") : t("Pickup")}</span>}

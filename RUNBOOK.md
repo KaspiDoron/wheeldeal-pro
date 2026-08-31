@@ -94,13 +94,13 @@ Signed off when the owner has spot-checked each in the product.
 |---|---|---|---|
 | 1 | Currency (bt/baht/bath -> USD, mixed display) | Fixed | W0 token map + ISO whitelist; W3 single-source, no-USD resolution chain |
 | 2 | Greetings advancing to "pinning the price" | Fixed | W1/W4 replied-vs-understood split on the evidence ledger |
-| 3 | Broken syntax ("27 to 1 the is 1250") | Fixed | W3 shop-side date-range reader |
+| 3 | Broken syntax ("27 to 1 the is 1250") | Fixed | W12e `wa/shop-date-range.ts` - the reader this row credited for a wave before it existed. A stated range is two facts: those digits are not money, and the total beside them divides by THAT span |
 | 4 | Hallucinated prices on template replies | Fixed | W0 phantom guards; W3 ungrounded-price rail |
 | 5 | Native-language price + promo ignored | Fixed | W3 native word tables, gloss-first, promo entities |
 | 6 | Substitute vehicle shown as requested | Fixed | W3 trigger union + Similar tag; W4 alternativeOffer on the card |
 | 7 | Green-button trap | Fixed | W0 muted-chip + "Reply received" |
 | 8 | Silent blank UI on no-price reply | Fixed | W4 facts pass + replyUnparsed state + recovery actions |
-| 9 | Free-text date/duration duplication | Fixed | W4 conflict chips |
+| 9 | Free-text date/duration duplication | Fixed | W12e `request-window-conflict.ts` - this row credited "W4 conflict chips" and no such surface existed. The typed window is now a chip and is stripped from the accessories, so one message states one rental |
 | 10 | Consent data layer / monetization | Fixed | W9d opt-in kinds, product_events projection, k>=20 rollup, legal rewrite |
 | 11 | 7 shops stall | Fixed | W0 webhook scoping; W8 wait-not-repark + per-sender budgets |
 | 12 | Language-setting enforcement | Fixed | W2 gloss-bound reads; W4 toggle reachability |
