@@ -23,6 +23,7 @@ export const I18N_CATALOG: string[] = [
   "A real price a real shop gave us for your request. It has not been double-confirmed against the exact model yet - which is normal, not a warning.",
   "A recovered reply couldn't be answered on the first try - it is retried automatically.",
   "A reply arrived from a hidden WhatsApp identity and couldn't be matched to a shop yet.",
+  "A reply couldn't be answered because your records were briefly unreadable - it retries automatically.",
   "A reply couldn't be checked on the first try - it is retried automatically.",
   "A reply couldn't be processed automatically.",
   "A reply couldn't be saved on the first try - it is retried automatically.",

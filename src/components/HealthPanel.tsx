@@ -35,12 +35,28 @@ const STATUS_META: Record<ServiceHealth["status"], { bar: string; width: string;
   off: { bar: "bg-line", width: "w-1/12", label: "NOT SET", text: "text-faint" },
 };
 
+interface InboundDrops {
+  unreadable: boolean;
+  benign: number;
+  loud: number;
+  events: number;
+  truncated: boolean;
+  reasons: { reason: string; rows: number; events: number; loud: boolean }[];
+}
+
 export function HealthPanel() {
   const [services, setServices] = useState<ServiceHealth[] | null>(null);
   // `null` for a single counter means UNKNOWN, not zero - sbCountDark can say
   // so now, and a drop counter that reads zero during an outage is the most
   // reassuring lie this page can tell.
   const [guardCounters, setGuardCounters] = useState<Record<string, number | null> | null>(null);
+  // `inbound-dropped` AS ONE NUMBER IS UNREADABLE. On a personal WhatsApp
+  // number the privacy gate refusing the traveller's own chats is supposed to
+  // fire all day, and it was summed into the same integer as a shop reply that
+  // never became a turn - so "79 in 24h" could be the product working perfectly
+  // or the fleet going deaf, with no way to tell. This is that counter split by
+  // reason through the same taxonomy the per-user safety verdict uses.
+  const [inboundDrops, setInboundDrops] = useState<InboundDrops | null>(null);
   const [webhookSilent, setWebhookSilent] = useState(false);
   const [webhookLastAt, setWebhookLastAt] = useState<string | null>(null);
   // THE VITALS, not just the roll call. A services list can be all-green while
@@ -74,6 +90,7 @@ export function HealthPanel() {
         setNextInS(REFRESH_MS / 1000);
       }
       if (d.guardCounters) setGuardCounters(d.guardCounters);
+      setInboundDrops(d.inboundDrops ?? null);
       setWebhookSilent(Boolean(d.webhookSilent));
       setWebhookLastAt(typeof d.webhookLastAcceptedAt === "string" ? d.webhookLastAcceptedAt : null);
       setRetention(d.retention ?? null);
@@ -221,6 +238,12 @@ export function HealthPanel() {
             <div className="mt-1 flex flex-wrap gap-1.5">
               {Object.entries(guardCounters)
                 .filter(([, n]) => n === null || (n ?? 0) > 0)
+                // inbound-dropped gets the SPLIT block below instead of a chip:
+                // as one integer it reads as N lost shop replies when most of
+                // it is the privacy gate doing exactly its job.
+                .filter(
+                  ([k]) => !(k === "inbound-dropped" && inboundDrops && !inboundDrops.unreadable)
+                )
                 .map(([k, n]) => (
                   <span
                     key={k}
@@ -232,6 +255,51 @@ export function HealthPanel() {
                   </span>
                 ))}
             </div>
+            {inboundDrops && (
+              <div className="mt-2 rounded-xl bg-card p-2 text-[10px] leading-snug">
+                <div className="font-extrabold">
+                  <span className="text-strong">inbound-dropped: </span>
+                  {inboundDrops.unreadable ? (
+                    <span className="text-brandred">unreadable</span>
+                  ) : (
+                    <>
+                      <span className={inboundDrops.loud > 0 ? "text-brandred" : "text-savings"}>
+                        {inboundDrops.loud} needing attention
+                      </span>
+                      <span className="text-faint"> / {inboundDrops.benign} by design</span>
+                    </>
+                  )}
+                </div>
+                {!inboundDrops.unreadable && (
+                  <>
+                    <p className="mt-1 text-faint">
+                      &quot;By design&quot; is the privacy gate refusing chats that are not shop
+                      threads, plus groups and status posts, coalesced photo bursts and closed
+                      searches - on a personal number that is supposed to be constant.
+                      {inboundDrops.events > inboundDrops.benign + inboundDrops.loud
+                        ? ` These ${inboundDrops.benign + inboundDrops.loud} rows stand for ${
+                            inboundDrops.events
+                          } events (the trace throttle collapses repeats).`
+                        : ""}
+                      {inboundDrops.truncated ? " Scan truncated - counts are a floor." : ""}
+                    </p>
+                    <div className="mt-1 flex flex-wrap gap-1.5">
+                      {inboundDrops.reasons.map((r) => (
+                        <span
+                          key={r.reason}
+                          className={`rounded-full px-2 py-0.5 font-bold ${
+                            r.loud ? "bg-brandred-soft text-brandred" : "bg-card2 text-soft"
+                          }`}
+                        >
+                          {r.reason}: {r.rows}
+                          {r.events > r.rows ? ` (${r.events})` : ""}
+                        </span>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
           </div>
         )}
       {vitals && (

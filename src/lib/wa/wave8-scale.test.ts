@@ -89,8 +89,34 @@ describe("the reply budget is per sender, like the cold lane always was", () => 
     const guard = readCode("src/lib/wa-guard.ts");
     expect(guard).toMatch(/const replyBySender = new Map<string, number>\(\)/);
     expect(guard).toMatch(/REPLY_PER_SENDER = 3/);
-    expect(guard).toMatch(/replyGlobalBudget = 8/);
     expect(guard).not.toMatch(/let replyBudget = 6/);
+    // W-beta30: the GLOBAL ceiling scales with the number of distinct senders
+    // that actually have a reply due (3 each, floor 8, cap 24) instead of a
+    // flat 8. The per-sender lane is what stops one traveller monopolising an
+    // invocation - that is pinned above and unchanged. The flat global was
+    // pure queueing latency at fleet scale: with 30 senders each holding one
+    // due reply it forced 4 drain cycles, so the last traveller waited
+    // minutes for a send the atomic per-sender fleet gap would have allowed
+    // immediately. The floor keeps small-fleet behaviour identical.
+    expect(guard).toMatch(
+      /replyGlobalBudget = Math\.max\(8, Math\.min\(24, dueReplySenders \* REPLY_PER_SENDER\)\)/
+    );
+    expect(guard).toMatch(/const dueReplySenders = new Set\(/);
+  });
+
+  it("the drain has a WALL CLOCK, not just bounded sleeps", () => {
+    // Only waitAllowanceMs was bounded, so a loaded invocation could run
+    // 60-180s against Cloud Run's 90s kill - and a kill mid-loop leaves every
+    // claimed row invisible for the 3-minute claim lease while the in-flight
+    // send is ambiguous. Stopping at a deadline hands the remainder to the
+    // next invocation cleanly, which the re-park machinery already reports.
+    const guard = readCode("src/lib/wa-guard.ts");
+    expect(guard).toMatch(/const drainDeadline = Date\.now\(\) \+ Math\.max\(5_000, opts\?\.budgetMs \?\? 45_000\)/);
+    expect(guard).toMatch(/if \(Date\.now\(\) > drainDeadline\)/);
+    // ...and the callers pass budgets sized to their own deadlines.
+    expect(readCode("src/app/api/wa/tick/route.ts")).toMatch(/budgetMs: 40_000/);
+    expect(readCode("src/app/api/wa/reply-tick/route.ts")).toMatch(/budgetMs: 40_000/);
+    expect(readCode("src/app/api/wa/ping/route.ts")).toMatch(/budgetMs: 50_000/);
   });
 });
 

@@ -122,14 +122,18 @@ export const LIMIT_DEFAULTS: Record<string, number> = {
   // made the dropdown go silently empty mid-trip. Autocomplete + session
   // tokens are the cheap SKU - 300 keeps typing fluid while still bounded.
   LIMIT_GEOCODE_PER_DAY: 300,
-  // 300, not 120. ONE shop-reply turn burns 2-6 model calls (extraction,
-  // gloss, safety, the engine pass, localization, the judge), so a 15-shop
-  // hunt at three rounds each is 200-350 - i.e. the old ceiling was about half
-  // of a single real hunt. Past it, `ai-budget` degrades every later reply to
-  // the deterministic composer, so the tester's experience was "the agent got
-  // stupid halfway through" with nothing on screen to explain it. This is a
-  // per-USER daily cap on a free-tier chain, so the real spend ceiling is the
-  // providers' own RPD, not this number.
+  // 300, not 120. ONE shop-reply turn burns 7-9 model calls on the traced
+  // SPTE path (extraction 1 + inbound gloss 1 + comprehension 3 + confirm
+  // read 0-1 + the engine pass 1-2 + localization 0-2), worst case 12-14 with
+  // the conditional post-turn classifiers - the old "2-6" estimate here was
+  // roughly half the real cost and sized this cap wrong. A 10-shop hunt at
+  // 4-5 rounds each is 280-450 calls, so 300 is ~one real free-tier hunt;
+  // paid/tester plans ride the planMultiplier below (ultra x4 = 1200). Past
+  // the cap, `ai-budget` degrades every later reply to the deterministic
+  // composer, so the tester's experience was "the agent got stupid halfway
+  // through" with nothing on screen to explain it. This is a per-USER daily
+  // cap on a free-tier chain, so the real spend ceiling is the providers'
+  // own RPD, not this number.
   LIMIT_AI_PER_DAY: 300, // AI calls (extraction, drafts, translate sweeps)
   LIMIT_TRANSLATE_PER_DAY: 60, // UI translate sweeps (cache means most are free)
   // TWO LANES, NOT ONE POOL.
@@ -184,12 +188,43 @@ const NEVER_SCALED: ReadonlySet<string> = new Set([
   "LIMIT_WA_REPLY_PER_DAY",
 ]);
 
-export async function limitFor(name: keyof typeof LIMIT_DEFAULTS): Promise<number> {
+/**
+ * THE PRODUCT CAPS A PAID PLAN RAISES (W-beta30). These are cost/abuse caps on
+ * the app's own spend, so a plan the traveller pays for (or rides as a
+ * flagged tester) may raise them. The WhatsApp lanes are deliberately absent:
+ * money does not make a number harder to ban.
+ *
+ * The defect this fixes: LIMIT_SEARCHES_PER_DAY=5 and LIMIT_AI_PER_DAY=300
+ * were plan-blind while plans.ts sells Ultra "Unlimited daily searches & AI
+ * actions (fair use)" - so every Ultra tester hit a 5-search wall labeled
+ * "this keeps the service free for everyone" on day one, and one active hunt
+ * (7-9 model calls per reply turn, not the 2-6 the old comment assumed)
+ * crossed the AI cap mid-day with the agent silently going deterministic.
+ */
+const PLAN_SCALED: ReadonlySet<string> = new Set([
+  "LIMIT_SEARCHES_PER_DAY",
+  "LIMIT_AI_PER_DAY",
+  "LIMIT_GEOCODE_PER_DAY",
+  "LIMIT_TRANSLATE_PER_DAY",
+]);
+
+/** Fair-use multiplier per plan for the PLAN_SCALED caps. */
+export function planMultiplier(plan?: string | null): number {
+  if (plan === "ultra" || plan === "business") return 4;
+  if (plan === "pro") return 2;
+  return 1;
+}
+
+export async function limitFor(
+  name: keyof typeof LIMIT_DEFAULTS,
+  opts?: { plan?: string | null }
+): Promise<number> {
   const v = Number(await getConfig(name));
   const base = Number.isFinite(v) && v > 0 ? v : LIMIT_DEFAULTS[name];
   // An explicit owner override is still honoured for these - deliberately
   // typing a number is a decision; flipping a scale switch is not.
   if (NEVER_SCALED.has(name)) return base;
+  let scaled = base;
   // SCALE_MODE: one owner switch that triples every per-user budget when the
   // backend plans have been upgraded to carry the load. Explicit per-limit
   // overrides above still win (they are read first).
@@ -197,11 +232,15 @@ export async function limitFor(name: keyof typeof LIMIT_DEFAULTS): Promise<numbe
     // The ONE flag dialect (config-flags) - "yes"/"enabled" count as on here
     // exactly as they do everywhere else.
     const { parseFlag } = await import("./config-flags");
-    if (parseFlag(await getConfig("SCALE_MODE"), false)) return base * 3;
+    if (parseFlag(await getConfig("SCALE_MODE"), false)) scaled = base * 3;
   } catch {
     /* scale lookup is best-effort */
   }
-  return base;
+  // Plan fair-use multiplier, composing with SCALE_MODE and with an explicit
+  // override (a pasted number is the FREE-tier base; paid tiers scale from
+  // it, so one override keeps the whole ladder coherent).
+  if (opts?.plan && PLAN_SCALED.has(name)) scaled = scaled * planMultiplier(opts.plan);
+  return scaled;
 }
 
 export function limitDefaults() {
@@ -296,9 +335,9 @@ export async function checkDailyLimit(
    * their own per-unit reservation later (the AI budget scope reserves once per
    * model call, so a peek here plus a reserve there would double-count).
    */
-  opts?: { reserve?: boolean }
+  opts?: { reserve?: boolean; plan?: string | null }
 ): Promise<{ allowed: boolean; used: number; limit: number; reason?: string }> {
-  const limit = await limitFor(limitName);
+  const limit = await limitFor(limitName, { plan: opts?.plan });
   const today = new Date().toISOString().slice(0, 10);
   const key = `${kind}:${who}`;
   const mem = counters().get(key);

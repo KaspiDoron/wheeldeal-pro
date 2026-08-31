@@ -41,11 +41,19 @@ export async function POST(req: Request) {
       { status: 503 }
     );
   }
-  const gate = await checkDailyLimit("search", session.email, "LIMIT_SEARCHES_PER_DAY");
+  // Plan-aware (W-beta30): Ultra rides 4x, pro 2x - the flat 5/day wall told
+  // a tester sold "Unlimited daily searches" that the cap "keeps the service
+  // free for everyone", on day one, five minutes in.
+  const gate = await checkDailyLimit("search", session.email, "LIMIT_SEARCHES_PER_DAY", {
+    plan: session.plan,
+  });
   if (!gate.allowed) {
+    const paid = session.plan === "pro" || session.plan === "ultra";
     return NextResponse.json(
       {
-        error: `Daily search limit reached (${gate.limit}/day) - this keeps the service free for everyone. Try again tomorrow.`,
+        error: paid
+          ? `Daily search limit reached (${gate.limit}/day fair use). It resets tomorrow - your live hunts keep negotiating meanwhile.`
+          : `Daily search limit reached (${gate.limit}/day) - this keeps the service free for everyone. Try again tomorrow.`,
       },
       { status: 429 }
     );

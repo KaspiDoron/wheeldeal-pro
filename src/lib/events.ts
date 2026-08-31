@@ -92,6 +92,9 @@ export const AGENT_EVENT_KINDS = [
   "retention-ran", // nightly prune heartbeat - WRITTEN BY supabase/retention.sql
   "engine-disabled", // both engines off by hand; reply stored but unanswered
   "ai-budget-exhausted", // provider budget refused an AI call
+  "ai-chain-exhausted", // EVERY rung refused: the fleet is running deterministic
+  "drain-budget-stop", // the drain hit its wall clock and left rows for the next run
+  "claims-table-missing", // wa_send_claims absent: atomic pacing is inert
   "localize-fallback", // localization fell back to English
   "user-persist-failed", // user-profile write failed
   "booking-write-failed", // all booking insert tiers failed

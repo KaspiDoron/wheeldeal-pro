@@ -304,7 +304,28 @@ async function handlePost(req: Request) {
         openerSeed(session.email, vendorId || digits, new Date().toISOString().slice(0, 13)),
         shopRegion
       );
-      outboundText = (await ensureGloballyUnique(compiled, [])).text;
+      // A REAL RECENT LIST, NOT `[]` (W-beta30). ensureGloballyUnique has two
+      // layers: the cross-fleet Redis signature window, and the in-process
+      // trigram compare against this list. The Redis layer is a documented
+      // no-op when REDIS_URL is unset - so passing an empty list here meant
+      // the single-shop path did ZERO uniqueness checking on exactly the
+      // deployment shape the beta runs. With 30 travellers hunting the same
+      // town, matrix-compiled openers differing only by seed then land on the
+      // same shops from many numbers through one egress IP: the clustering
+      // signature the whole uniqueness layer exists to prevent.
+      //
+      // Same source the engine's own send path uses (recentOutboundGlobal):
+      // one bounded fleet-wide read, and a failure degrades to the old
+      // empty-list behaviour rather than blocking the send.
+      const recent = await sbSelect<{ body: string | null }>(
+        "whatsapp_messages",
+        `select=body&direction=eq.outbound&received_at=gte.${encodeURIComponent(
+          new Date(Date.now() - 6 * 3600_000).toISOString()
+        )}&order=received_at.desc&limit=200`
+      )
+        .then((rows) => rows.map((r) => r.body ?? "").filter(Boolean))
+        .catch(() => [] as string[]);
+      outboundText = (await ensureGloballyUnique(compiled, recent)).text;
     } catch {
       /* keep the client message on any failure */
     }

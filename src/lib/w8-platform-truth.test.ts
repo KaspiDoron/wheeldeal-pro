@@ -145,15 +145,23 @@ describe("W8 #23: the gate and the debit finally name the same thing", () => {
     expect(google).not.toMatch(/recordApi\("geocode",/);
   });
 
-  it("/api/vendors debits `search` against the signed-in user", () => {
+  it("/api/vendors debits `search` against the signed-in user, PLAN-AWARE", () => {
     const route = readCode("src/app/api/vendors/route.ts");
-    expect(route).toMatch(/checkDailyLimit\("search", session\.email, "LIMIT_SEARCHES_PER_DAY"\)/);
+    // W-beta30: the gate now carries the caller's plan. The flat 5/day wall
+    // was plan-blind while plans.ts sells Ultra "Unlimited daily searches
+    // (fair use)", so every Ultra tester hit it on day one - and read a
+    // refusal claiming the cap "keeps the service free for everyone".
+    expect(route).toMatch(
+      /checkDailyLimit\("search", session\.email, "LIMIT_SEARCHES_PER_DAY", \{\s*plan: session\.plan,?\s*\}\)/
+    );
     expect(route).toMatch(/recordApi\("search", 1, session\.email\)/);
   });
 
-  it("/api/geocode debits `geocode` against the signed-in user", () => {
+  it("/api/geocode debits `geocode` against the signed-in user, PLAN-AWARE", () => {
     const route = readCode("src/app/api/geocode/route.ts");
-    expect(route).toMatch(/checkDailyLimit\("geocode", session\.email, "LIMIT_GEOCODE_PER_DAY"\)/);
+    expect(route).toMatch(
+      /checkDailyLimit\("geocode", session\.email, "LIMIT_GEOCODE_PER_DAY", \{\s*plan: session\.plan,?\s*\}\)/
+    );
     expect(route).toMatch(/recordApi\("geocode", 1, session\.email\)/);
   });
 

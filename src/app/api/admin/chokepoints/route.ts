@@ -59,7 +59,15 @@ async function collect() {
     try {
       const { betaAllowlist, BETA_ALLOWLIST_MAX } = await import("@/lib/allowlist");
       const list = await betaAllowlist();
-      return inviteHeadroom(list.length, fleet.hosts.length, fleet.cap, BETA_ALLOWLIST_MAX);
+      // betaAllowlist() always appends the owner; inviteHeadroom's contract
+      // says "the owner is not counted", so subtract that row - the tile was
+      // pessimistic by one for its whole life.
+      return inviteHeadroom(
+        Math.max(0, list.length - 1),
+        fleet.hosts.length,
+        fleet.cap,
+        BETA_ALLOWLIST_MAX
+      );
     } catch {
       return inviteHeadroom(0, 0, 0, 0);
     }

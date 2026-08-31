@@ -26,16 +26,30 @@ const read = (p: string) => readFileSync(join(process.cwd(), p), "utf8");
 // This file therefore pins two things at once - that no config names a branch
 // that does not exist, AND that the repo side of the sync is verifiably clean,
 // so the next person to read the 404 does not go looking here for it.
+//
+// RESOLUTION (2026-08-31): the owner's screenshot showed the breadcrumb still
+// reading the deleted branch while Settings read `master` - Render's record
+// really was pinned to the dead name. Rather than fight Render's state, the
+// branch was RE-CREATED as a mirror of master, and Manual Sync went green
+// immediately (it created wd-evo-prune and applied the Evolution save-data
+// env vars that had been stuck since the Blueprint broke).
+//
+// So the branch is no longer dead, and "it must not exist" is no longer the
+// property worth pinning. The property that can actually hurt now is DRIFT:
+// Render deploys whatever that mirror points at, so if it falls behind
+// master, Render silently runs older infrastructure than Cloud Run. That is
+// what this file checks instead - plus the unchanged rule that no config may
+// name it as a branch to DEVELOP on or deploy from.
 
-const DEAD_BRANCH = "claude/rental-negotiation-app-pc33ux";
+const MIRROR_BRANCH = "claude/rental-negotiation-app-pc33ux";
 
 describe("no config points at a branch that does not exist", () => {
-  it("the deploy workflow neither triggers on nor deploys the dead branch", () => {
+  it("the deploy workflow neither triggers on nor deploys the mirror branch", () => {
     const wf = read(".github/workflows/deploy-gcp.yml");
     // The name may appear in the comment explaining its removal - what must be
     // gone is any LIST ENTRY or ref comparison naming it.
-    expect(wf).not.toMatch(new RegExp(`^\\s*-\\s*${DEAD_BRANCH}\\s*$`, "m"));
-    expect(wf).not.toContain(`refs/heads/${DEAD_BRANCH}`);
+    expect(wf).not.toMatch(new RegExp(`^\\s*-\\s*${MIRROR_BRANCH}\\s*$`, "m"));
+    expect(wf).not.toContain(`refs/heads/${MIRROR_BRANCH}`);
     // ...and master still both triggers and deploys.
     expect(wf).toMatch(/^\s*-\s*master\s*$/m);
     expect(wf).toContain("refs/heads/master");
@@ -47,7 +61,7 @@ describe("no config points at a branch that does not exist", () => {
     expect(section).toContain("claude/rental-agents-legal-setup-o7rgcv");
     // The instruction must not tell a future session to develop on a dead
     // branch - that is how the blueprint got pointed at one.
-    expect(section).not.toMatch(new RegExp(`Develop on \`${DEAD_BRANCH}\``));
+    expect(section).not.toMatch(new RegExp(`Develop on \`${MIRROR_BRANCH}\``));
   });
 
   it("CLAUDE.md says which branch Render reads, because that is not obvious", () => {
@@ -90,7 +104,7 @@ describe("no config points at a branch that does not exist", () => {
 
   it("the infra clone command checks out a branch that exists", () => {
     const md = read("infra/gcp/README.md");
-    expect(md).not.toContain(`git clone -b ${DEAD_BRANCH}`);
+    expect(md).not.toContain(`git clone -b ${MIRROR_BRANCH}`);
     expect(md).toMatch(/git clone -b master/);
   });
 
@@ -103,7 +117,7 @@ describe("no config points at a branch that does not exist", () => {
     // rename cannot leave them behind again.
     for (const f of ["infra/gcp/startup.sh", "infra/gcp/deploy.sh"]) {
       const sh = read(f);
-      expect(sh, `${f} still names the dead branch`).not.toContain(DEAD_BRANCH);
+      expect(sh, `${f} still names the dead branch`).not.toContain(MIRROR_BRANCH);
       expect(sh, `${f} must default BRANCH to master`).toMatch(/BRANCH[:=]"?\$\{BRANCH:-master\}"?|BRANCH="\$\{BRANCH:-master\}"/);
     }
   });
@@ -124,7 +138,29 @@ describe("no config points at a branch that does not exist", () => {
     }
     if (!heads.trim()) return;
     expect(heads).toContain("refs/heads/master");
-    expect(heads).not.toContain(`refs/heads/${DEAD_BRANCH}`);
+    // THE MIRROR MUST NOT DRIFT. The Render Blueprint reads MIRROR_BRANCH
+    // (Render's own record is pinned there and re-creating the branch is what
+    // finally made Manual Sync work). Render therefore deploys whatever that
+    // ref points at - so if it falls behind master, the infrastructure Render
+    // runs is older than the app Cloud Run runs, silently. When the mirror
+    // exists it must name the SAME commit as master; refresh it with
+    // `git push origin master:refs/heads/<mirror>` after any render.yaml
+    // change. (Absent is also fine - that is the pre-2026-08-31 state, where
+    // nothing reads it.)
+    const shaFor = (branch: string) =>
+      heads
+        .split("\n")
+        .find((l) => l.endsWith(`refs/heads/${branch}`))
+        ?.split(/\s+/)[0];
+    const mirrorSha = shaFor(MIRROR_BRANCH);
+    if (mirrorSha) {
+      expect(
+        mirrorSha,
+        `${MIRROR_BRANCH} is the Render Blueprint mirror and has drifted from master - ` +
+          `Render would deploy stale infrastructure. Refresh it: ` +
+          `git push origin master:refs/heads/${MIRROR_BRANCH}`
+      ).toBe(shaFor("master"));
+    }
     // Every branch the deploy workflow lists must actually exist, except the
     // conventional `main` fallback which is deliberately kept for a future
     // rename.

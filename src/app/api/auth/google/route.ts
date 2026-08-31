@@ -123,7 +123,7 @@ export async function POST(req: Request) {
     );
   }
   // PRIVATE-BETA LOCK: Google is a valid credential but the email must still be
-  // on the 26-account invite list.
+  // on the invite allowlist (max 100 entries).
   const { allowedPlanFor, BETA_BLOCK_MESSAGE } = await import("@/lib/allowlist");
   const invitedPlan = await allowedPlanFor(email);
   if (invitedPlan === null) {

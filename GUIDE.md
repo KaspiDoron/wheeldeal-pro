@@ -357,10 +357,10 @@ DATABASE_ENABLED         = true
 DATABASE_PROVIDER        = postgresql
 DATABASE_CONNECTION_URI  = <a DEDICATED Evolution Postgres - NOT the app's Supabase>
 DATABASE_SAVE_DATA_INSTANCE     = true
-DATABASE_SAVE_DATA_NEW_MESSAGE  = false
+DATABASE_SAVE_DATA_NEW_MESSAGE  = true
 DATABASE_SAVE_DATA_MESSAGE_UPDATE = false
 DATABASE_SAVE_DATA_CONTACTS     = false
-DATABASE_SAVE_DATA_CHATS        = false
+DATABASE_SAVE_DATA_CHATS        = true
 CACHE_LOCAL_ENABLED      = true
 CACHE_REDIS_ENABLED      = false
 CONFIG_SESSION_PHONE_CLIENT = Mac OS
@@ -373,11 +373,15 @@ CONFIG_SESSION_PHONE_NAME   = Chrome
 > not only the rental-shop threads. Two hard rules: (1) use a **dedicated**
 > Evolution Postgres (the `wd-evo-db` in `render.yaml` is exactly this), never
 > the app's Supabase - co-locating puts those private tables in a schema with no
-> RLS, readable via the anon API key; (2) keep `SAVE_DATA_NEW_MESSAGE` and
-> `SAVE_DATA_CONTACTS` **false** - nothing on the app's live path reads
-> Evolution's `Message`/`Contact` tables (the recovery sweep pulls a short live
-> tail from the API, not the store), so persisting them only creates a private
-> data store the privacy policy promises does not exist. `INSTANCE` stays true:
+> RLS, readable via the anon API key; (2) `SAVE_DATA_NEW_MESSAGE`/`CHATS` stay
+> **true** (owner report 8) because the missed-reply recovery sweep reads a
+> 10-row tail per chat via `/chat/findMessages` - and that endpoint serves FROM
+> this store, so turning it off silently breaks the rescue of shop replies the
+> webhook lost. The price is a transient copy of every message on the linked
+> number (personal chats included), which is why the **7-day prune cron is
+> MANDATORY on every host** (`wd-evo-prune` on Render, `deploy/prune` on fleet
+> lanes) and the Privacy Policy discloses the transient store. `CONTACTS` and
+> `MESSAGE_UPDATE` stay false - nothing reads them. `INSTANCE` stays true:
 > that is the Baileys auth state (the link itself), not message content.
 
 Docker image for every host: `evoapicloud/evolution-api:v2.3.7` (newest stable v2 is

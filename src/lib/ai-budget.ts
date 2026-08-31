@@ -106,9 +106,21 @@ export async function runWithAiBudget<T>(who: string, fn: () => Promise<T>): Pro
 
   let gate: Awaited<ReturnType<typeof checkDailyLimit>>;
   try {
+    // Plan-aware (W-beta30): webhook-side turns have no session, so the plan
+    // comes from the durable user row (10s cache in access.ts - one cheap
+    // lookup per turn, not per model call). Invited testers have their plan
+    // PINNED there at login, so the tester who rides Ultra gets Ultra's 4x
+    // AI allowance instead of templating out mid-hunt at the free cap.
+    let plan: string | null = null;
+    try {
+      const { getUser, normalizePlan } = await import("./access");
+      plan = normalizePlan((await getUser(email))?.plan);
+    } catch {
+      /* plan lookup is best-effort; the free base still governs */
+    }
     // PEEK, do not consume. This scope reserves one unit per actual model call
     // below; taking one here as well would bill a turn that made none.
-    gate = await checkDailyLimit("ai", email, "LIMIT_AI_PER_DAY", { reserve: false });
+    gate = await checkDailyLimit("ai", email, "LIMIT_AI_PER_DAY", { reserve: false, plan });
   } catch {
     // checkDailyLimit already fails CLOSED on an unreadable count, so reaching
     // here means something unexpected. Do not invent a verdict: run ungoverned

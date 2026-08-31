@@ -263,6 +263,7 @@ export const I18N_EXTRAS: string[] = [
   "A reply couldn't be saved on the first try - it is retried automatically.",
   "A recovered reply couldn't be answered on the first try - it is retried automatically.",
   "Checking this shop's thread failed once - it is retried automatically.",
+  "A reply couldn't be answered because your records were briefly unreadable - it retries automatically.",
   "A reply couldn't be processed automatically.",
   "A duplicate of a message this shop already received was skipped.",
   "This shop already got your request in the last day, so a repeat was skipped.",

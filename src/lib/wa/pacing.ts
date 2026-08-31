@@ -1,7 +1,45 @@
 import "server-only";
 import { createHash } from "crypto";
-import { sbDelete, sbInsertClaim, sbSelectStrict } from "../runtime-config";
+import { sbDelete, sbInsert, sbInsertClaim, sbSelectStrict } from "../runtime-config";
 import { digitsOnly } from "../phone";
+
+/**
+ * ALARM ON THE SILENT DEGRADATION (W-beta30).
+ *
+ * A missing `wa_send_claims` table makes every claim below answer "ok", which
+ * is the right call for a pre-migration install (sends must not brick) and the
+ * WRONG thing to do quietly: with the table absent there is no message
+ * idempotency, no per-recipient mutex, and no gap or fleet slot - the atomic
+ * half of the anti-ban layer is simply not running, on personal phone numbers.
+ * One throttled event per hour per instance puts it on the admin surface.
+ *
+ * TOTALLY INERT ON FAILURE. This is telemetry on the send path: the whole body
+ * is wrapped, not just the promise, because a throw from the write (a store
+ * outage, an unavailable client) would otherwise propagate out of
+ * claimSendSlots and turn "we cannot report a degradation" into "we cannot
+ * send" - the alarm taking down the thing it watches.
+ */
+let lastClaimsMissingAt = 0;
+function noteClaimsTableMissing(): void {
+  const now = Date.now();
+  if (now - lastClaimsMissingAt < 3600_000) return;
+  lastClaimsMissingAt = now;
+  try {
+    void sbInsert("agent_events", [
+      {
+        kind: "claims-table-missing",
+        detail: JSON.stringify({
+          note:
+            "wa_send_claims is absent: message idempotency, the recipient mutex and " +
+            "the gap/fleet pacing slots are ALL inert. Run supabase/schema.sql.",
+          at: new Date(now).toISOString(),
+        }),
+      },
+    ])?.catch?.(() => {});
+  } catch {
+    // Reporting the degradation must never become a second degradation.
+  }
+}
 
 // Pacing primitives for the anti-ban engine.
 //
@@ -296,7 +334,16 @@ export async function claimSendSlots(opts: {
   if (msg === "error") {
     // Missing table = pre-migration: behave exactly as before the feature.
     const probe = await sbSelectStrict("wa_send_claims", "select=slot_key&limit=1");
-    if ("error" in probe && probe.error === "missing") return { ok: true };
+    if ("error" in probe && probe.error === "missing") {
+      // ...but SAY SO. This degradation silently disables every atomic pacing
+      // guarantee in the system - the message-idempotency claim, the
+      // per-recipient mutex, the gap and fleet slots - on an install that
+      // simply never ran schema.sql. The sends still go out, so nothing else
+      // looks wrong; the anti-ban layer is just gone. Throttled to one row an
+      // hour per instance so a missing table cannot itself become a flood.
+      void noteClaimsTableMissing();
+      return { ok: true };
+    }
     return { ok: false, kind: "error" };
   }
 

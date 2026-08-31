@@ -24,6 +24,7 @@
 import "server-only";
 import { sbSelectStrict } from "./runtime-config";
 import { isRealHunt } from "./session-life";
+import { ACTIVATION_KIND } from "./billing/subscription-link";
 
 /** `null` means UNREADABLE - render dark, never as zero. */
 export type Maybe<T> = T | null;
@@ -32,8 +33,18 @@ export interface FunnelStage {
   id: string;
   label: string;
   count: Maybe<number>;
-  /** Conversion from the previous stage, 0-1. Null when either side is dark. */
-  fromPrev: Maybe<number>;
+  /**
+   * Share of SIGNUPS, 0-1. Null when either side is dark.
+   *
+   * WAS "conversion from the previous stage", AND THE STAGES DO NOT NEST.
+   * A traveller can run a search without linking WhatsApp, and every beta
+   * invitee is granted a plan without paying - so dividing each row by the one
+   * above it produced percentages like "Ran a search 175%" and "Paid 600%" on
+   * the owner's live screen. A ratio over 100% is not a conversion rate, it is
+   * a sign the denominator was wrong. Signups is the one population every row
+   * is genuinely a subset of.
+   */
+  ofSignups: Maybe<number>;
 }
 
 export interface StallTerm {
@@ -108,7 +119,7 @@ export async function lifecycleReport(): Promise<LifecycleReport> {
 
   // Five bounded reads. Each answers one stage of the funnel; none of them
   // fans out per user.
-  const [users, linked, searches, engaged] = await Promise.all([
+  const [users, linked, searches, engaged, activations] = await Promise.all([
     rows(
       "app_users",
       "select=email,plan,added_at,warmed_up_at&limit=5000",
@@ -133,11 +144,33 @@ export async function lifecycleReport(): Promise<LifecycleReport> {
       degraded,
       "shop engagement"
     ),
+    // VERIFIED PAYMENTS. `subscription-activated` is written by
+    // /api/subscriptions/paypal-success AFTER asking PayPal, server-side with
+    // the secret, what the subscription really is - so it is the one record in
+    // this system that means MONEY CHANGED HANDS, and it names the traveller.
+    rows(
+      "agent_events",
+      // ACTIVATION_KIND, not a duplicated literal: the writer
+      // (/api/subscriptions/paypal-success) and this reader must never be able
+      // to drift apart on the one string that decides what counts as revenue.
+      `select=user_email&kind=eq.${ACTIVATION_KIND}&limit=5000`,
+      degraded,
+      "verified payments"
+    ),
   ]);
-  // NOTE: "paid" is derived from app_users.plan below rather than from a billing
-  // table, because that column is what actually grants entitlements. Counting a
-  // subscription row instead would report conversions the product does not
-  // honour - a paid row whose plan write failed is a support ticket, not revenue.
+  // "PAID" USED TO MEAN "HAS A PAID PLAN COLUMN", WHICH IS NOT THE SAME THING.
+  //
+  // The old count read app_users.plan, whose comment argued that the column is
+  // what grants entitlements - true, and irrelevant to a revenue funnel. Every
+  // beta invitee is PINNED to their invited plan at login (allowlist ->
+  // setPlan) without paying anything, so on the owner's live screen this row
+  // read "Paid 6" against zero actual customers. A monetization panel that
+  // invents six paying users is worse than one that shows none.
+  //
+  // Split, so both facts are visible and neither is a lie: PAID counts
+  // verified PayPal activations; COMPED counts plan grants with no payment
+  // behind them (invites and testers), which is genuinely useful - it is the
+  // size of the free-riding cohort.
 
   const linkedSet = new Set(
     (linked ?? [])
@@ -168,17 +201,44 @@ export async function lifecycleReport(): Promise<LifecycleReport> {
   const nReached = engaged === null ? null : reachedBy.size;
   const nReplied = engaged === null ? null : repliedBy.size;
   const nWarm = users === null ? null : users.filter((u) => u.warmed_up_at).length;
+  // Distinct travellers with at least one VERIFIED activation. An unreadable
+  // read stays null (dark), never zero - the same fail-dark rule every other
+  // row here follows.
   const nPaid =
-    users === null ? null : users.filter((u) => u.plan === "pro" || u.plan === "business" || u.plan === "ultra").length;
+    activations === null
+      ? null
+      : new Set(
+          (activations ?? [])
+            .map((r) => String(r.user_email ?? "").trim().toLowerCase())
+            .filter(Boolean)
+        ).size;
+  // Plan grants WITHOUT a verified payment: invites and TEST_MODE testers.
+  const paidEmails = new Set(
+    (activations ?? [])
+      .map((r) => String(r.user_email ?? "").trim().toLowerCase())
+      .filter(Boolean)
+  );
+  const nComped =
+    users === null || activations === null
+      ? null
+      : users.filter(
+          (u) =>
+            (u.plan === "pro" || u.plan === "business" || u.plan === "ultra") &&
+            !paidEmails.has(String(u.email ?? "").trim().toLowerCase())
+        ).length;
 
+  // EVERY ROW AS A SHARE OF SIGNUPS. The stages do not nest (see FunnelStage),
+  // so a from-the-row-above ratio produced >100% percentages that read as
+  // impossible conversion rates.
   const stages: FunnelStage[] = [
-    { id: "signup", label: "Signed up", count: signups, fromPrev: null },
-    { id: "linked", label: "Linked WhatsApp", count: nLinked, fromPrev: pct(nLinked, signups) },
-    { id: "searched", label: "Ran a search", count: nSearched, fromPrev: pct(nSearched, nLinked) },
-    { id: "reached", label: "Reached a shop", count: nReached, fromPrev: pct(nReached, nSearched) },
-    { id: "replied", label: "Got a reply", count: nReplied, fromPrev: pct(nReplied, nReached) },
-    { id: "warm", label: "Warmed up", count: nWarm, fromPrev: pct(nWarm, nReplied) },
-    { id: "paid", label: "Paid", count: nPaid, fromPrev: pct(nPaid, nWarm) },
+    { id: "signup", label: "Signed up", count: signups, ofSignups: null },
+    { id: "linked", label: "Linked WhatsApp", count: nLinked, ofSignups: pct(nLinked, signups) },
+    { id: "searched", label: "Ran a search", count: nSearched, ofSignups: pct(nSearched, signups) },
+    { id: "reached", label: "Reached a shop", count: nReached, ofSignups: pct(nReached, signups) },
+    { id: "replied", label: "Got a reply", count: nReplied, ofSignups: pct(nReplied, signups) },
+    { id: "warm", label: "Warmed up", count: nWarm, ofSignups: pct(nWarm, signups) },
+    { id: "paid", label: "Paid (verified)", count: nPaid, ofSignups: pct(nPaid, signups) },
+    { id: "comped", label: "Comped (invite/tester)", count: nComped, ofSignups: pct(nComped, signups) },
   ];
 
   // TIME TO WARM - the single number that says whether the thresholds are set

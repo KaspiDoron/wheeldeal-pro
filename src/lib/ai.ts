@@ -71,15 +71,21 @@ const CALL_TIMEOUT_MS = 14000;
  *  LAST by default - a free rung that answers means no bill - and is hoisted
  *  to the FRONT for premium-tier callers (see chatDetailed opts.tier). */
 export const PROVIDER_NAMES: ProviderName[] = [
+  // FREE RUNGS FIRST, cheapest-failure first. sambanova sits at the back of
+  // the free block (its free tier answered 429 on both pools in the owner's
+  // live probe) and deepseek left the free block entirely - it spends the
+  // owner's pay-as-you-go balance, so it belongs with the paid providers, not
+  // second in line ahead of five free rungs. See the allProviders() blocks.
   "groq",
-  "cerebras",
-  "deepseek",
   "together",
-  "sambanova",
   "openrouter",
   "mistral",
   "huggingface",
   "gemini",
+  "sambanova",
+  "cerebras",
+  // Paid balances: deepseek's is the owner's, the trio below are per-token.
+  "deepseek",
   "anthropic",
   "openai",
   "kimi",
@@ -139,15 +145,6 @@ async function allProviders(): Promise<ProviderConfig[]> {
       fallbackModel: "openai/gpt-oss-20b",
     },
     {
-      name: "deepseek",
-      token: deepseek,
-      endpoint: "https://api.deepseek.com/chat/completions",
-      // deepseek-chat was retired: the API now requires deepseek-v4-pro (top
-      // tier) or deepseek-v4-flash (the fast fallback).
-      model: pick(dsM, "deepseek-v4-pro"),
-      fallbackModel: "deepseek-v4-flash",
-    },
-    {
       name: "together",
       token: together,
       endpoint: "https://api.together.xyz/v1/chat/completions",
@@ -157,40 +154,37 @@ async function allProviders(): Promise<ProviderConfig[]> {
       fallbackModel: "deepseek-ai/DeepSeek-R1-Distill-Llama-70B-free",
     },
     {
-      name: "sambanova",
-      token: sambanova,
-      endpoint: "https://api.sambanova.ai/v1/chat/completions",
-      // DEMOTED below deepseek/together: the free tier queues requests past
-      // any reply-path budget at peak ("experiencing high demand" 429s, or a
-      // silent hold until the socket times out). Correct ids, slow tier - it
-      // still earns its keep on the long-budget callers (distill, admin).
-      // gpt-oss-120b leads (SambaCloud's flagship with dedicated capacity).
-      // The rescue is the 70B pool - SambaNova's own designated replacement
-      // after it removed the whole Llama-3.1-8B line (March 2026). The owner's
-      // live probe caught the previous 8B rescue returning 410 GONE on every
-      // call: a rescue rung must be a model the provider still SERVES, and
-      // 3.3-70B is the one SambaNova routes retired-model traffic to.
-      model: pick(sambaM, "gpt-oss-120b"),
-      fallbackModel: "Meta-Llama-3.3-70B-Instruct",
-    },
-    {
       name: "openrouter",
       token: openrouter,
       endpoint: "https://openrouter.ai/api/v1/chat/completions",
-      // OpenRouter delisted the DeepSeek AND Llama :free tiers (July 2026);
-      // the :free roster churns weekly, so if this 404s paste a current id
+      // The :free roster churns weekly - if this 404s paste a current id
       // from openrouter.ai/collections/free-models as OPENROUTER_MODEL.
-      model: pick(orM, "openai/gpt-oss-20b:free"),
-      fallbackModel: "google/gemma-4-31b-it:free",
+      // gpt-oss-20b:free was delisted (owner's live test 2026-08-31: 404
+      // "unavailable for free"); gemma-4-31b-it:free answered 429 on the same
+      // test - rate-limited but ALIVE - so the proven-live id leads.
+      //
+      // The rescue is `openrouter/free`, OpenRouter's own free-model ROUTER
+      // rather than another pinned slug: it selects whatever free model is
+      // actually being served, so it cannot 404 on a retirement and cannot
+      // drown in one model's pool - the exact two ways this row has failed
+      // live. (The Llama and DeepSeek :free tiers were themselves delisted in
+      // July 2026, so pinning either would repeat the bug.)
+      model: pick(orM, "google/gemma-4-31b-it:free"),
+      fallbackModel: "openrouter/free",
     },
     {
       name: "mistral",
       token: mistral,
       endpoint: "https://api.mistral.ai/v1/chat/completions",
-      // mistral-large-latest remains valid (now routes to Large 3); the old
-      // open-mistral-nemo fallback is legacy - small-latest is the safe one.
-      model: pick(misM, "mistral-large-latest"),
-      fallbackModel: "mistral-small-latest",
+      // small-latest LEADS: the owner's live test (2026-08-31) showed
+      // mistral-large-latest 403s a FREE-tier key with tier_not_allowed
+      // (code 1910) - Large moved behind the paid tier, so leading with it
+      // burned a guaranteed failed round trip on every call. small-latest is
+      // free-tier-safe and plenty for this chain's role; open-mistral-nemo
+      // is the free legacy rescue. A paid key can restore Large via the
+      // MISTRAL_MODEL vault override.
+      model: pick(misM, "mistral-small-latest"),
+      fallbackModel: "open-mistral-nemo",
     },
     {
       name: "huggingface",
@@ -210,9 +204,54 @@ async function allProviders(): Promise<ProviderConfig[]> {
       // you, and every call was paying a failed round trip before the
       // rescue. gemini-flash-latest always names the current GA flash (free
       // tier); the lite alias is the lighter sibling rescue.
-      model: pick(gemM, GEMINI_MODEL),
-      fallbackModel: "gemini-flash-lite-latest",
+      // LITE LEADS (owner's live test, 2026-08-31): gemini-flash-latest took
+      // >6s to first token on the owner's key and timed out its share of the
+      // probe while the lite alias answered. Gemini is the DEEPEST free rung -
+      // by the time the chain reaches it, most of the turn's budget is spent -
+      // so the fast sibling belongs in front and the heavyweight is the
+      // rescue, not the other way round.
+      model: pick(gemM, "gemini-flash-lite-latest"),
+      fallbackModel: GEMINI_MODEL,
       dialect: "gemini",
+    },
+    {
+      name: "sambanova",
+      token: sambanova,
+      endpoint: "https://api.sambanova.ai/v1/chat/completions",
+      // DEMOTED TO THE BACK OF THE FREE CHAIN (W-beta30). The owner's live
+      // probe answered 429 rate_limit_exceeded on BOTH the primary and the
+      // rescue - the free tier is simply at capacity, which no code change
+      // can turn green. Two dead round trips at ladder position 4 ate a
+      // third of SPTE's 9s reply budget before a working rung was tried; at
+      // the back it costs nothing when saturated and still earns its keep
+      // the moment capacity frees up (and on long-budget callers: distill,
+      // admin sweeps).
+      // gpt-oss-120b leads (SambaCloud's flagship with dedicated capacity).
+      // The rescue is the 70B pool - SambaNova's own designated replacement
+      // after it removed the whole Llama-3.1-8B line (March 2026). The owner's
+      // live probe caught the previous 8B rescue returning 410 GONE on every
+      // call: a rescue rung must be a model the provider still SERVES, and
+      // 3.3-70B is the one SambaNova routes retired-model traffic to.
+      model: pick(sambaM, "gpt-oss-120b"),
+      fallbackModel: "Meta-Llama-3.3-70B-Instruct",
+    },
+    {
+      name: "deepseek",
+      token: deepseek,
+      endpoint: "https://api.deepseek.com/chat/completions",
+      // deepseek-chat was retired: the API now requires deepseek-v4-pro (top
+      // tier) or deepseek-v4-flash (the fast fallback).
+      //
+      // PAID, AND ORDERED LIKE IT (W-beta30). This rung spends the OWNER'S
+      // pay-as-you-go balance - it sat SECOND in the chain, so the moment
+      // groq's 30 RPM minute was spent, the entire fleet's spillover silently
+      // billed the owner before any of the five free rungs was tried, and an
+      // emptied balance then 402-doubled every call. It now sits BEHIND the
+      // free rungs; `paid: true` also lets tier:"premium" callers (the
+      // distillation teacher) hoist it deliberately.
+      model: pick(dsM, "deepseek-v4-pro"),
+      fallbackModel: "deepseek-v4-flash",
+      paid: true,
     },
     // DEMOTED TO THE FREE-TIER TAIL: Cerebras retired its open free tier in
     // July 2026 (one-time $5 trial, then 402 "payment required" on every
@@ -401,6 +440,38 @@ function usageStore() {
  *               400/404, so those are two different facts.
  * @param detail Trimmed provider error (status + body, key-free) on a failure.
  */
+/**
+ * One durable breadcrumb when the WHOLE ladder refuses (W-beta30).
+ *
+ * Throttled to one row per minute per instance: a starved fleet fails every
+ * turn, and the point is a visible signal, not a second flood on a database
+ * already having a bad minute. Best-effort like every other telemetry write
+ * here - it must never turn a degraded turn into a failed one.
+ */
+let lastExhaustedAt = 0;
+async function noteChainExhausted(errors: string[]): Promise<void> {
+  const now = Date.now();
+  if (now - lastExhaustedAt < 60_000) return;
+  lastExhaustedAt = now;
+  try {
+    const { sbInsert } = await import("./runtime-config");
+    await sbInsert("agent_events", [
+      {
+        kind: "ai-chain-exhausted",
+        detail: JSON.stringify({
+          // The last few refusals name WHICH rungs and WHY (spent minute,
+          // spent day, dead key), which is the difference between "add a key"
+          // and "raise a budget".
+          reasons: errors.slice(-6).map((e) => String(e).slice(0, 160)),
+          at: new Date(now).toISOString(),
+        }).slice(0, 2000),
+      },
+    ]);
+  } catch {
+    /* a breadcrumb is never worth an exception on the degraded path */
+  }
+}
+
 async function recordUsage(
   provider: string,
   tokens: number,
@@ -853,6 +924,15 @@ async function callProvider(
     // cheap call and the cross-provider failover chain moves on as before.
     const modelIssue =
       /\b(400|404|429)\b/.test(reason) ||
+      // 403 is PER-MODEL too, and its absence here is why the Mistral row
+      // went red on the owner's live test instead of rescuing itself: a free
+      // key calling a tier-gated flagship gets `403 tier_not_allowed` (code
+      // 1910), the sibling small model is free and would have answered - and
+      // the rescue never fired because 403 was not in this set. An
+      // ACCOUNT-level 403 (a dead or revoked key) simply fails the second
+      // cheap call and the cross-provider chain moves on, the same shrug the
+      // 402 branch below takes.
+      /\b403\b/.test(reason) ||
       // 402 "payment required" can arrive PER MODEL (a flagship moved behind
       // a paid plan while a smaller sibling stays free) - there the free
       // fallback id is exactly the right next move. When it is ACCOUNT-level
@@ -1065,7 +1145,7 @@ export async function chatDetailed(
   // fall back to their deterministic heuristic instead of making people wait.
   const deadline = Date.now() + (opts?.budgetMs ?? 38_000);
 
-  const { tryConsume, DEFAULT_RPM } = await import("./ai-rpm");
+  const { tryConsume, DEFAULT_RPM, tryConsumeDay, DEFAULT_RPD, dayKey } = await import("./ai-rpm");
   // FLEET-WIDE RPM when REDIS_URL is set; per-instance otherwise (the exact
   // upgrade path ai-rpm's header promised). One INCR per attempt against a
   // per-(provider, minute) key - a fixed window, which is all the pre-429
@@ -1102,6 +1182,46 @@ export async function chatDetailed(
     }
     return tryConsume(name, Date.now(), capacity);
   };
+  // THE CEILING THE MINUTE BUCKET COULD NOT SEE (W-beta30). Free tiers are
+  // metered per DAY as well as per minute, and nothing modeled it: once a
+  // provider's day was spent, every later turn still paid it a 429 round trip
+  // (doubled by the sibling-model rescue) for the rest of the day. Same shape
+  // and same fail-open contract as the minute budget - Redis when present so
+  // the whole fleet shares one day counter, the in-process counter otherwise,
+  // and any hiccup admits the call rather than refusing it.
+  const rpdCache = new Map<string, { v: number | null; at: number }>();
+  const rpdCap = async (name: string): Promise<number | undefined> => {
+    const cached = rpdCache.get(name);
+    if (cached && Date.now() - cached.at < 60_000) return cached.v ?? DEFAULT_RPD[name];
+    let v: number | null = null;
+    try {
+      const raw = Number(await getConfig(`AI_RPD_${name.toUpperCase()}`));
+      if (Number.isFinite(raw) && raw > 0) v = Math.round(raw);
+    } catch {
+      /* no override */
+    }
+    rpdCache.set(name, { v, at: Date.now() });
+    return v ?? DEFAULT_RPD[name];
+  };
+  const tryConsumeDayFleet = async (name: string): Promise<boolean> => {
+    const capacity = await rpdCap(name);
+    if (!capacity) return true;
+    try {
+      const { hotStateClient } = await import("./rival-cache");
+      const r = await hotStateClient();
+      if (r) {
+        const key = `ai-rpd:${name}:${dayKey()}`;
+        const n = await r.incr(key);
+        // 36h: comfortably past the UTC rollover, so a spent day expires on
+        // its own without a sweeper.
+        if (n === 1) await r.expire(key, 129_600);
+        return n <= capacity;
+      }
+    } catch {
+      /* Redis hiccup -> the per-instance counter below */
+    }
+    return tryConsumeDay(name, Date.now(), capacity);
+  };
   for (let idx = 0; idx < list.length; idx++) {
     const cfg = list[idx];
     if (Date.now() > deadline) {
@@ -1115,6 +1235,14 @@ export async function chatDetailed(
     // all when every bucket is dry.
     if (idx < list.length - 1 && !(await tryConsumeFleet(cfg.name))) {
       errors.push(`${cfg.name}: skipped (rpm budget spent this minute)`);
+      continue;
+    }
+    // ...and the same for the DAY. A provider whose free RPD is gone answers
+    // 429 for hours; skipping it is strictly cheaper than discovering that
+    // again on every turn. Never skips the last rung, exactly like the minute
+    // budget - an attempt that might 429 still beats no attempt at all.
+    if (idx < list.length - 1 && !(await tryConsumeDayFleet(cfg.name))) {
+      errors.push(`${cfg.name}: skipped (daily request budget spent)`);
       continue;
     }
     try {
@@ -1132,6 +1260,16 @@ export async function chatDetailed(
       errors.push(reason);
     }
   }
+  // THE FLEET RAN OUT, AND NOTHING SAID SO (W-beta30). Past this point every
+  // caller degrades silently: the engine composes from deterministic
+  // templates, comprehension falls back to regex, outbound localization sends
+  // English. That is the right BEHAVIOUR - a working template negotiation
+  // beats a frozen one - but the only telemetry that existed fired for the
+  // per-USER daily cap, so fleet-wide starvation (every rung's minute or day
+  // spent, or every key dead) was invisible: the owner saw "the agents got
+  // stupid" with no number anywhere. One throttled event per minute names it,
+  // with the reason each rung refused.
+  void noteChainExhausted(errors);
   return { text: null, error: errors[errors.length - 1] ?? "All AI providers failed." };
 }
 

@@ -61,7 +61,7 @@ export async function POST(req: Request) {
       { status: 403 }
     );
   }
-  // PRIVATE-BETA LOCK: only the 26 invited accounts may proceed - refuse
+  // PRIVATE-BETA LOCK: only invited accounts may proceed (allowlist, max 100) - refuse
   // everyone else at the door (both login AND signup), before any account is
   // created or any code is emailed.
   const { allowedPlanFor, BETA_BLOCK_MESSAGE } = await import("@/lib/allowlist");

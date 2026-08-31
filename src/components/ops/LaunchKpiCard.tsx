@@ -64,7 +64,7 @@ const LAUNCH_HELP = {
   },
   sessions: {
     label: "linked numbers",
-    what: "WhatsApp sessions currently linked. Against the ~40-per-host ceiling this is the pool capacity signal.",
+    what: "WhatsApp sessions currently linked. Against the enforced per-host cap (default 25, EVOLUTION_MAX_PER_HOST) this is the pool capacity signal.",
   },
   dbMsgs: {
     label: "messages 24h",

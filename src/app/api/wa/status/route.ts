@@ -125,7 +125,9 @@ export async function GET(req: Request) {
       await bounded(
         drainOutbox(
           (senderKey, to, text, lane) => sendFromUser(senderKey, to, text, true, { lane }),
-          { senderKey: session.email }
+          // This one already rides a 3s Promise.race; the budget makes the
+          // drain itself stop rather than run on detached after the race.
+          { senderKey: session.email, budgetMs: 3_000 }
         ).catch(() => {})
       );
       const { drainGraphWakeups } = await import("@/lib/graph/engine");

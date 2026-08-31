@@ -18,7 +18,7 @@ interface Stage {
   id: string;
   label: string;
   count: number | null;
-  fromPrev: number | null;
+  ofSignups: number | null;
 }
 interface Stall {
   id: string;
@@ -121,11 +121,19 @@ export function LifecyclePanel() {
         </p>
       </div>
 
-      {/* THE FUNNEL. One row per stage with the conversion from the previous
-          one, because the absolute counts say who is here and only the ratios
-          say where they are being lost. */}
+      {/* THE FUNNEL. One row per stage with its share of SIGNUPS - the
+          stages do not nest (a search needs no WhatsApp link; an invite grants
+          a plan with no payment), so a from-the-row-above ratio produced the
+          "Ran a search 175% / Paid 600%" nonsense the owner photographed. The
+          absolute counts say who is here; one common denominator says where
+          they are being lost. */}
       <div className="surface rounded-blob p-3">
         <div className="text-[13px] font-extrabold text-strong">Lifecycle</div>
+        <p className="mt-0.5 text-[11px] text-faint">
+          Each percentage is a share of signups. &quot;Paid&quot; counts
+          verified PayPal activations only - invited testers appear under
+          Comped, because a granted plan is not revenue.
+        </p>
         <div className="mt-2 space-y-1.5">
           {d.stages.map((s) => (
             <div key={s.id}>
@@ -133,9 +141,9 @@ export function LifecyclePanel() {
                 <span className="truncate text-soft">{s.label}</span>
                 <span className="shrink-0 font-extrabold text-strong">
                   <Num v={s.count} />
-                  {s.fromPrev !== null && (
+                  {s.ofSignups !== null && (
                     <span className="ms-1.5 text-[11px] font-bold text-faint">
-                      <Pct v={s.fromPrev} />
+                      <Pct v={s.ofSignups} />
                     </span>
                   )}
                 </span>

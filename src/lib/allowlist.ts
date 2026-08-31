@@ -113,8 +113,17 @@ export async function betaAllowlist(): Promise<BetaEntry[]> {
 /** The invited plan for an email, or null when the email is NOT allowed. */
 export async function allowedPlanFor(email: string): Promise<PlanId | null> {
   const key = email.trim().toLowerCase();
-  if (!betaLockEnabled()) return "free"; // gate off: anyone allowed (no pin)
   if (key === ownerEmailLocal()) return "ultra";
+  if (!betaLockEnabled()) {
+    // Gate off: anyone may enter - but a LISTED account keeps its listed plan.
+    // The old unconditional "free" here meant flipping BETA_LOCK off actively
+    // DOWNGRADED every invited pro/ultra tester: the login routes pin
+    // `invitedPlan` with setPlan on every sign-in, so the moment the gate
+    // opened, each listed tester's next login overwrote their paid tier with
+    // free. Opening the doors must never demote the people already inside.
+    const listed = (await betaAllowlist()).find((e) => e.email === key);
+    return listed ? listed.plan : "free";
+  }
   const hit = (await betaAllowlist()).find((e) => e.email === key);
   return hit ? hit.plan : null;
 }

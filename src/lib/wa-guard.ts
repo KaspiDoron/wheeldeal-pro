@@ -120,7 +120,7 @@ const DEFAULTS: SecurityPolicies = {
   max_hour_cap: 14,
   // Daily ceiling: a hard backstop against a runaway loop, NOT the per-session
   // limit. Cold introductions are separately bounded by the plan's newContacts
-  // budget (40/window on ultra); the bulk of a busy day is REPLIES to shops that
+  // budget (24/window on ultra); the bulk of a busy day is REPLIES to shops that
   // messaged first (safe). 220 comfortably covers a full session of intros +
   // multi-round negotiation + a follow-up session, while still capping the
   // absolute worst case. The reply-rate breaker + risk pause are the real
@@ -178,7 +178,7 @@ const DEFAULTS: SecurityPolicies = {
   risk_pause_threshold: 70,
   risk_pause_minutes: 240,
   // Burst guard aligned to the first-session blast: a new user firing their full
-  // ultra budget of 40 in ~10 min must NOT trip a freeze after the 5th send (the
+  // ultra budget of 24/window must NOT trip a freeze after the 5th send (the
   // old 5/600s -> 30-min cooldown was the single hardest blocker of the owner's
   // "let them use their whole limit fast" goal). The min-gap already prevents
   // robotic rapid-fire; this only catches a pathological flood well above any
@@ -1396,7 +1396,7 @@ export type IntroBudgetBind = "window" | "unanswered" | "monthly" | "daily";
 /**
  * How many NEW shops this sender can still introduce in the current ROLLING
  * window, and when the next slot frees. Plan-tiered and continuously
- * refreshing (free 10/6h, pro 15/4h, ultra 40/3h) - never a hard "everything
+ * refreshing (free 10/6h, pro 15/4h, ultra 24/3h) - never a hard "everything
  * waits until tomorrow" wall. Exported so the mass-bargain route can tell the
  * user the truth AT CLICK TIME.
  */
@@ -3010,7 +3010,7 @@ export async function guardOutbound(rawOpts: {
   //    breaker, and delivery-rate circuit breaker (double-tick < threshold).
   if (opts.auto && isNewContact) {
     // ROLLING-WINDOW introductions budget (plan-tiered, continuously
-    // refreshing: free 10/6h, pro 15/4h, ultra 40/3h). When it is spent, hold
+    // refreshing: free 10/6h, pro 15/4h, ultra 24/3h). When it is spent, hold
     // to when the next slot frees - at most windowHours away, clamped into the
     // shop's business hours - NEVER a hard "tomorrow morning" wall. Capacity
     // comes back gradually as the oldest introduction ages out of the window.
@@ -3477,6 +3477,22 @@ export type DrainOptions = {
   replyOnly?: boolean;
   /** Restrict to one user's rows (the reply dispatcher is per-sender). */
   senderKey?: string;
+  /**
+   * WALL-CLOCK CEILING for the whole invocation, ms (W-beta30).
+   *
+   * The candidate loop had no elapsed-time check at all - only SLEEPS were
+   * bounded (waitAllowanceMs). One loaded invocation can therefore run far
+   * past its caller's own deadline: a worst-case send is ~29s (two 12s
+   * evoFetch shapes + reconnect + presence + jitter), so 8 reply sends plus
+   * per-sender colds is 60-180s against Cloud Run's `--timeout 90` and Cloud
+   * Scheduler's 60s attempt deadline. The kill leaves every claimed row
+   * invisible for CLAIM_LEASE_MS (3 min) and its in-flight send ambiguous -
+   * and at 30-user load the same overload recurs on the next invocation.
+   *
+   * With a budget the loop simply stops taking new candidates and the
+   * existing re-park machinery reports the remainder honestly.
+   */
+  budgetMs?: number;
 };
 
 export async function drainOutbox(
@@ -3575,14 +3591,43 @@ export async function drainOutbox(
   // invocation's total work.
   const replyBySender = new Map<string, number>();
   const REPLY_PER_SENDER = 3;
-  let replyGlobalBudget = 8;
+  // GLOBAL REPLY CEILING, SCALED TO THE FLEET (W-beta30).
+  //
+  // A flat 8 per invocation was a queueing artefact at fleet scale, not a
+  // safety limit: the real velocity ceiling is the ATOMIC per-sender fleet
+  // gap in claimSendSlots, and that is per-sender by construction. So with
+  // 30 senders each holding one due reply, a flat 8 forced ceil(30/8) = 4
+  // drain cycles - the last traveller's reply waiting 2.5-5 minutes for a
+  // number the pacing layer would have let through immediately.
+  //
+  // Scale it with the number of DISTINCT senders that actually have work
+  // (3 each, matching REPLY_PER_SENDER), capped so one invocation still
+  // cannot run unbounded. The per-sender lanes and the wall-clock budget
+  // above are what keep this honest.
+  const dueReplySenders = new Set(
+    candidates.filter((c) => !isCold(c)).map((c) => c.sender_key)
+  ).size;
+  let replyGlobalBudget = Math.max(8, Math.min(24, dueReplySenders * REPLY_PER_SENDER));
   // The wait-not-repark allowance (see the claim block below): how much of
   // this invocation may be spent SLEEPING to a lane's bucket edge instead of
   // re-parking. Bounded so a burst of contended replies cannot hold the
   // request slot indefinitely; per-loss the ceiling is one lane window.
   const REPLY_WAIT_CEILING_MS = 8_000;
   let waitAllowanceMs = 15_000;
+  // The invocation's own deadline (see DrainOptions.budgetMs). Default 45s:
+  // comfortably inside Cloud Run's 90s kill and Cloud Scheduler's 60s attempt
+  // deadline, with room for the response itself.
+  const drainDeadline = Date.now() + Math.max(5_000, opts?.budgetMs ?? 45_000);
+  let stoppedForBudget = 0;
   for (const cand of candidates) {
+    // STOP TAKING WORK, do not abandon work in flight. Rows not reached stay
+    // unclaimed and due, so the next invocation (or the self-chaining tick)
+    // picks them up immediately - which is strictly better than being killed
+    // mid-send and leaving them leased-and-invisible for three minutes.
+    if (Date.now() > drainDeadline) {
+      stoppedForBudget += 1;
+      continue;
+    }
     // TOO OLD TO SEND. `not_before <= now` is a floor, not a ceiling: a row
     // overdue by three days passed it exactly as well as one overdue by three
     // seconds. That was survivable while nothing drained automatically. With a
@@ -4276,6 +4321,22 @@ export async function drainOutbox(
   // running it on an empty drain costs nothing and closes the window where the
   // only thing keeping the table bounded is the traffic that fills it.
   await gcSendClaims();
+  // A budget stop is a real operational fact, not a silent truncation: it says
+  // this invocation was offered more work than its deadline allowed, which is
+  // the signal that the drain cadence (or the fleet size) needs attention.
+  if (stoppedForBudget > 0) {
+    void sbInsert("agent_events", [
+      {
+        kind: "drain-budget-stop",
+        detail: JSON.stringify({
+          skipped: stoppedForBudget,
+          sent,
+          replyOnly: Boolean(opts?.replyOnly),
+          budgetMs: opts?.budgetMs ?? 45_000,
+        }),
+      },
+    ]).catch(() => {});
+  }
   return sent;
 }
 

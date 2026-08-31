@@ -80,7 +80,7 @@ export async function GET(req: Request) {
       const { drainOutbox } = await import("@/lib/wa-guard");
       drained += await drainOutbox(
         (k, to, text, lane) => sendFromUser(k, to, text, true, { lane }),
-        { replyOnly: true, senderKey: sender }
+        { replyOnly: true, senderKey: sender, budgetMs: 40_000 }
       );
     } catch (e) {
       console.error("[wa:reply-tick]", e instanceof Error ? e.message : e);

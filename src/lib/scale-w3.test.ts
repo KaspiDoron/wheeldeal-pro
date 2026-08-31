@@ -60,8 +60,15 @@ describe("scale #5 - per-provider RPM budgeter", () => {
     // REDIS_URL is set, the in-process bucket otherwise) - the skip-the-spent
     // and never-the-last-rung semantics are unchanged.
     const ai = readCode("src/lib/ai.ts");
-    expect(ai).toMatch(/const \{ tryConsume, DEFAULT_RPM \} = await import\("\.\/ai-rpm"\)/);
+    expect(ai).toMatch(
+      /const \{ tryConsume, DEFAULT_RPM, tryConsumeDay, DEFAULT_RPD, dayKey \} = await import\("\.\/ai-rpm"\)/
+    );
     expect(ai).toMatch(/if \(idx < list\.length - 1 && !\(await tryConsumeFleet\(cfg\.name\)\)\)/);
+    // W-beta30: the same skip for a spent DAY. Free tiers meter per-day as
+    // well as per-minute, and once a day was spent the chain rediscovered it
+    // with a 429 (doubled by the sibling rescue) on every turn for hours.
+    // Same never-skip-the-last-rung contract as the minute budget.
+    expect(ai).toMatch(/if \(idx < list\.length - 1 && !\(await tryConsumeDayFleet\(cfg\.name\)\)\)/);
   });
 });
 

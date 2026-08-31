@@ -27,7 +27,7 @@ import type { IntroBudgetBind } from "@/lib/wa-guard";
 //
 // CAPACITY: each search session contacts at most the plan's rolling-window
 // capacity in total (sent + queued), enforced HERE - the UI cap is a courtesy,
-// this is the truth. free 10 / pro 15 / ultra 40 (see wa/capacity.ts).
+// this is the truth. free 10 / pro 15 / ultra 24 (see wa/capacity.ts).
 
 export async function POST(req: Request) {
   const session = await getSession();

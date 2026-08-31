@@ -26,6 +26,21 @@ export const BENIGN_DROP_REASONS: ReadonlySet<string> = new Set([
   "turn-in-flight", // coalesced into the sibling turn that owns the thread
   "store-claim-lost", // another delivery already ingested it
   "batch-truncated", // deferred to the recovery sweep, not lost
+  // A frame of a photo BURST whose LEADER runs the single coalesced turn
+  // (wa/ingest.ts image-burst). Its row is stored and its bytes ride the
+  // leader's call - only the duplicate turn stands down. ingest.ts's own
+  // comment already called it "never mistaken for a dropped one"; the taxonomy
+  // had simply never been told, so a photo that WAS read raised "a shop reply
+  // needs attention" in the traveller's feed.
+  "image-coalesced",
+  // Group / status-broadcast / newsletter JIDs. Never a shop by definition
+  // (wa/phone-key.ts waIdKind), and on a personal number this fires all day.
+  "non-chat-jid",
+  // The traveller's hunt TTL simply ran out. Its sibling "session-terminated"
+  // (a hunt the user cleared) has always been benign; the expiry spelling was
+  // invented later and never added, so the SAME outcome was silent when the
+  // user closed the search and loud when the clock did.
+  "session-expired",
 ]);
 
 export function isLoudDrop(reason: string): boolean {
@@ -110,6 +125,13 @@ const INBOUND_DETAIL: Record<string, string> = {
   "sync-turn-failed":
     "A recovered reply couldn't be answered on the first try - it is retried automatically.",
   "sync-error": "Checking this shop's thread failed once - it is retried automatically.",
+  // The mirror image of the benign holds above: the agent stood down not
+  // because the traveller was typing or had paused, but because OUR store could
+  // not answer whether they were. That is a muted shop reply, and it is loud.
+  "takeover-unreadable":
+    "A reply couldn't be answered because your records were briefly unreadable - it retries automatically.",
+  "pause-unreadable":
+    "A reply couldn't be answered because your records were briefly unreadable - it retries automatically.",
 };
 
 /**

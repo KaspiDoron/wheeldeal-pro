@@ -316,7 +316,12 @@ export async function processVendorReply(opts: {
   // no card can ever find.
   if (ctx && !ctx.vendorId && resolved.vendorId) ctx.vendorId = resolved.vendorId;
   if (ctx && !ctx.vendorId) {
+    // NOT A DROP - this path falls through and the turn runs. It rides the
+    // `inbound-dropped` kind only because that was the nearest breadcrumb
+    // available; `notDropped: true` lets the health split tell an integrity
+    // warning from a lost reply instead of counting it as a muted shop.
     void noteInboundDropped(opts.senderEmail, from, "derived-unattributed", {
+      notDropped: true,
       note: "thread carries no vendorId - derived rows would be invisible to cards",
     });
   }
@@ -1981,16 +1986,23 @@ export async function processVendorReply(opts: {
       // only the automated answer is withheld, and it resumes once readable.
       const takeover = await isThreadTakenOver(ctx.sender, from);
       if (takeover !== false) {
-        // Distinguish a genuine takeover from an unreadable store (which also
-        // fails closed): a Supabase blip silently muting every reply is exactly
-        // the kind of failure this trace surfaces.
-        void noteInboundDropped(opts.senderEmail, from, "takeover-hold", {
-          state: takeover === true ? "taken-over" : "unreadable",
-        });
+        // ONE REASON STRING WAS CARRYING TWO OPPOSITE FACTS. "taken-over" is
+        // benign by design (the traveller is typing); "unreadable" is OUR store
+        // failing closed and silently muting a real shop reply. Both wrote
+        // `takeover-hold`, which BENIGN_DROP_REASONS filters out of the safety
+        // verdict AND the activity feed - so a Supabase blip could mute every
+        // reply in the fleet with every honesty surface reading green. The
+        // `state` field distinguished them, and nothing read it.
+        void noteInboundDropped(
+          opts.senderEmail,
+          from,
+          takeover === true ? "takeover-hold" : "takeover-unreadable",
+          { state: takeover === true ? "taken-over" : "unreadable" }
+        );
         return;
       }
     } catch {
-      void noteInboundDropped(opts.senderEmail, from, "takeover-hold", { state: "error" });
+      void noteInboundDropped(opts.senderEmail, from, "takeover-unreadable", { state: "error" });
       return; // unreadable -> fail closed (do not auto-reply)
     }
   }
@@ -2005,13 +2017,18 @@ export async function processVendorReply(opts: {
       // absolute, so an unknown pause state withholds the auto-reply.
       const paused = await isSessionPaused(ctx.sender);
       if (paused !== false) {
-        void noteInboundDropped(opts.senderEmail, from, "pause-hold", {
-          state: paused === true ? "paused" : "unreadable",
-        });
+        // Same split as the takeover gate above: a user pause is a deliberate
+        // outcome, an unreadable pause flag is a muted shop reply.
+        void noteInboundDropped(
+          opts.senderEmail,
+          from,
+          paused === true ? "pause-hold" : "pause-unreadable",
+          { state: paused === true ? "paused" : "unreadable" }
+        );
         return;
       }
     } catch {
-      void noteInboundDropped(opts.senderEmail, from, "pause-hold", { state: "error" });
+      void noteInboundDropped(opts.senderEmail, from, "pause-unreadable", { state: "error" });
       return; // unreadable -> fail closed
     }
   }
