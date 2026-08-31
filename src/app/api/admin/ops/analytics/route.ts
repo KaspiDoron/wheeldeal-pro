@@ -86,7 +86,12 @@ export async function GET(req: Request) {
     ),
     sbSelectDark<ReviewRow>(
       "agent_reviews",
-      `select=decision_id,edge_id,rating,verdict,branch_correct,outcome_impact,tags,created_at&order=created_at.desc&limit=400`
+      // Same window as every other read on this page: an all-time review set
+      // fed the "last 30 days" heatmap/timeline/calibration, so old reviews
+      // silently skewed every time-scoped aggregate.
+      `select=decision_id,edge_id,rating,verdict,branch_correct,outcome_impact,tags,created_at&created_at=gte.${encodeURIComponent(
+        since
+      )}&order=created_at.desc&limit=400`
     ),
     getActiveRev(),
     // THE OWNER'S PHRASING A/B (owner report 5 #2, second half). Every fact it

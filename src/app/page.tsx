@@ -1259,6 +1259,12 @@ export default function Home() {
       const canAdvance = (cur: string | undefined, target: string) =>
         cur !== "declined" &&
         cur !== "no-contact" &&
+        // "Out of stock" is terminal for the activity poll: an inbound row exists
+        // (that is how it went out of stock), so the poll would otherwise re-bump
+        // it to "negotiating" every ~6s while the replies poll pushed it back -
+        // the amber<->red flap the traveller saw. Only an explicit unavailable:
+        // false reply (handled in the replies poll) may revive it.
+        cur !== "out-of-stock" &&
         // A "no-response" card (we waited, nothing came) must not be rewound to
         // "awaiting-response" by the mere existence of its RFQ row - only a real
         // reply (active/offer) revives it.
@@ -1812,7 +1818,15 @@ export default function Home() {
   const waiting =
     vendors.some(
       (v) =>
-        ["sending", "rfq-sent", "awaiting-response", "negotiating"].includes(v.stage ?? "") ||
+        // "counter-offer" is the stage a shop enters right after the agent
+        // counters - reply polling MUST stay alive for the shop's response, and
+        // this poll is also the outbox + graph-wakeup drain. Omitting it stalled
+        // a hunt where every shop had been countered. "out-of-stock" keeps the
+        // restock-clear path (in the replies poll) running so the card can
+        // rejoin the live flow on its own.
+        ["sending", "rfq-sent", "awaiting-response", "negotiating", "counter-offer", "out-of-stock"].includes(
+          v.stage ?? ""
+        ) ||
         (v.stage === "offer-received" && v.offer && v.offer.presentable !== true)
     ) ||
     // Keep the reply loop (which also drives inbound recovery + the outbox drain)
@@ -1962,6 +1976,40 @@ export default function Home() {
             return v;
           })
         );
+        // FACTS PASS (owner problem #8). The priced merge below still gates on
+        // a price - but a reply with no readable price is NOT a reply with
+        // nothing in it: the server computed the deposit, the delivery offer,
+        // the call request, the location question and the alternativeOffer for
+        // that same row, and skipping it dropped them all (the blank card, and
+        // the substitution Yes/No UI that had never rendered while the agent
+        // held the thread silent waiting for an answer the traveller was never
+        // shown). Apply the newest row's FACTS for every vendor in the window,
+        // price or no price - the pure merge lives in lib/client/reply-facts so
+        // it is executable under test.
+        {
+          const { applyReplyFacts } = await import("@/lib/client/reply-facts");
+          type FactsRow = Parameters<typeof applyReplyFacts>[1];
+          const newestAnyByVendor = new Map<string, FactsRow>();
+          for (const r of (d.replies ?? []) as FactsRow[]) {
+            if (searchEpoch && r.createdAt && Date.parse(r.createdAt) < epochOnServerClock())
+              continue;
+            const cur = newestAnyByVendor.get(r.vendorId);
+            if (
+              !cur ||
+              Date.parse(String(r.createdAt ?? 0)) > Date.parse(String(cur.createdAt ?? 0))
+            ) {
+              newestAnyByVendor.set(r.vendorId, r);
+            }
+          }
+          if (newestAnyByVendor.size) {
+            setVendors((vs) =>
+              vs.map((v) => {
+                const r = newestAnyByVendor.get(v.id);
+                return r ? applyReplyFacts(v, r) : v;
+              })
+            );
+          }
+        }
         // NEWEST ROW PER VENDOR WINS. The feed arrives newest-first; applying
         // every row would make the OLDEST functional update win (React applies
         // them in order), silently reverting a fresher negotiated price to an
@@ -2078,6 +2126,13 @@ export default function Home() {
                       // the vendor object because VendorCard is memo'd - a
                       // sibling prop would not re-render the card.
                       options: r.options ?? v.offer?.options,
+                      // The shop's counter-proposal of a DIFFERENT vehicle, and
+                      // the per-extra verdicts. The old literal omitted both,
+                      // so a priced row silently wiped what the facts pass (or
+                      // an earlier row) had established - and the substitution
+                      // Yes/No UI could never survive to render.
+                      alternativeOffer: r.alternativeOffer ?? v.offer?.alternativeOffer,
+                      accessories: r.accessories ?? v.offer?.accessories,
                       // K7: the shop asked to talk by phone - the model read
                       // it, the thread stored it, the card wears the chip.
                       wantsCall: r.wantsCall ?? v.offer?.wantsCall,

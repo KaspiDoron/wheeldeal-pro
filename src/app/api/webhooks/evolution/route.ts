@@ -27,8 +27,11 @@ export async function POST(req: Request) {
   // SESSION_SECRET alone (bootstrap env), so authenticity never needed the host
   // list; `!expected` now means SESSION_SECRET is genuinely missing, not a
   // transient vault wobble.
+  // Constant-time compare (W9): the session cookie and the Meta webhook both
+  // timingSafeEqual their secrets; this gate compared with `!==`.
+  const { tokenMatches } = await import("@/lib/wa/webhook-token");
   const expected = webhookAuthToken();
-  if (!expected || presented !== expected) {
+  if (!expected || !tokenMatches(presented, expected)) {
     // Leave a throttled breadcrumb (per process) so a stale-token 403 storm is
     // visible in-app instead of silent. NO body parse, NO full token logged.
     void noteWebhook403("webhooks/evolution", presented);

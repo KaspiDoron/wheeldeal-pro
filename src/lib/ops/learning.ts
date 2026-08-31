@@ -23,7 +23,13 @@ export async function opsLearningEnabled(): Promise<boolean> {
     const v = ((await getConfig("OPS_LEARNING")) ?? "").trim().toLowerCase();
     return v !== "off" && v !== "0" && v !== "false";
   } catch {
-    return true;
+    // Unreadable = OFF, the same direction as every kill switch here
+    // (usage.killSwitchOn: "unreadable means KILLED"). It used to fail OPEN -
+    // the one switch in the system that did - which made the panel's "kill
+    // switch" label a lie during exactly the outages a kill switch is for.
+    // The behavior cost is nil: getOpsLearning's own blob read fails to null
+    // on the same outage, so learning was already effectively off.
+    return false;
   }
 }
 

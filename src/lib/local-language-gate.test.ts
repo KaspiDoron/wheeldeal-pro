@@ -62,8 +62,10 @@ describe("the predicate itself", () => {
 });
 
 describe("every surface speaks the one dialect", () => {
+  // agent-loop left this list when the legacy orchestrator (its only composer)
+  // was deleted - the reply composers are the engines now, and both are here.
   const files = [
-    "src/lib/agent-loop.ts",
+    "src/lib/spte/live.ts",
     "src/lib/graph/nodes.ts",
     "src/lib/graph/engine.ts",
     "src/app/api/outreach/route.ts",

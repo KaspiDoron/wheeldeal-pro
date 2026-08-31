@@ -26,7 +26,20 @@ import { redactRow } from "@/lib/admin/redact-data";
 //      NEW secret column added to any table is withheld by default rather than
 //      leaked until someone remembers this file. That is the "opt-in, not
 //      opt-out" property the admin/users docblock argued for.
-type TableSpec = { name: string; label: string; order: string; select?: string };
+// W9: ownerOnly. Every cross-user CONVERSATION surface in /api/admin/ops/*
+// (transcript, conversations, review, message-path) is gated requireOwner, on
+// the admin/users docblock's own argument: an admin is trusted to manage
+// accounts, which is not the same as being trusted to read every traveller's
+// WhatsApp messages. This route let any admin do exactly that through the
+// Data tab. Tables carrying message TEXT are owner-only now; counts stay
+// visible to all of management (a number is not a transcript).
+type TableSpec = {
+  name: string;
+  label: string;
+  order: string;
+  select?: string;
+  ownerOnly?: boolean;
+};
 const TABLES: TableSpec[] = [
   {
     name: "app_users",
@@ -42,9 +55,9 @@ const TABLES: TableSpec[] = [
   { name: "bookings", label: "Bookings", order: "created_at.desc" },
   { name: "searches", label: "Searches", order: "created_at.desc" },
   { name: "offers", label: "Offers", order: "created_at.desc" },
-  { name: "vendor_replies", label: "Vendor replies", order: "created_at.desc" },
-  { name: "bargain_drafts", label: "Bargain drafts", order: "created_at.desc" },
-  { name: "whatsapp_messages", label: "WhatsApp messages", order: "received_at.desc" },
+  { name: "vendor_replies", label: "Vendor replies", order: "created_at.desc", ownerOnly: true },
+  { name: "bargain_drafts", label: "Bargain drafts", order: "created_at.desc", ownerOnly: true },
+  { name: "whatsapp_messages", label: "WhatsApp messages", order: "received_at.desc", ownerOnly: true },
   {
     name: "wa_sessions",
     label: "WhatsApp sessions",
@@ -64,7 +77,7 @@ const TABLES: TableSpec[] = [
   { name: "market_floor_prices", label: "Market floor prices", order: "updated_at.desc" },
   { name: "whatsapp_number_reputation", label: "WA trust scores", order: "created_at.desc" },
   { name: "whatsapp_security_policies", label: "WA security policies", order: "id.asc" },
-  { name: "wa_outbox", label: "WA outbox (queued)", order: "not_before.asc" },
+  { name: "wa_outbox", label: "WA outbox (queued)", order: "not_before.asc", ownerOnly: true },
 ];
 
 export async function GET(req: Request) {
@@ -96,7 +109,14 @@ export async function GET(req: Request) {
       TABLES.map(async (t) => {
         // No filter - the whole table. Range: 0-0 keeps the body to one row.
         const n = await sbCountDark(t.name, "");
-        return { name: t.name, label: t.label, count: n, unreadable: n === null };
+        return {
+          name: t.name,
+          label: t.label,
+          count: n,
+          unreadable: n === null,
+          // So the panel can render the lock instead of a row view that 403s.
+          ownerOnly: Boolean(t.ownerOnly) && session.role !== "owner",
+        };
       })
     );
     return NextResponse.json({
@@ -108,6 +128,12 @@ export async function GET(req: Request) {
 
   const meta = TABLES.find((t) => t.name === table);
   if (!meta) return NextResponse.json({ error: "Unknown table." }, { status: 400 });
+  if (meta.ownerOnly && session.role !== "owner") {
+    return NextResponse.json(
+      { error: "Conversation content is owner-only. Admins see counts, not transcripts." },
+      { status: 403 }
+    );
+  }
   const rows = await sbSelect<Record<string, unknown>>(
     meta.name,
     `select=${meta.select ?? "*"}&order=${meta.order}&limit=${limit}`

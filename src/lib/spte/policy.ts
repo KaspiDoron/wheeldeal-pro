@@ -13,6 +13,7 @@ import type {
   Uncertainty,
 } from "./types";
 import { menuUnresolved } from "../offer-options";
+import { CONFIRM_WAIT_MS } from "./digest";
 import { alreadyAsked, unaskedObligations, type ThreadLedger } from "../thread/ledger";
 import type { ClaimSubject } from "../thread/claims";
 import { passportOnlyDeposit, counterAlreadyMade } from "../negotiation/deposit-counter";
@@ -272,15 +273,32 @@ export function legalMovesFor(ctx: TurnContext): MoveKind[] {
     if (priceKnown && handoverCostDue(ctx)) moves.push("fulfillment-probe");
   }
 
-  // A complete, priced deal -> present it to the traveller.
+  // A complete, priced deal -> steps 7-8 of the funnel, in order.
   //
-  // ...UNLESS SOMETHING IN IT IS STILL A GUESS. `present` is where a reading
+  // ...UNLESS SOMETHING IN IT IS STILL A GUESS. The recap is where a reading
   // stops being an internal note and becomes the terms of the deal, so ANY
   // subject the thread is carrying a doubt about - not only the deposit -
   // withholds it. `confirm` sits above this in the ladder, so the thread's
   // answer to "we are not sure" is to ask; the turn bound in digest.ts stops a
   // doubt nobody resolves from holding the presentation forever.
-  if (dealComplete(ctx) && !(ctx.thread.digest.pending ?? []).length) moves.push("present");
+  //
+  // The order IS the funnel: verify-recap goes to the SHOP once (the latch is
+  // digest.recapSent); `present` - state-only, traveller-facing - becomes
+  // legal only after the shop confirmed the recap, or after the recap sat
+  // unanswered past the wall-clock bound (the deal is then presented with the
+  // honest caveat that the shop never re-confirmed; waiting forever on a shop
+  // that already stated every term serves nobody).
+  if (dealComplete(ctx) && !(ctx.thread.digest.pending ?? []).length) {
+    const dg = ctx.thread.digest;
+    const recapExpired =
+      typeof dg.recapSentAt === "number" &&
+      typeof ctx.nowMs === "number" &&
+      ctx.nowMs - dg.recapSentAt > CONFIRM_WAIT_MS;
+    if (!dg.recapSent) moves.push("verify-recap");
+    else if (!ctx.thread.presented && (dg.recapConfirmedAt != null || recapExpired)) {
+      moves.push("present");
+    }
+  }
 
   // DO NOT ASK WHAT WE HAVE ALREADY ASKED. A fact-question whose answer is still
   // outstanding is not a legal move - not discouraged in a prompt, ABSENT. This
@@ -306,6 +324,24 @@ export function legalMovesFor(ctx: TurnContext): MoveKind[] {
     for (const subject of unaskedObligations(ctx.thread.digest.ledger ?? EMPTY_LEDGER)) {
       if (subject === "deposit") gated.push("deposit-probe");
       if (subject === "handover") gated.push("fulfillment-probe");
+    }
+    // THE PRICED-THREAD DEAD END (the finding this rescues): every remaining
+    // subject has been asked and never answered, so the ask-once ledger strips
+    // the probes, dealComplete is false, and the old ladder fell to permanent
+    // silence - a thread one message away from a deal, mute forever.
+    // handoverCostDue's own comment stated the honest answer ("present the
+    // deal with the fee marked unknown") and it was never implemented. This
+    // is it: ONE recap, with the unanswered subjects asked inside it - the
+    // single legitimate re-ask, bundled into the confirmation. Only on a
+    // re-entry turn (a tick/wakeup - the shop is not mid-sentence), so a shop
+    // that just spoke gets the normal answer flow first.
+    if (
+      gated.length === 0 &&
+      !ctx.thread.digest.recapSent &&
+      ctx.event !== "shop-message" &&
+      !hasClosed(ctx)
+    ) {
+      gated.push("verify-recap");
     }
   }
 

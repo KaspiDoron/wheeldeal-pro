@@ -413,6 +413,7 @@ export async function POST(req: Request) {
     const r = await sendFromUser(session.email, digits, guard.text).catch(() => ({
       ok: false,
       error: "send failed",
+      ambiguous: false,
     }));
     if (r.ok) {
       sent += 1;
@@ -428,6 +429,14 @@ export async function POST(req: Request) {
       ]).catch(() => {});
       detail.push({ name: info.name, state: "sent" });
     } else {
+      // Release the idempotency claim on failure, or a failed recheck to a shop
+      // is refused as a duplicate for the whole 72h claim-GC horizon (every
+      // sibling direct-send path releases; this one leaked it). An AMBIGUOUS
+      // status-0 timeout keeps the claim - it may have landed.
+      if (!("ambiguous" in r && r.ambiguous)) {
+        const { releaseSendClaim } = await import("@/lib/wa-guard");
+        await releaseSendClaim(session.email, digits, guard.text).catch(() => {});
+      }
       skipped += 1;
       detail.push({ name: info.name, state: "skipped", reason: r.error });
     }

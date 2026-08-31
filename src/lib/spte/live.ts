@@ -30,6 +30,7 @@ import { cheapestCheaperRival } from "../negotiation/leverage";
 import { deriveThreadFacts } from "./thread-facts";
 import { getPolicyOverlay, DEFAULT_OVERLAY, type PolicyOverlay } from "../ops/overlay";
 import { getGraphSpec } from "../graph/engine";
+import { clampTurnDetail } from "./turn-detail";
 /** The historical literal, kept as the config-outage fallback. It is the graph
  *  spec's own default (default-graph.ts:44), not the 6 that used to be here. */
 const DEFAULT_MAX_ROUNDS = 4;
@@ -74,9 +75,19 @@ function mapVerified(input: GraphTurnInput): VerifiedExtraction {
   const text = input.event.kind === "inbound-text" || input.event.kind === "inbound-image"
     ? input.event.shopMessage ?? ""
     : "";
+  // GLOSS BEFORE DETECTORS. Every deterministic detector below is an English
+  // phrase test, and it used to read only the raw local-language text - so a
+  // Thai "คุณอยู่ที่ไหน" (where are you?) matched no location ask and a
+  // localized license request was never seen. The English gloss (threaded from
+  // the agent loop) is CONCATENATED, never substituted: a raw text that
+  // happens to carry English words keeps every hit it had.
+  const gloss = (input.inboundEnglish ?? "").trim();
+  const detText = gloss && text && gloss.toLowerCase() !== text.trim().toLowerCase()
+    ? `${text}\n${gloss}`
+    : text || gloss;
   // WHAT THE SHOP DID, before anything decides how to answer it.
   const acts = classifyActs({
-    text,
+    text: detText,
     hadImage: input.event.kind === "inbound-image" || Boolean(ex?.imageKind),
     imageKind: ex?.imageKind,
     pricePerDay: input.usablePrice,
@@ -85,8 +96,8 @@ function mapVerified(input: GraphTurnInput): VerifiedExtraction {
   // The legacy phrase list still widens the ask - it recognises real questions
   // the classifier's grammar test can miss ("you mean the 125?") - but it can
   // no longer promote a bare "?" or an automated greeting.
-  if (acts.ask === "none" && !acts.autoReply && text && shopAskedQuestion(text) && /\?/.test(text)) {
-    const stripped = text.replace(/\?/g, "");
+  if (acts.ask === "none" && !acts.autoReply && detText && shopAskedQuestion(detText) && /\?/.test(detText)) {
+    const stripped = detText.replace(/\?/g, "");
     if (shopAskedQuestion(stripped)) acts.ask = "substantive";
   }
   return {
@@ -112,8 +123,8 @@ function mapVerified(input: GraphTurnInput): VerifiedExtraction {
     // tell "I have two bikes at different prices" from "here is my price", and
     // read the ambiguity as "wrong vehicle" - closing a live negotiation.
     options: Array.isArray(ex?.options) ? ex.options : undefined,
-    variance: text ? signalsVariance(text) : false,
-    askedLocation: text ? shopAskedLocation(text) : false,
+    variance: detText ? signalsVariance(detText) : false,
+    askedLocation: detText ? shopAskedLocation(detText) : false,
     // A QUESTION MARK IS NOT A QUESTION. `shopAskedQuestion` is `/\?/` plus a
     // phrase list, so a price board captioned "...which model would you like?"
     // and an auto-reply's rhetorical "How many days rental?" both counted as
@@ -123,8 +134,8 @@ function mapVerified(input: GraphTurnInput): VerifiedExtraction {
     // the phrase list it recognises, never for bare punctuation.
     askedQuestion: acts.ask !== "none",
     acts,
-    askedLicense: text ? shopAskedLicense(text) : false,
-    askedLicensePhoto: text ? shopAskedLicensePhoto(text) : false,
+    askedLicense: detText ? shopAskedLicense(detText) : false,
+    askedLicensePhoto: detText ? shopAskedLicensePhoto(detText) : false,
     // The shop refused to lower ("last price") - the deterministic extractor
     // read it (agents.ts FIRM_RX) and it USED to be dropped on the floor here.
     firm: Boolean((ex as { shopFirm?: boolean } | null)?.shopFirm),
@@ -206,10 +217,19 @@ function buildDigest(
   // (from the extractor) is OR-ed in so "last price" counts on the turn it lands.
   const inbound = input.priorInbound ?? [];
   const outbound = input.priorOutbound ?? [];
-  const curInbound =
+  // GLOSS BEFORE THE SCANNERS (same doctrine as mapVerified): thread-facts,
+  // the claim ledger and the options accumulator are all English phrase tests,
+  // and the current message used to reach them raw. Concatenated, never
+  // substituted, so English words in the raw text keep their hits.
+  const curRaw =
     input.event.kind === "inbound-text" || input.event.kind === "inbound-image"
       ? input.event.shopMessage ?? ""
       : "";
+  const curGloss = (input.inboundEnglish ?? "").trim();
+  const curInbound =
+    curGloss && curRaw && curGloss.toLowerCase() !== curRaw.trim().toLowerCase()
+      ? `${curRaw}\n${curGloss}`
+      : curRaw || curGloss;
   const facts = deriveThreadFacts({
     outbound,
     outboundKinds: input.priorOutboundKinds,
@@ -460,12 +480,30 @@ function metaKindFor(move: MoveKind): string {
     // round counter, and it must not be paced as a cold intro either.
     case "confirm":
       return "auto-confirm";
+    // The step-7 recap: its own kind, so the transcript can say "final
+    // verification" instead of filing it as a generic reply.
+    case "verify-recap":
+      return "auto-recap";
     case "answer":
-    case "deposit-probe":
-    case "fulfillment-probe":
-    case "pickup-location":
-    case "option-probe":
       return "auto-answer";
+    // PROBES ARE NOT ANSWERS. Collapsing them into "auto-answer" (a) hid the
+    // deposit/pickup discovery from every transcript and admin panel (the
+    // whole INFO_DISCOVERY phase rendered as generic answers), (b) counted
+    // them into legacyCounts.answer - a cap they were never meant to spend -
+    // and (c) gave them the answer's 10-25s pacing instead of the 15-40s the
+    // graph engine's jitter table already assigns these very kinds. The graph
+    // engine has stamped them distinctly all along; SPTE now speaks the same
+    // vocabulary.
+    case "deposit-probe":
+      return "auto-deposit-probe";
+    case "fulfillment-probe":
+      return "auto-fulfillment-probe";
+    case "pickup-location":
+      return "auto-pickup-location";
+    case "option-probe":
+      return "auto-option-probe";
+    case "confirm-vehicle":
+      return "auto-confirm-vehicle";
     case "farewell":
     case "closing-message":
     case "redirect-close":
@@ -653,7 +691,13 @@ async function buildTurnContext(
       vendorId: input.ctx.vendorId ?? "",
       shop: input.ctx.vendorName ?? input.ctx.vendorId ?? "shop",
       digest,
+      // The once-latch that stops `present` re-marking an already-presented
+      // deal on every later inbound (fields.presented is the durable truth).
+      presented: Boolean((state?.fields as { presented?: boolean } | undefined)?.presented),
     },
+    // Wall clock for the confirm-wait and recap-answer bounds. Live only -
+    // replays leave it unset and keep pure turn arithmetic.
+    nowMs: io.now(),
     tail: buildTail(input),
     inbound: { text, verified },
     legalMoves: [], // computed deterministically inside runTurn (legalMovesFor)
@@ -710,10 +754,14 @@ async function persistThreadOutcome(args: {
   delivered?: SpteLiveResult["delivered"];
   /** W4.6 - the thread's language decision after this turn. */
   language?: ThreadLanguage;
+  /** The move this turn composed - "present" flips fields.presented so the
+   *  funnel phase can reach "presented"/"complete". */
+  move?: string;
 }): Promise<void> {
-  const { input, io, prior, digest, verified, delivered, language } = args;
+  const { input, io, prior, digest, verified, delivered, language, move } = args;
   try {
-    const { newThreadState, derivePhase } = await import("../graph/state");
+    const { newThreadState, derivePhase, depositKnown, fulfillmentKnown } =
+      await import("../graph/state");
     const base =
       prior ??
       newThreadState({
@@ -724,6 +772,67 @@ async function persistThreadOutcome(args: {
         toNumber: input.event.toDigits,
       });
     const fields = { ...base.fields };
+    // PROJECT THE DEAL-TERM FIELDS, so the funnel phase can leave "negotiating".
+    //
+    // `derivePhase` reads depositType/depositNote, fulfillment, rounds and
+    // presented off `fields` - but the ONLY writer of those was the graph
+    // engine's `applyExtractionToState`, which the SPTE route makes unreachable
+    // on an ordinary turn. So on the live engine every thread's phase was
+    // mechanically pinned at "opening"/"negotiating" no matter how much the shop
+    // had told us: the exact "stuck in negotiating" the owner reported. We
+    // project the deal-term fields HERE (declined/price/tone stay owned by the
+    // careful SPTE reads below - this is not a wholesale re-run of the graph
+    // extraction). A fact stated on THIS turn comes from the extraction; a fact
+    // stated on an EARLIER turn survives via the durable comprehension.
+    const ex = input.extraction;
+    if (ex?.depositType) {
+      fields.depositType = ex.depositType;
+      if (typeof ex.depositAmount === "number") fields.depositAmount = ex.depositAmount;
+      fields.depositCurrency = ex.depositCurrency ?? fields.currency;
+    }
+    if (ex?.deposit) fields.depositNote = ex.deposit;
+    if (ex?.pickupOffered === true) {
+      fields.pickupOffered = true;
+      if (!fields.fulfillment) fields.fulfillment = "pickup";
+    }
+    if (ex?.delivers === true) fields.fulfillment = "delivery";
+    else if (ex?.onShopOnly === true && fields.fulfillment !== "delivery") fields.fulfillment = "on-shop";
+    if (typeof ex?.deliveryFee === "number") fields.deliveryFee = ex.deliveryFee;
+    // The durable comprehension carries deposit/fulfillment facts the shop stated
+    // on EARLIER turns (this turn's extraction may be empty). OR them in so a
+    // fact once learned survives a quiet turn and keeps the phase advanced.
+    if (digest.depositKnown && !depositKnown(fields)) {
+      const kind = digest.comprehension?.depositKind;
+      fields.depositType =
+        kind === "cash" || kind === "cash-or-document"
+          ? "cash"
+          : kind === "document"
+            ? "passport"
+            : kind === "card"
+              ? "other"
+              : kind === "none"
+                ? "none"
+                : fields.depositType;
+      if (!fields.depositType) fields.depositNote = fields.depositNote ?? "stated";
+    }
+    if (digest.fulfillmentKnown && !fulfillmentKnown(fields)) {
+      const mode = digest.comprehension?.handoverMode;
+      fields.fulfillment =
+        mode === "delivery" || mode === "both"
+          ? "delivery"
+          : mode === "pickup"
+            ? "pickup"
+            : "on-shop";
+    }
+    // Round count and firm count are the model's durable read; keep the higher of
+    // the two sources so a projection can never walk them backwards.
+    fields.rounds = Math.max(fields.rounds ?? 0, digest.round ?? 0);
+    fields.firmCount = Math.max(fields.firmCount ?? 0, digest.firmCount ?? 0);
+    // A deal the agent PRESENTED to the traveller is past negotiation - and a
+    // recap the SHOP has confirmed is presented by definition (step 8): the
+    // confirm turn already marked the offer presentable, so the phase and the
+    // UI flip together off the same digest fact.
+    if (move === "present" || digest.recapConfirmedAt != null) fields.presented = true;
     fields.digest = persistableDigest(digest);
     // The vehicle this thread negotiates (owner report 6 C4): the thread key
     // is user:number with no vehicle dimension, so the sessionTable's rival
@@ -928,6 +1037,76 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
     }).catch(() => null);
   }
 
+  // ---- STEP 8: DID THE SHOP CONFIRM THE RECAP? (funnel: shop_confirmed) -----
+  //
+  // Runs BEFORE the turn so the policy sees the confirmation when it decides
+  // the move. Two readers, in order of trust:
+  //   - DETERMINISTIC correction: a fresh verified quote that differs from the
+  //     standing one on an unconfirmed recap is the shop amending the terms -
+  //     the latch re-opens for ONE amended recap (recapAmended bounds it) and
+  //     the new number flows through the ordinary digest merge.
+  //   - The ConfirmAnswer read (the same schema-validated judgement the
+  //     confirm-wait uses): "yes correct", "ok see you", a thumbs-up sentence
+  //     all confirm; talking about something else does not. On yes: the clock
+  //     stamps, the funnel reaches shop_confirmed, and the offer is marked
+  //     presentable - fields.presented flips in persistThreadOutcome off the
+  //     same digest fact, so every surface agrees.
+  // Internally total: an outage reads as "not confirmed yet" and the recap
+  // wall-clock bound (policy) eventually presents with the honest caveat.
+  if (
+    tc.thread.digest.recapSent &&
+    tc.thread.digest.recapConfirmedAt == null &&
+    tc.event === "shop-message" &&
+    tc.inbound.text.trim()
+  ) {
+    try {
+      const dg = tc.thread.digest;
+      const freshQuote = tc.inbound.verified.found ? tc.inbound.verified.pricePerDay : undefined;
+      const priceCorrected =
+        typeof freshQuote === "number" &&
+        typeof dg.quotedPricePerDay === "number" &&
+        freshQuote !== dg.quotedPricePerDay;
+      if (priceCorrected && !dg.recapAmended) {
+        dg.recapSent = undefined;
+        dg.recapSentAt = undefined;
+        dg.recapAmended = true;
+      } else if (!priceCorrected) {
+        const { readConfirmAnswer } = await import("../semantic/classifiers");
+        const read = await readConfirmAnswer(
+          "We recapped the agreed rental terms (price, length, deposit, handover) and asked the shop to confirm they are all correct.",
+          tc.inbound.text,
+          undefined,
+          { budgetMs: 6_000 }
+        ).catch(() => null);
+        if (read?.value?.answered && !read.value.stillUnclear) {
+          dg.recapConfirmedAt = io.now();
+          const { advanceThreadStage } = await import("../funnel/stages");
+          await advanceThreadStage(
+            {
+              userEmail: input.ctx.sender ?? "",
+              toNumber: input.event.toDigits,
+              vendorId: input.ctx.vendorId,
+              vendorName: input.ctx.vendorName,
+              transport: "evolution",
+              engine: "v3",
+            },
+            "shop_confirmed",
+            "shop confirmed the recap"
+          ).catch(() => {});
+          await io
+            .markPresentable({
+              userEmail: input.ctx.sender,
+              vendorId: input.ctx.vendorId,
+              fulfillment: priorState?.fields.fulfillment ?? null,
+            })
+            .catch(() => {});
+        }
+      }
+    } catch {
+      /* not confirmed yet - the wall-clock bound is the net */
+    }
+  }
+
   const outcome = await runTurn(tc); // never throws, never silent on a composable move
 
   // ---- from here we OWN the turn: never throw (would risk a double send) -----
@@ -1053,7 +1232,25 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
     now: io.now(),
   });
 
-  let send = outcome.text && outcome.move !== "silent" ? outcome.text : undefined;
+  // PRESENT IS STATE-ONLY (the graph node's own rule, finally on the live
+  // path): it marks the deal presentable to the TRAVELLER and sends NOTHING.
+  // Its composed text used to go out through guardAndSend to the SHOP - an
+  // internal "state the deal so the traveller can decide" note, transmitted to
+  // the counterparty under a haggling prompt. The shop-facing half of the
+  // presentation family is `verify-recap`, which has its own template.
+  let send =
+    outcome.text && outcome.move !== "silent" && outcome.move !== "present"
+      ? outcome.text
+      : undefined;
+  if (outcome.move === "present") {
+    await io
+      .markPresentable({
+        userEmail: input.ctx.sender,
+        vendorId: input.ctx.vendorId,
+        fulfillment: priorState?.fields.fulfillment ?? null,
+      })
+      .catch(() => {});
+  }
 
   if (send) {
     // THE PRIMARY ENGINE LOCALIZES (W4.6). Before the human pause, so the pause
@@ -1075,6 +1272,28 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
     if (local.gloss) meta.englishGloss = local.gloss;
     meta.localized = Boolean(local.gloss);
     meta.language = langOutcome.language.mode;
+    // LIVE TAIL GATES (graph parity, the audit's "never run on the live
+    // engine" pair): the global-uniqueness re-vary (hundreds of users must
+    // never repeat a sentence - a fleet-level anti-ban property that only
+    // protected the failover) and the warm-emoji tone policy. Localized
+    // output skips the English trigram store but keeps the emoji policy,
+    // exactly like the graph path. Deterministic re-vary never touches
+    // digits, so the rails' number verification survives it. Best-effort:
+    // the gates are polish, never the send.
+    try {
+      const spec = await getGraphSpec();
+      if (!local.gloss) {
+        const recent = await io.recentOutboundGlobal(6, 200).catch(() => []);
+        const { ensureGloballyUnique, enforceEmojiTone } = await import("../graph/uniqueness");
+        const fresh = await ensureGloballyUnique(send, recent);
+        send = enforceEmojiTone(fresh.text, spec.settings.emojiTone);
+      } else {
+        const { enforceEmojiTone } = await import("../graph/uniqueness");
+        send = enforceEmojiTone(send, spec.settings.emojiTone);
+      }
+    } catch {
+      /* gates are polish - the decided message still goes out */
+    }
     try {
       // INLINE DELIVERY (the "agent never replies" structural fix): the reply
       // leaves in the SAME serverless invocation that received the shop's
@@ -1107,6 +1326,64 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
       } catch {
         delivered = "failed";
       }
+    }
+  }
+
+  // ---- WALL-CLOCK STAMPS for the two waits (steps 7-8 + confirm-wait) -------
+  //
+  // Stamped on the digest BEFORE persistThreadOutcome writes it, and only on a
+  // delivery that actually reached the wire (queued/held count - the drain
+  // delivers them verbatim). These are what the wall-clock bounds in policy.ts
+  // and advanceConfirmState measure against; without them a shop that never
+  // replies freezes the thread forever (the confirm-wait finding).
+  const reachedWire = send && delivered !== "blocked" && delivered !== "failed";
+  if (reachedWire && outcome.move === "verify-recap") {
+    outcome.digest.recapSentAt = io.now();
+  }
+  if (reachedWire && outcome.move === "confirm") {
+    const w = outcome.digest.pending?.find((p) => p.state === "waiting");
+    if (w && w.at == null) w.at = io.now();
+  }
+
+  // ---- judge enqueue (never inline - a cheap later invocation grades it) -----
+  //
+  // The graph engine has sampled every delivery into a {kind:"judge"} wakeup
+  // since the judge existed - but SPTE, the engine that actually runs, never
+  // enqueued one, so `agent_scores` was EMPTY for all real traffic and every
+  // surface built on it (Studio Scores, judge calibration, the chief-judge
+  // thread verdicts, tactic learning's realized outcomes) read a structural
+  // zero. Same shape as the graph's gate: sampled by the spec's
+  // judgeSampleRate; skip blocked/failed deliveries (nothing reached the shop
+  // to grade - queued/held WILL go out verbatim, so those are gradable); skip
+  // the farewell (the graph excludes "deal-close" for the same reason - a
+  // goodbye is not a negotiation move a rubric can score). The payload matches
+  // runJudgeJob's contract exactly: `text` is required, decisionId joins the
+  // score to this turn's trace row, nodeId/tacticId mirror what writeTrace
+  // stamped above so the review console and the compiler see one identity.
+  if (send && delivered !== "blocked" && delivered !== "failed" && outcome.move !== "farewell") {
+    const sampleRate = await getGraphSpec()
+      .then((spec) => spec.settings.judgeSampleRate)
+      // The default spec's own value (default-graph.ts): config-unreadable
+      // must not silently turn the judge off.
+      .catch(() => 1);
+    if (Math.random() < sampleRate) {
+      await io
+        .insertWakeup({
+          kind: "judge",
+          threadKey: input.event.threadKey,
+          notBefore: new Date(io.now() + 90_000).toISOString(),
+          payload: {
+            decisionId,
+            nodeId: "spte",
+            tacticId: outcome.move,
+            text: send,
+            kind: outcome.move,
+            userEmail: input.ctx.sender,
+            vendorId: input.ctx.vendorId,
+            vendorName: input.ctx.vendorName,
+          },
+        })
+        .catch(() => {});
     }
   }
 
@@ -1153,6 +1430,20 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
     !tc.inbound.verified.deflected &&
     !tc.inbound.verified.shopUnavailable;
   if (armPriceWatch) outcome.digest.priceWatchArmed = true;
+  // ...and the ONCE-PER-THREAD owe-watch: a delivered PROBE whose answer never
+  // comes causes no turn, and with no turn no bound is ever evaluated (the
+  // priced-dead-end freeze). Flag set HERE - before the digest is persisted -
+  // for the same reason priceWatchArmed is; the wakeup itself is inserted in
+  // the wakeup section below.
+  const armOweWatch =
+    reachedWire &&
+    (outcome.move === "deposit-probe" ||
+      outcome.move === "fulfillment-probe" ||
+      outcome.move === "option-probe" ||
+      outcome.move === "confirm-vehicle" ||
+      outcome.move === "clarify") &&
+    !outcome.digest.oweWatchArmed;
+  if (armOweWatch) outcome.digest.oweWatchArmed = true;
 
   // Awaited, not detached: Cloud Run freezes the CPU the moment the response
   // flushes, so a detached write is a write that may never happen. Internally
@@ -1164,11 +1455,66 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
     digest: outcome.digest,
     verified: tc.inbound.verified,
     delivered,
+    move: outcome.move,
     // W4.6: the language SWITCH is durable. Persisted whenever the thread has a
     // decision at all (not only when it changed), so a row written before this
     // existed adopts the hunt's setting once and stops re-deriving it.
     language: langOutcome.language,
   });
+
+  // ---- FUNNEL LEDGER: what this TURN proved (src/lib/funnel/stages.ts) -------
+  //
+  // The comprehension stamps (replied/understood/price_received and the
+  // laterals) happen upstream where the reply was read; the ENGINE's moves are
+  // the evidence for the negotiation rungs, so they stamp here. One progression
+  // stamp per turn - the highest stage the turn supports - and all three rungs
+  // are gated on a standing quote, because negotiating/terms without a price on
+  // the table would overstate the funnel (terms can be learned pre-price; the
+  // ladder claims them only once the money conversation exists). Best-effort
+  // and deduped inside advanceThreadStage; never on the throw path.
+  {
+    const quoted = (outcome.digest.quotedPricePerDay ?? 0) > 0;
+    const askedTerms =
+      outcome.move === "deposit-probe" ||
+      outcome.move === "fulfillment-probe" ||
+      outcome.move === "pickup-location";
+    const recapDelivered =
+      outcome.move === "verify-recap" && delivered !== "blocked" && delivered !== "failed";
+    const stage = !quoted
+      ? undefined
+      : recapDelivered
+        ? ("verifying" as const)
+        : outcome.digest.depositKnown && outcome.digest.fulfillmentKnown
+          ? ("terms_collected" as const)
+          : askedTerms
+            ? ("terms_pending" as const)
+            : outcome.move === "bargain" || (outcome.digest.round ?? 0) > 0
+              ? ("negotiating" as const)
+              : undefined;
+    if (stage) {
+      const { advanceThreadStage } = await import("../funnel/stages");
+      await advanceThreadStage(
+        {
+          userEmail: input.ctx.sender ?? "",
+          toNumber: input.event.toDigits,
+          vendorId: input.ctx.vendorId,
+          vendorName: input.ctx.vendorName,
+          decisionId,
+          transport: "evolution",
+          engine: "v3",
+        },
+        stage,
+        stage === "verifying"
+          ? "verify-recap sent to the shop"
+          : stage === "terms_collected"
+            ? "deposit and handover both known"
+            : stage === "terms_pending"
+              ? `asked the shop (${outcome.move})`
+              : `bargaining (round ${outcome.digest.round ?? 0})`,
+        { overridesOutOfStock: tc.inbound.verified.shopUnavailable === false }
+      ).catch(() => {});
+    }
+  }
 
   // Strategic wait (deliberate patience) -> a wakeup re-enters this thread later.
   // Clamped AGAIN here: this is the last gate before a durable not_before, and a
@@ -1270,7 +1616,13 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
   // and loosening it would give a hallucinated wait the run of the thread
   // again. This wait is the engine's own, its horizon is a fixed constant, and
   // it is armed at most once per thread.
-  if (armPriceWatch && !waitMinutes) {
+  //
+  // NOT gated on `!waitMinutes` any more: the flag was persisted as armed
+  // either way, so a thread whose model happened to pause this turn recorded
+  // "watch armed" with NO watch ever scheduled - once, ever, means it then
+  // never could be. A short pause tick and the long watch coexist harmlessly
+  // (the earlier one that finds nothing to say goes silent and costs nothing).
+  if (armPriceWatch) {
     await io
       .insertWakeup({
         kind: "tick",
@@ -1285,6 +1637,41 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
         },
       })
       .catch(() => {});
+  }
+
+  // A QUESTION ON THE WIRE IS OWED A RE-ENTRY (the confirm-wait and
+  // priced-dead-end findings). A confirm or a verify-recap the shop ignores
+  // causes NO turn, and with no turn neither the turn bound nor the wall-clock
+  // bound is ever EVALUATED - the freeze was not the bound's size but the
+  // absence of any turn to apply it in. So every delivered confirm/recap arms
+  // one tick just past its wall-clock bound; and a delivered PROBE arms the
+  // once-per-thread owe-watch (same doctrine as the price watch: one durable
+  // re-entry, or the negotiator becomes a broadcast loop). The tick re-enters
+  // through the same engine; if the shop answered meanwhile the ordinary flow
+  // runs, and if not the bound releases / the recap rescue takes over.
+  {
+    const wantAnswerTick =
+      reachedWire && (outcome.move === "confirm" || outcome.move === "verify-recap");
+    if (wantAnswerTick || armOweWatch) {
+      const { CONFIRM_WAIT_MS } = await import("./digest");
+      const delayMs = wantAnswerTick ? CONFIRM_WAIT_MS + 5 * 60_000 : 35 * 60_000;
+      await io
+        .insertWakeup({
+          kind: "tick",
+          threadKey: input.event.threadKey,
+          notBefore: new Date(io.now() + delayMs).toISOString(),
+          payload: {
+            userEmail: input.ctx.sender,
+            vendorId: input.ctx.vendorId,
+            engine: "v3",
+            reason: wantAnswerTick
+              ? "waiting for the shop's answer - checking back if it never comes"
+              : "an open question is still unanswered - one check-back scheduled",
+            vendorName: input.ctx.vendorName,
+          },
+        })
+        .catch(() => {});
+    }
   }
 
   // THE SIBLING RE-BARGAIN - the swarm behaviour `materialDrop` has promised in
@@ -1357,11 +1744,11 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
       vendorName: input.ctx.vendorName,
       userEmail: input.ctx.sender,
       toDigits: input.event.toDigits,
-      // FIELD ORDER IS LOAD-BEARING. The blob is hard-capped below, so every
-      // short analytical field comes first and the two long free-text fields
-      // (`think`, `text`) come last - truncation can then only ever eat the tail
-      // of a scratchpad, never a metric.
-      detail: JSON.stringify({
+      // BOUNDED BY FIELD, NEVER BY SLICE (clampTurnDetail): the old
+      // stringify-then-slice cap cut mid-token, so any turn crossing 1600
+      // chars stopped being JSON and silently dropped out of every metric -
+      // and the crossers were exactly the degraded turns worth studying.
+      detail: clampTurnDetail({
         move: outcome.move,
         tier: outcome.route.tier,
         provider: outcome.route.provider ?? null,
@@ -1458,7 +1845,7 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
         standingQuote: tc.thread.digest.quotedPricePerDay ?? null,
         think: outcome.artifact.think?.slice(0, 180),
         text: send?.slice(0, 180) ?? null,
-      }).slice(0, 1600),
+      }),
     })
     .catch(() => {});
 

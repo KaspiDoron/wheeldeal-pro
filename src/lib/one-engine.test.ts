@@ -75,15 +75,30 @@ describe("the legacy Cloud sender obeys the master switch", () => {
   });
 
   it("the flag alone is not enough either - credentials still required", async () => {
-    const wa = await loadSender({ WABA_ENABLED: "on" });
+    const wa = await loadSender({ CLOUD_API_ENABLED: "on" });
     expect(await wa.whatsappConfigured()).toBe(false);
     const r = await wa.sendWhatsApp("+66812345678", "hello");
     expect(r.channel).toBe("click-to-chat");
   });
 
   it("flag ON plus credentials is the only live combination", async () => {
-    const wa = await loadSender({ ...CREDS, WABA_ENABLED: "on" });
+    const wa = await loadSender({ ...CREDS, CLOUD_API_ENABLED: "on" });
     expect(await wa.whatsappConfigured()).toBe(true);
+  });
+
+  it("the switch is its OWN - a WABA dry-run rehearsal cannot arm this sender", async () => {
+    // Rehearsing the governed handoff lane means WABA_ENABLED on + dry-run on.
+    // When this module shared WABA_ENABLED, that rehearsal armed THIS sender
+    // for real (it reads neither the dry-run nor the governor) - the exact
+    // pasting-a-key accident the original switch was built to end, recreated
+    // one door over. CLOUD_API_ENABLED is a separate, deliberate decision.
+    const wa = await loadSender({ ...CREDS, WABA_ENABLED: "on", WABA_DRY_RUN: "on" });
+    expect(
+      await wa.whatsappConfigured(),
+      "WABA_ENABLED must not arm the legacy Cloud sender"
+    ).toBe(false);
+    const r = await wa.sendWhatsApp("+66812345678", "hello");
+    expect(r.channel).toBe("click-to-chat");
   });
 
   it("an UNREADABLE vault closes the lane, never opens it", async () => {
@@ -101,12 +116,12 @@ describe("the legacy Cloud sender obeys the master switch", () => {
   });
 
   it.each(["on", "ON", "1", "true", "yes"])("accepts %s as on", async (v) => {
-    const wa = await loadSender({ ...CREDS, WABA_ENABLED: v });
+    const wa = await loadSender({ ...CREDS, CLOUD_API_ENABLED: v });
     expect(await wa.whatsappConfigured()).toBe(true);
   });
 
   it.each(["off", "", "no", "0", "false", "maybe"])("treats %s as off", async (v) => {
-    const wa = await loadSender({ ...CREDS, WABA_ENABLED: v });
+    const wa = await loadSender({ ...CREDS, CLOUD_API_ENABLED: v });
     expect(await wa.whatsappConfigured()).toBe(false);
   });
 });
@@ -172,8 +187,8 @@ describe("exactly one live send path with the flags off", () => {
       expect(route, id).toMatch(new RegExp(`id: "${id}"`));
     }
     // The state this deployment is meant to sit in has to be nameable:
-    // credentials in, switch off.
-    expect(route).toMatch(/credentials ARE set, but WABA_ENABLED is not on/);
+    // credentials in, switch off - and the switch named is this sender's OWN.
+    expect(route).toMatch(/credentials ARE set, but CLOUD_API_ENABLED is not on/);
     const ui = readCode("src/components/admin/WabaConsole.tsx");
     expect(ui).toMatch(/Who can send right now/);
     expect(ui).toMatch(/s\.live \? "LIVE" : "OFF"/);

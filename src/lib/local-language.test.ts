@@ -237,15 +237,18 @@ describe("the language doctrine: stay local unless the shop ASKS", () => {
   // its absence is asserted so it cannot creep back.
   it("both engines READ one stored decision instead of re-deriving one", () => {
     const engine = readCode("src/lib/graph/engine.ts");
-    const loop = readCode("src/lib/agent-loop.ts");
+    const live = readCode("src/lib/spte/live.ts");
     const agents = readCode("src/lib/agents.ts");
     expect(engine).toMatch(/threadWritesEnglish\(args\.threadLanguage\)/);
     expect(engine).toMatch(/threadLanguage: threadLanguageFromStored\(state\.fields\.language\)/);
-    expect(loop).toMatch(/!threadWritesEnglish\(storedLanguage\)/);
+    // The legacy loop's read died with the legacy orchestrator; SPTE is the
+    // other reader now, off the same stored decision.
+    expect(live).toMatch(/threadLanguageFromStored\(priorState\?\.fields\?\.language\)/);
+    expect(live).toMatch(/threadWritesEnglish\(/);
     // The demonstration predicate no longer exists anywhere.
     expect(agents).not.toMatch(/export function threadPrefersEnglish/);
     expect(engine).not.toMatch(/threadPrefersEnglish\(/);
-    expect(loop).not.toMatch(/threadPrefersEnglish\(/);
+    expect(live).not.toMatch(/threadPrefersEnglish\(/);
   });
 
   it("the SWITCH is stored on the thread, not recomputed per turn", () => {
@@ -302,19 +305,21 @@ describe("composeBargain never flips a local thread to English silently", () => 
   });
 
   it("the AUTO callers actually suppress on the flag", () => {
+    // agent-loop's auto-bargain caller died with the legacy orchestrator; the
+    // graph engine's node path is the surviving composeBargain AUTO caller,
+    // and SPTE localizes through its own doctrine (localizeSpteOutbound).
     const nodes = readCode("src/lib/graph/nodes.ts");
     expect(nodes).toMatch(/if \(draft\.localizeFailed\)/);
     expect(nodes).toMatch(/countryForShop\(input\.event\.toDigits\)/);
-    const loop = readCode("src/lib/agent-loop.ts");
-    expect(loop).toMatch(/if \(draft\.localizeFailed\)/);
-    expect(loop).toMatch(/countryForShop\(from\)/);
   });
 });
 
 describe("honest events on every path", () => {
   it("the reply paths emit localize-fallback with the true reason", () => {
     expect(readCode("src/lib/graph/engine.ts")).toMatch(/path: "engine-reply"/);
-    expect(readCode("src/lib/agent-loop.ts")).toMatch(/path: "legacy-reply"/);
+    // The legacy-reply writer died with the legacy orchestrator - and so must
+    // its path label, or a dashboard filter would wait for it forever.
+    expect(readCode("src/lib/agent-loop.ts")).not.toMatch(/path: "legacy-reply"/);
   });
 
   it("the false hardcoded AI blame is gone from the outreach routes", () => {

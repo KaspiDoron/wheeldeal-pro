@@ -53,7 +53,7 @@ const LAUNCH_HELP = {
   },
   spillover: {
     label: "AI rungs spent",
-    what: "How many AI providers have exhausted their per-minute budget right now. The chain skips them before the 429.",
+    what: "How many AI providers have exhausted their per-minute budget right now ON THIS INSTANCE (in-process counters - other containers keep their own). The chain skips them before the 429.",
     drift: "Persistently above zero means the paid backbone needs raising, not the free tiers.",
   },
   aiExhausted: {

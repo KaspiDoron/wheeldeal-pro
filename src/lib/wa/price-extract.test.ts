@@ -108,6 +108,45 @@ describe("extractRentalDailyPrice - totals and edge cases", () => {
     expect(hit!.pricePerDay).toBe(300);
   });
 
+  // PRICE_TOTAL_REV phantom guards (Wave 0). The reverse divider used to bridge
+  // a day token to an unrelated number across a noun, minting per-day offers
+  // that could BEAT the shop's real quote.
+  it("does NOT read a deposit clause as a rental total ('minimum 3 days rental 500 deposit')", () => {
+    expect(
+      extractRentalDailyPrice("minimum 3 days rental 500 deposit", { vehicleClass: "scooter", durationDays: 3 })
+    ).toBeNull();
+  });
+
+  it("does NOT read opening hours as a rental total ('open 7 days a week 8am to 8pm')", () => {
+    expect(
+      extractRentalDailyPrice("we are open 7 days a week 8am to 8pm", { vehicleClass: "scooter", durationDays: 3 })
+    ).toBeNull();
+  });
+
+  it("keeps the marked daily over a phantom division on the same reply (-> 250, not 167)", () => {
+    const hit = extractRentalDailyPrice("250 baht per day\nminimum 3 days, deposit 500", {
+      vehicleClass: "scooter",
+      durationDays: 3,
+    });
+    expect(hit!.pricePerDay).toBe(250);
+  });
+
+  // Currency totality (Wave 0): 'bath'/'bht' are misspellings shops really type;
+  // they must resolve to THB, never the invalid ISO code "BATH"/"BHT".
+  it("resolves the 'bath' misspelling to THB, not an invented code", () => {
+    const q = extractQuotedPrices("Special price 900 bath for 4 day", {
+      vehicleClass: "scooter",
+      durationDays: 4,
+      engineSizeCc: 125,
+    });
+    expect(q.offer?.currency).toBe("THB");
+  });
+
+  it("mentionedCurrencies skips an unrecognised token instead of inventing a code", () => {
+    expect(mentionedCurrencies("300 bath")).toEqual(["THB"]);
+    expect(mentionedCurrencies("300 zzz")).toEqual([]);
+  });
+
   it("returns null on a transfer-ONLY template (no rental line)", () => {
     const text = `Airport transfer: 250 PHP/trip\nPort transfer: 350 PHP/trip`;
     expect(extractRentalDailyPrice(text, { vehicleClass: "scooter" })).toBeNull();

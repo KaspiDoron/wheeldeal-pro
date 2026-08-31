@@ -161,13 +161,21 @@ describe("wa/ping fails CLOSED", () => {
 
 describe("admin erase targets the RIGHT column on every table", () => {
   const src = read("src/app/api/admin/users/route.ts");
+  // W9 REWRITE, INTENT PRESERVED. This pinned the route's own four-entry
+  // column map (the Wave-0 fix for the blanket `email=eq.` loop). The map
+  // moved into the erasure REGISTRY (src/lib/privacy/user-tables.ts), which
+  // covers ~30 tables instead of four - so the pin now holds the same
+  // per-table column truths against the registry, and holds the route to
+  // driving off it rather than growing a private list again.
+  const registry = read("src/lib/privacy/user-tables.ts");
   it("maps each table to its real user column (feedback keys on reporter_email)", () => {
-    expect(src).toMatch(/bookings:\s*"user_email"/);
-    expect(src).toMatch(/searches:\s*"user_email"/);
-    expect(src).toMatch(/feedback:\s*"reporter_email"/);
-    expect(src).toMatch(/wa_sessions:\s*"email"/);
-    // The old blanket `email=eq.` loop over all four tables must be gone.
-    expect(src).not.toMatch(/for \(const table of \["bookings", "searches", "feedback", "wa_sessions"\]\)/);
+    expect(registry).toMatch(/table: "bookings", column: "user_email"/);
+    expect(registry).toMatch(/table: "searches", column: "user_email"/);
+    expect(registry).toMatch(/table: "feedback", column: "reporter_email"/);
+    expect(registry).toMatch(/table: "wa_sessions", column: "email"/);
+    // The route drives the registry walker, with no private table map left.
+    expect(src).toMatch(/eraseUserData/);
+    expect(src).not.toMatch(/userColumn/);
   });
   it("reports a partial erase instead of answering 200 on a failed purge", () => {
     expect(src).toMatch(/Partial erase/);
@@ -180,6 +188,24 @@ describe("auth/forgot is throttled", () => {
   it("rate-limits per (ip,email) and per ip before touching the password", () => {
     expect(src).toMatch(/rateLimit\("forgot", `\$\{ip\}:\$\{key\}`/);
     expect(src).toMatch(/rateLimit\("forgot-ip", ip/);
+  });
+  it("also has an IP-INDEPENDENT per-victim bucket, so a rotating attacker cannot spam resets", () => {
+    // The `${ip}:${key}` window resets on an IP change; without a key-only
+    // bucket a known account could be locked out by repeated reset spam.
+    expect(src).toMatch(/rateLimit\("forgot-target", key/);
+  });
+});
+
+describe("auth/login is throttled and not an enumeration oracle", () => {
+  const src = read("src/app/api/auth/login/route.ts");
+  it("rate-limits by IP before the first Supabase read", () => {
+    expect(src).toMatch(/rateLimit\("login-ip", clientIp\(req\)/);
+    // The limit runs before isBlocked/allowedPlanFor/getUser - i.e. before the
+    // three reads that made each guess cost real work.
+    const ip = src.indexOf('rateLimit("login-ip"');
+    const blocked = src.indexOf("isBlocked(email)");
+    expect(ip).toBeGreaterThan(0);
+    expect(ip).toBeLessThan(blocked);
   });
 });
 

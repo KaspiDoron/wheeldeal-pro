@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireManagement } from "@/lib/session";
-import { sbSelect } from "@/lib/runtime-config";
+import { sbSelect, sbCountDark } from "@/lib/runtime-config";
 import { visionAccuracy } from "@/lib/vision-reconcile";
 import {
   bucketTurnsPerHour,
@@ -178,14 +178,13 @@ export async function GET() {
   const last403At = webhookEvents.find((e) => e.kind === "webhook-403")?.created_at ?? null;
 
   // ---- REAL 6h turn count (the tile used turns.length, capped at 30) ---------
-  const TURN_COUNT_CAP = 1000;
-  const turnCountRows = await sbSelect<{ id: number }>(
+  // An EXACT HEAD count now, not 1000 id rows shipped over the wire to be
+  // .length'd (that read was the poll's single largest egress line). null =
+  // unreadable, which the tile renders as a dash rather than a made-up zero.
+  const turnsLast6h = await sbCountDark(
     "agent_events",
-    `select=id&kind=eq.engine-v3-turn&created_at=gte.${encodeURIComponent(
-      sinceIso
-    )}&limit=${TURN_COUNT_CAP}`
-  ).catch(() => []);
-  const turnsLast6h = turnCountRows.length;
+    `kind=eq.engine-v3-turn&created_at=gte.${encodeURIComponent(sinceIso)}`
+  );
 
   // ---- Chart aggregations (Tier-2): move mix, provider mix, per-hour bars and
   // latency percentiles over a WIDER 6h turn sample than the 30-row live stream.
@@ -275,8 +274,7 @@ export async function GET() {
     generatedAt: new Date(now).toISOString(),
     turns,
     stats: {
-      turnsLast6h, // real count (may show "1000+" at the cap), not turns.length
-      turnsCapped: turnsLast6h >= TURN_COUNT_CAP,
+      turnsLast6h, // exact HEAD count; null = unreadable (a dash, never zero)
       failoversLast6h: fallbacks,
       unconfirmedSendsLast6h: unconfirmed,
       // A count nobody can act on is decoration. These carry the shop and the

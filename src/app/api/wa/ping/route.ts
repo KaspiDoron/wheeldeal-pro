@@ -24,9 +24,31 @@ export async function GET(req: Request) {
     );
   }
   const token = new URL(req.url).searchParams.get("token");
-  if (token !== expected) {
+  const { tokenMatches } = await import("@/lib/wa/webhook-token");
+  if (!tokenMatches(token, expected)) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
+
+  // ONE RUNNER AT A TIME. Three independent schedulers are pointed here
+  // (Cloud Scheduler every minute, the Render cron every minute, the GitHub
+  // Actions hourly backstop) and this route had no claim of any kind - so
+  // overlapping pings ran overlapping fleet-wide drains and inbound sweeps,
+  // the exact contention /api/wa/tick's __chain__ slot exists to prevent.
+  // Same primitive, 45s buckets: a second ping inside the window answers
+  // ok/skipped and does no work. "error" (claims table unreachable) PROCEEDS -
+  // this is the only heartbeat production has, and a claims outage must not
+  // stop it; the worst case is the old behavior.
+  {
+    const { sbInsertClaim } = await import("@/lib/runtime-config");
+    const claim = await sbInsertClaim("wa_send_claims", {
+      sender_key: "__ping__",
+      slot_key: `ping:${Math.floor(Date.now() / 45_000)}`,
+    }).catch(() => "error" as const);
+    if (claim === "lost") {
+      return NextResponse.json({ ok: true, skipped: "another ping is already running" });
+    }
+  }
+
   const hosts = await pingAllHosts();
 
   // GUARANTEED queue drain: delayed agent replies (human thinking-time) and
@@ -90,6 +112,50 @@ export async function GET(req: Request) {
     }
   } catch {
     /* best-effort - never fail the keep-awake on the re-arm */
+  }
+
+  // RISK ROLLUP (wa/risk-rollup): compute+persist the hour that just closed.
+  // The rollup lived only in the undeployed BullMQ scheduler, so
+  // wa_risk_snapshots was never written in production and the ban-risk panel
+  // rendered permanently dark - the one dashboard built to fail dark, dark
+  // for the wrong reason. Hourly, on the one periodic runner that exists;
+  // the write is idempotent per bucket, so a duplicate hour is harmless.
+  try {
+    if (Math.floor(Date.now() / 60_000) % 60 === 2) {
+      const { rollupBucket } = await import("@/lib/wa/risk-rollup");
+      await rollupBucket(Date.now()).catch(() => null);
+    }
+  } catch {
+    /* best-effort - never fail the keep-awake on the rollup */
+  }
+
+  // RUNG 4 OF THE WABA LADDER (waba/dispatch sweepExpiredHolds): a lead whose
+  // hold outlived WABA_HOLD_TIMEOUT_MINUTES expires atomically and re-parks
+  // the traveller's real opener on their own wire, so constraint 1 (absolute
+  // shop choice) survives an agency that never answers the company number.
+  // ~Every 5 min, offset from the webhook re-arm's minute; the sweep is
+  // bounded (100 leads) and a no-op while the WABA lane is idle.
+  try {
+    if (Math.floor(Date.now() / 60_000) % 5 === 2) {
+      const { sweepExpiredHolds } = await import("@/lib/waba/dispatch");
+      await sweepExpiredHolds().catch(() => null);
+    }
+  } catch {
+    /* best-effort - never fail the keep-awake on the sweep */
+  }
+
+  // TRIP-COMPLETION SUGGESTION (bookings.ts): a rental whose window has passed
+  // gets ONE "did you return it?" push - never an auto-complete (the funnel
+  // does not assert what nobody witnessed). ~Every 15 min; the per-booking
+  // once-only claim lives on completion_suggested_at, so this gate is only
+  // about scan frequency, not correctness.
+  try {
+    if (Math.floor(Date.now() / 60_000) % 15 === 1) {
+      const { suggestCompletions } = await import("@/lib/bookings");
+      await suggestCompletions().catch(() => null);
+    }
+  } catch {
+    /* best-effort - never fail the keep-awake on a suggestion */
   }
 
   // Extend this ping's reach: kick the self-chaining drain so one cron hit

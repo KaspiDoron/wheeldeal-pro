@@ -106,15 +106,30 @@ describe("A4 datacenter-IP cluster banner - pure and loud", () => {
 describe("A8 webhook re-arm throttle is a SHARED clock, not per-process", () => {
   const evo = readCode("src/lib/evolution.ts");
 
-  it("reads and stamps a config row so N instances share one hourly window", () => {
-    expect(evo).toMatch(/rearmConfigKey = \(instance: string\) => `WH_REARM_\$\{instance\}`/);
+  it("reads and stamps the wa_sessions row so N instances share one hourly window", () => {
+    // The clock moved off the Key Vault (per-instance WH_REARM_* rows polluted
+    // the owner's key list) onto the instance's own session row; the legacy
+    // config row is still READ so existing throttles carry over a deploy.
+    expect(evo).toMatch(/webhook_rearmed_at/);
     expect(evo).toMatch(/async function lastRearmAt/);
-    expect(evo).toMatch(/async function stampRearm/);
-    expect(evo).toMatch(/now - \(await lastRearmAt\(instance\)\) < REARM_THROTTLE_MS/);
+    expect(evo).toMatch(/async function stampRearmShared/);
+    expect(evo).toMatch(/now - \(await lastRearmAt\(email, instance\)\) < REARM_THROTTLE_MS/);
+    expect(evo).toMatch(/rearmConfigKey = \(instance: string\) => `WH_REARM_\$\{instance\}`/);
   });
 
-  it("keeps the in-memory map as a same-process fast path", () => {
-    expect(evo).toMatch(/rearmStore\(\)\.set\(instance, atMs\)/);
+  it("the shared clock advances ONLY on a verified outcome - a failed set must retry", () => {
+    // It used to be stamped BEFORE the set, so a broken re-arm was throttled
+    // into staying broken for the next hour, fleet-wide.
+    expect(evo).toMatch(/if \(set\.ok\) await stampRearmShared\(email, now\)/);
+    // The in-memory map stays as the same-process stampede guard.
+    expect(evo).toMatch(/rearmStore\(\)\.set\(instance, now\)/);
+  });
+
+  it("the healthy-skip reconciles the EVENTS SET, not just the URL", () => {
+    // An instance registered before a new event was added read as healthy on
+    // the URL alone and never gained the event.
+    expect(evo).toMatch(/const eventsMatch =/);
+    expect(evo).toMatch(/sameWebhookTarget\(registeredUrl, origin, token\) && eventsMatch/);
   });
 });
 

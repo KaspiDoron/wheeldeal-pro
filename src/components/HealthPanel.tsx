@@ -47,15 +47,27 @@ export function HealthPanel() {
   // nothing is draining the queue and no provider is answering - both of which
   // took the product down in the field and were invisible on every screen.
   const [vitals, setVitals] = useState<Vitals | null>(null);
+  // W9: retention is a nightly database job the app cannot see directly -
+  // pg_cron degrades to a NOTICE nobody reads when the extension is missing,
+  // so this tile reads the heartbeat row prune_old_rows writes on every run.
+  const [retention, setRetention] = useState<{
+    lastRanAt: string | null;
+    unreadable: boolean;
+    stale: boolean;
+  } | null>(null);
   const [checkedAt, setCheckedAt] = useState<Date | null>(null);
   const [busy, setBusy] = useState(false);
+  const [lastCheckFailed, setLastCheckFailed] = useState(false);
   const [nextInS, setNextInS] = useState(REFRESH_MS / 1000);
   const timer = useRef<ReturnType<typeof setInterval>>();
 
   async function check() {
     setBusy(true);
     try {
-      const d = await (await fetch("/api/admin/health")).json();
+      const res = await fetch("/api/admin/health");
+      if (!res.ok) throw new Error(String(res.status));
+      const d = await res.json();
+      setLastCheckFailed(false);
       if (Array.isArray(d.services)) {
         setServices(d.services);
         setCheckedAt(new Date());
@@ -64,6 +76,7 @@ export function HealthPanel() {
       if (d.guardCounters) setGuardCounters(d.guardCounters);
       setWebhookSilent(Boolean(d.webhookSilent));
       setWebhookLastAt(typeof d.webhookLastAcceptedAt === "string" ? d.webhookLastAcceptedAt : null);
+      setRetention(d.retention ?? null);
       setVitals(
         d.heartbeat
           ? {
@@ -76,7 +89,10 @@ export function HealthPanel() {
           : null
       );
     } catch {
-      /* keep the last snapshot */
+      // Keep the last snapshot - but SAY the check failed. The countdown kept
+      // animating over stale bars, so a dead health endpoint rendered as a
+      // panel of confident statuses from an hour ago.
+      setLastCheckFailed(true);
     } finally {
       setBusy(false);
     }
@@ -123,6 +139,13 @@ export function HealthPanel() {
           ? `Last checked ${checkedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · next auto-check in ${mins}m ${Math.floor(nextInS % 60)}s`
           : "Running the first check..."}
       </p>
+      {lastCheckFailed && (
+        <p className="mb-2 rounded-xl border-2 border-brandyellow/50 bg-brandyellow-soft p-2 text-[11px] font-extrabold text-warn">
+          The last check FAILED - the bars below are from{" "}
+          {checkedAt ? checkedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "an earlier run"}{" "}
+          and may be stale.
+        </p>
+      )}
 
       {/* WEBHOOK SILENCE ALERT: shops' replies aren't reaching us (Evolution is
           403ing our webhook - a stale token / lost registration). This is the
@@ -237,6 +260,39 @@ export function HealthPanel() {
               <p className="mt-1 leading-snug">{vitals.heartbeat.action}</p>
             )}
           </div>
+
+          {/* Retention: a deployment can have ZERO retention (pg_cron missing,
+              job never scheduled) with nothing anywhere saying so - the prune
+              function now writes a heartbeat row per run and this tile is the
+              only place that difference becomes visible. */}
+          {retention && (
+            <div
+              className={`rounded-2xl border-2 p-2.5 text-[11px] font-bold ${
+                retention.lastRanAt && !retention.stale && !retention.unreadable
+                  ? "border-savings bg-savings-soft text-savings"
+                  : "border-brandred bg-brandred-soft text-brandred"
+              }`}
+            >
+              <div className="font-extrabold">
+                Retention:{" "}
+                {retention.unreadable
+                  ? "UNKNOWN - the heartbeat could not be read"
+                  : !retention.lastRanAt
+                    ? "NEVER RAN - no prune heartbeat exists"
+                    : retention.stale
+                      ? `STALE - last prune ${agoMins(Date.now() - Date.parse(retention.lastRanAt))} ago`
+                      : `ran ${agoMins(Date.now() - Date.parse(retention.lastRanAt))} ago`}
+              </div>
+              {(retention.unreadable || !retention.lastRanAt || retention.stale) && (
+                <p className="mt-1 leading-snug">
+                  Run supabase/retention.sql (it schedules a nightly prune via
+                  pg_cron) - until it runs, transcripts and events grow without
+                  bound and the privacy policy&apos;s retention promise is not
+                  being kept.
+                </p>
+              )}
+            </div>
+          )}
 
           <div className="rounded-2xl bg-card2 p-2.5">
             <div className="text-[11px] font-extrabold text-strong">Live vitals</div>

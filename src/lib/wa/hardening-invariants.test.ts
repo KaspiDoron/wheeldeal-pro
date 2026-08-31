@@ -497,3 +497,25 @@ describe("location sharing: the browser never posts coordinates", () => {
     expect(route).toMatch(/stayLabelOverride/);
   });
 });
+
+describe("scale: the webhook tail drains SCOPED and BOUNDED, never fleet-wide", () => {
+  const ingest = readCode("src/lib/wa/ingest.ts");
+
+  it("drainOutbox in the tail carries a per-sender scope, not an unscoped call", () => {
+    // The old defect: `drainOutbox((..)=>..)` with no opts, running every user's
+    // sends inside one webhook. The tail now scopes to a touched sender.
+    expect(ingest).toMatch(/drainOutbox\([\s\S]{0,200}?replyOnly:\s*true[\s\S]{0,80}?senderKey:\s*sender/);
+    // No unscoped fleet-wide drain remains in the tail.
+    expect(ingest).not.toMatch(/await drainOutbox\(\(senderKey, to, text, lane\) =>\s*\n\s*sendFromUser\([^)]*\)\s*\n\s*\);/);
+  });
+
+  it("both tail drains run under a time-bounded race", () => {
+    expect(ingest).toMatch(/DRAIN_BUDGET_MS\s*=\s*3_000/);
+    expect(ingest).toMatch(/boundedDrain\(\s*drainOutbox/);
+    expect(ingest).toMatch(/boundedDrain\(\s*drainGraphWakeups/);
+  });
+
+  it("graph wakeups in the tail are scoped to the touched sender", () => {
+    expect(ingest).toMatch(/drainGraphWakeups\([\s\S]{0,200}?userEmail:\s*sender/);
+  });
+});

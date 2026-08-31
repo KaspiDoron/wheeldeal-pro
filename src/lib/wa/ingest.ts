@@ -444,6 +444,11 @@ export async function processEvolutionWebhook(
     const HEAVY_PER_INVOCATION = 25;
     let heavyProcessed = 0;
     for (const data of items) {
+      // Attributable across the catch: `email` is resolved INSIDE the try below,
+      // so the per-item catch cannot see it. Mirror it here so a swallowed item
+      // leaves a breadcrumb the owner can actually find (messagePath + the
+      // per-user safety signals both filter on user_email).
+      let itemEmail: string | undefined;
       // Per-item isolation (audit DEFECT 5): a throw handling ONE message in a
       // multi-message webhook batch must not drop its siblings - the route always
       // returns 200, so Evolution never redelivers them. Contain each item.
@@ -497,6 +502,7 @@ export async function processEvolutionWebhook(
         continue;
       }
       const email = who.email;
+      itemEmail = email ?? undefined;
       if (!email) {
         await sbInsert("agent_events", [
           {
@@ -559,7 +565,10 @@ export async function processEvolutionWebhook(
       // used to be a permanent loss (the route answered 200, so the provider
       // never redelivered). Fail loud instead: mark the whole delivery
       // retryable and let the webhook answer non-2xx.
-      const gate = await isVendorThread(from, email);
+      // The text rides into the gate for one purpose only: the staff-mobile
+      // opener allowance (a WABA agency replying from a personal device whose
+      // tail matches no lead) - see drill.ts / waba/expectation.
+      const gate = await isVendorThread(from, email, extractText(data) || undefined);
       if (gate === null) {
         retryable = true;
         void noteInboundDropped(email, from, "vendor-gate-unavailable", { via: "webhook" });
@@ -836,6 +845,8 @@ export async function processEvolutionWebhook(
             receiver: email,
             pushName: data.pushName ?? null,
             channel: "evolution",
+            // Which wire carried it (one vocabulary: evolution | cloud | waba).
+            transport: "evolution",
             // The privacy identifier this chat is addressed by, when it is one.
             // Persisting it here (existing JSONB, no migration) is what lets a
             // later @lid frame with no phone field resolve to the same shop
@@ -891,6 +902,20 @@ export async function processEvolutionWebhook(
       // Response-time analytics: record how fast this shop replied to our RFQ.
       const { recordResponseTime } = await import("@/lib/stats");
       recordResponseTime(from).catch(() => {});
+
+      // FUNNEL LEDGER: any stored inbound is `replied` - deliberately honest
+      // about content-free replies (a sticker IS a reply; whether it was
+      // UNDERSTOOD is a separate stage stamped where extraction runs). Deduped
+      // inside advanceThreadStage, so the second message of a burst costs one
+      // cheap select and writes nothing.
+      if (email) {
+        const { advanceThreadStage } = await import("@/lib/funnel/stages");
+        await advanceThreadStage(
+          { userEmail: email, toNumber: from, transport: "evolution" },
+          "replied",
+          "inbound message stored"
+        ).catch(() => {});
+      }
 
       // BLUE TICK ON A HUMAN'S CLOCK (owner report 4, anti-ban A1). A real
       // linked device reads the message before it answers; ours never did,
@@ -984,6 +1009,11 @@ export async function processEvolutionWebhook(
                   }).slice(0, 200),
                 },
               ]).catch(() => {});
+              // ...and in the vocabulary the vitals/health counters actually
+              // read (push-skipped) - push-ingest is the doctor's breadcrumb,
+              // this is the fleet metric's.
+              const { markPushSkipped } = await import("@/lib/notify/state");
+              await markPushSkipped(email, `${event.kind}: ${verdict.reason}`);
               return;
             }
             const { sendPushToUser } = await import("@/lib/push");
@@ -1370,7 +1400,10 @@ export async function processEvolutionWebhook(
         // (media download / vision throw) with zero trace, so the WA doctor
         // reported a healthy thread while the shop got no answer.
         void noteInboundDropped(
-          undefined,
+          // Stamp the resolved sender so the breadcrumb is attributable
+          // (messagePath + safety signals filter on user_email), instead of an
+          // orphan row nobody can find.
+          itemEmail,
           String(data?.key?.remoteJid ?? "").split("@")[0],
           "ingest-error",
           { error: e instanceof Error ? e.message.slice(0, 120) : "unknown" }
@@ -1380,9 +1413,12 @@ export async function processEvolutionWebhook(
   } catch (e) {
     // Never fail the webhook - but never lose the fact either (I4): this
     // outer catch covers the whole BATCH, so an exception here means every
-    // message in the delivery was dropped with, until now, zero trace. The
-    // recovery sweep can re-answer them; it just needs the breadcrumb to
-    // exist when the owner asks where a reply went.
+    // message in the delivery was dropped. Set the FUNCTION-level retryable so
+    // the route answers 503 and Evolution redelivers (the handled head is
+    // skipped cheaply on redelivery) - passing retryable in the breadcrumb
+    // detail alone never reached the return, so the webhook 200'd and the whole
+    // delivery was lost.
+    retryable = true;
     void noteInboundDropped(undefined, "", "batch-error", {
       error: e instanceof Error ? e.message.slice(0, 120) : "unknown",
       retryable: true,
@@ -1429,21 +1465,40 @@ export async function processEvolutionWebhook(
   // hands it to the sender as the fourth argument. Dropping it on the floor here
   // re-billed every drained reply as a cold introduction - the same defect as
   // the inline send above, in the same file, on the same webhook invocation.
-  try {
-    const { drainOutbox } = await import("@/lib/wa-guard");
-    await drainOutbox((senderKey, to, text, lane) =>
-      sendFromUser(senderKey, to, text, true, { lane })
-    );
-  } catch {
-    /* best-effort */
-  }
-  try {
-    const { drainGraphWakeups } = await import("@/lib/graph/engine");
-    await drainGraphWakeups((senderKey, to, text) =>
-      sendFromUser(senderKey, to, text, true, { lane: "reply" })
-    );
-  } catch {
-    /* best-effort */
+  // SCOPED AND BOUNDED, like the three sibling poll routes (/api/replies,
+  // /api/activity, /api/wa/status) already are - the webhook tail was the one
+  // caller still draining FLEET-WIDE with no time budget. A burst of 7 inbound
+  // webhooks meant 7 unscoped drains, each able to run OTHER users' sends and up
+  // to 24 other users' multi-agent LLM wakeup composes, ahead of the reply we
+  // are racing to deliver - the head-of-line block behind the owner's "7 shops
+  // at once stalls everything". Scope each drain to a sender this batch actually
+  // touched (replyOnly - the cold lane is driven by the tick kick below), and
+  // bound both under a 3s race so a slow host delays only its own thread.
+  const DRAIN_BUDGET_MS = 3_000;
+  const boundedDrain = <T,>(p: Promise<T>) =>
+    Promise.race([p, new Promise((r) => setTimeout(r, DRAIN_BUDGET_MS))]);
+  for (const sender of touchedSenders) {
+    try {
+      const { drainOutbox } = await import("@/lib/wa-guard");
+      await boundedDrain(
+        drainOutbox((senderKey, to, text, lane) => sendFromUser(senderKey, to, text, true, { lane }), {
+          replyOnly: true,
+          senderKey: sender,
+        }).catch(() => 0)
+      );
+    } catch {
+      /* best-effort */
+    }
+    try {
+      const { drainGraphWakeups } = await import("@/lib/graph/engine");
+      await boundedDrain(
+        drainGraphWakeups((senderKey, to, text, lane) => sendFromUser(senderKey, to, text, true, { lane }), {
+          userEmail: sender,
+        }).catch(() => 0)
+      );
+    } catch {
+      /* best-effort */
+    }
   }
 
   // FAST COUNTER-REPLY: the agent's reply we just composed is parked ~10-40s in

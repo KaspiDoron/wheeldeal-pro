@@ -91,13 +91,16 @@ describe("the engines consume the shared window", () => {
     );
   });
 
-  it("the legacy path fetches rival leverage on EVERY quoted turn, not round 0 only", () => {
-    const loop = readCode("src/lib/agent-loop.ts");
-    // The fetch sits OUTSIDE the first-push target gate now.
-    const fetchAt = loop.indexOf("cheapestRivalFor(ctx.sender, {");
-    const targetGate = loop.indexOf("autoBargains === 0) {");
-    expect(fetchAt).toBeGreaterThan(0);
-    expect(targetGate).toBeGreaterThan(fetchAt);
+  it("rival leverage reaches every quoted turn through the LIVE engines (legacy path deleted)", () => {
+    // The legacy orchestrator - whose round-0-only rival fetch this pinned -
+    // is gone (see speed-floors "the legacy pipeline is gone"). The live
+    // engines consume rivals through the session snapshot every turn: SPTE's
+    // buildSession fills session.rivals, and the leverage predicate reads it
+    // on each pass.
+    const live = readCode("src/lib/spte/live.ts");
+    expect(live).toMatch(/cheapestCheaperRival\(/);
+    const pass = readCode("src/lib/spte/pass.ts");
+    expect(pass).toMatch(/cheapestCheaperRival\(ctx\.session\.rivals/);
   });
 
   it("group/status frames leave a trace instead of vanishing", () => {

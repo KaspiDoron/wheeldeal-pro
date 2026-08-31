@@ -79,8 +79,10 @@ describe("every write stamps it, and the scope reads it", () => {
   });
 
   it("every wa_outbox insert site stamps to_key", () => {
+    // graph/engine.ts left this list in Wave 8: its lost-claim path parks
+    // through parkOutboxOnce (which owns the to_key seatbelt) instead of a
+    // raw insert the partial unique index could silently reject.
     const files = [
-      "src/lib/graph/engine.ts",
       "src/lib/wa-guard.ts",
       "src/app/api/outreach/route.ts",
       "src/app/api/outreach/mass/route.ts",

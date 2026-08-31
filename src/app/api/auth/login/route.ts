@@ -40,6 +40,21 @@ export async function POST(req: Request) {
   if (!EMAIL_RX.test(email)) {
     return NextResponse.json({ error: "Enter a valid email." }, { status: 400 });
   }
+  // IP RATE LIMIT, before the first Supabase read. Without it this route is an
+  // unthrottled user + beta-allowlist enumeration oracle: the per-email lock
+  // below is bypassed by rotating the email, and each attempt costs three
+  // Supabase round trips (isBlocked, allowedPlanFor, getUser). 30/hour/IP is far
+  // above any real person and closes the oracle to a scripted sweep.
+  {
+    const { rateLimit, clientIp } = await import("@/lib/rate-limit");
+    const ipVerdict = await rateLimit("login-ip", clientIp(req), 30, 3600);
+    if (!ipVerdict.ok) {
+      return NextResponse.json(
+        { error: "Too many attempts from this network. Wait a minute and try again." },
+        { status: 429, headers: { "Retry-After": String(ipVerdict.retryAfter) } }
+      );
+    }
+  }
   if (await isBlocked(email)) {
     return NextResponse.json(
       { error: "This account has been restricted by an administrator." },
@@ -123,9 +138,19 @@ export async function POST(req: Request) {
       });
     }
   } else {
-    // Brute-force throttle: a locked account refuses password attempts.
+    // Brute-force throttle, keyed on (email, ip) - NOT on the email alone.
+    // An email-keyed lock was itself a weapon: six wrong passwords from
+    // anyone locked the real owner of the address out for 15 minutes,
+    // repeatable forever (a lockout DoS on any known email). Keyed on the
+    // pair, an attacker only ever locks their own network path; the real
+    // person logging in from their own device is untouched, and a rotating
+    // attacker still runs into the 30/hour per-IP limit above. Same
+    // clientIp discipline as the Google route: the appended hop, never the
+    // caller-typed leftmost one.
     const { authLockLeft, noteAuthFailure, clearAuthFailures } = await import("@/lib/cooldown");
-    const lockLeft = await authLockLeft(email, "login");
+    const { clientIp } = await import("@/lib/rate-limit");
+    const lockKey = `${email}|ip:${clientIp(req)}`;
+    const lockLeft = await authLockLeft(lockKey, "login");
     if (lockLeft > 0) {
       return NextResponse.json(
         { error: `Too many attempts - try again in ${lockLeft} min or use Forgot password.` },
@@ -159,7 +184,7 @@ export async function POST(req: Request) {
       user = await getUser(email, { fresh: true });
     }
     if (!verifyPassword(password, user?.passwordHash)) {
-      const { locked, lockedMinutes } = await noteAuthFailure(email, "login");
+      const { locked, lockedMinutes } = await noteAuthFailure(lockKey, "login");
       return NextResponse.json(
         {
           error: locked
@@ -169,7 +194,7 @@ export async function POST(req: Request) {
         { status: locked ? 429 : 401 }
       );
     }
-    clearAuthFailures(email, "login");
+    clearAuthFailures(lockKey, "login");
     await touchUser(email);
   }
 

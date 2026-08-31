@@ -31,8 +31,7 @@ interface Snapshot {
   generatedAt: string;
   turns: Turn[];
   stats: {
-    turnsLast6h: number;
-    turnsCapped?: boolean;
+    turnsLast6h: number | null;
     failoversLast6h: number;
     unconfirmedSendsLast6h: number;
     // The rows behind the counts. A number nobody can act on is decoration.
@@ -120,10 +119,18 @@ export function EngineInspector() {
   const [err, setErr] = useState(false);
   const [live, setLive] = useState(true);
 
-  // Fast lane: the engine snapshot every 4s.
+  // A backgrounded tab must not keep polling: the Engine tab is left open, and
+  // an unattended one was ~120 AI completions + ~600 billed Maps calls an hour
+  // against the 5 GB Supabase egress ceiling. Skip every tick while hidden.
+  const visible = () =>
+    typeof document === "undefined" || document.visibilityState === "visible";
+
+  // Fast lane: the engine snapshot. 15s (was 4s), and never while hidden - the
+  // heavy reads behind this route are the biggest single egress source here.
   useEffect(() => {
     let cancelled = false;
     const tick = async () => {
+      if (!visible()) return;
       try {
         const r = await fetch("/api/admin/engine-inspector", { cache: "no-store" });
         if (!r.ok) throw new Error(String(r.status));
@@ -138,21 +145,25 @@ export function EngineInspector() {
     };
     tick();
     if (!live) return () => { cancelled = true; };
-    const id = setInterval(tick, 4000);
+    const id = setInterval(tick, 15000);
     return () => {
       cancelled = true;
       clearInterval(id);
     };
   }, [live]);
 
-  // Slow lane: durable field KPIs + health every 30s (they are heavier queries
-  // and change slowly - no need to hammer them on the 4s cadence).
+  // Slow lane: durable field KPIs + health every 10 MINUTES, cached-probes only,
+  // never while hidden. /api/admin/health's full sweep fires a real AI
+  // completion, five billed Maps calls, an SMTP AUTH and a PayPal OAuth per hit;
+  // ?probes=cached returns the last snapshot + DB-derived vitals, so leaving the
+  // tab open no longer spends money. The live sweep is behind an explicit button.
   useEffect(() => {
     let cancelled = false;
     const tick = async () => {
+      if (!visible()) return;
       const [a, h] = await Promise.all([
         fetch("/api/admin/analytics", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null),
-        fetch("/api/admin/health", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+        fetch("/api/admin/health?probes=cached", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null),
       ]);
       if (cancelled) return;
       if (a?.field) setField(a.field as FieldKpis);
@@ -160,7 +171,7 @@ export function EngineInspector() {
     };
     tick();
     if (!live) return () => { cancelled = true; };
-    const id = setInterval(tick, 30000);
+    const id = setInterval(tick, 600000);
     return () => {
       cancelled = true;
       clearInterval(id);
@@ -244,7 +255,7 @@ export function EngineInspector() {
             <div className="grid grid-cols-3 gap-2">
               <StatTile
                 helpId="turns6h"
-                value={`${snap.stats.turnsLast6h}${snap.stats.turnsCapped ? "+" : ""}`}
+                value={snap.stats.turnsLast6h == null ? "-" : String(snap.stats.turnsLast6h)}
               />
               <StatTile
                 helpId="failovers"

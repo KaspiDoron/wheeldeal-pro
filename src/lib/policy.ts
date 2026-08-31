@@ -66,18 +66,40 @@ export async function saveVersionedSpec(args: {
     // two kinds - the learning loop used to setConfig it directly, with no
     // version row, no gate and no rollback, contradicting the contract at the
     // top of this file. Dynamic import: learning.ts calls back into this module.
-    await setConfig("ops_learning", JSON.stringify(args.spec ?? null)).catch(() => {});
+    //
+    // HONEST WRITE: setConfig's ok IS whether the behavior changed. Demo mode
+    // stays ok:true (memory persist reports ok with a persistence warning); a
+    // real write failure must not come back as "activated".
+    const wrote = await setConfig("ops_learning", JSON.stringify(args.spec ?? null)).catch(
+      () => ({ ok: false, persistent: false, error: "vault write threw" })
+    );
+    if (wrote && !wrote.ok) {
+      return {
+        ok: false,
+        problems: [wrote.error ?? "The learning blob was NOT stored - behavior is unchanged."],
+        versionId: null,
+      };
+    }
     const { bustOpsLearningCache } = await import("./ops/learning");
     bustOpsLearningCache();
     const versionId = await recordVersion(args.kind, args.spec, args.note, args.author, args.replayReport);
-    return { ok: true, problems: [], versionId };
+    return { ok: true, problems: versionId == null ? ["Saved, but the version row was not recorded - rollback for this change is unavailable."] : [], versionId };
   }
   // policy_overlay
   const clean = clampOverlay(args.spec);
-  await setConfig("policy_overlay", JSON.stringify(clean)).catch(() => {});
+  const wrote = await setConfig("policy_overlay", JSON.stringify(clean)).catch(
+    () => ({ ok: false, persistent: false, error: "vault write threw" })
+  );
+  if (wrote && !wrote.ok) {
+    return {
+      ok: false,
+      problems: [wrote.error ?? "The overlay was NOT stored - behavior is unchanged."],
+      versionId: null,
+    };
+  }
   bustOverlayCache();
   const versionId = await recordVersion(args.kind, clean, args.note, args.author, args.replayReport);
-  return { ok: true, problems: [], versionId };
+  return { ok: true, problems: versionId == null ? ["Saved, but the version row was not recorded - rollback for this change is unavailable."] : [], versionId };
 }
 
 /** Roll back / re-activate an existing version row (no new row is created). */
@@ -92,26 +114,50 @@ export async function activateVersion(
   const row = rows[0];
   if (!row) return { ok: false, problems: ["Version not found."] };
 
+  // HONEST WRITES, in two tiers: the SPEC write is the rollback itself - if it
+  // failed, behavior did not change and the answer is ok:false. The version-row
+  // bookkeeping after it is audit truth - a failure there does not undo the
+  // behavior change, so it is reported as a problem on an ok:true result
+  // rather than silently swallowed (the route already renders `problems`).
   if (row.kind === "graph_spec") {
     const res = await saveGraphSpec(sanitizeGraphSpec(row.spec as GraphSpec));
     if (!res.ok) return res;
   } else if (row.kind === "ops_learning") {
-    await setConfig("ops_learning", JSON.stringify(row.spec ?? null)).catch(() => {});
+    const wrote = await setConfig("ops_learning", JSON.stringify(row.spec ?? null)).catch(
+      () => ({ ok: false, persistent: false, error: "vault write threw" })
+    );
+    if (wrote && !wrote.ok) {
+      return { ok: false, problems: [wrote.error ?? "The rollback was NOT stored - behavior is unchanged."] };
+    }
     const { bustOpsLearningCache } = await import("./ops/learning");
     bustOpsLearningCache();
   } else {
-    await setConfig("policy_overlay", JSON.stringify(clampOverlay(row.spec))).catch(() => {});
+    const wrote = await setConfig("policy_overlay", JSON.stringify(clampOverlay(row.spec))).catch(
+      () => ({ ok: false, persistent: false, error: "vault write threw" })
+    );
+    if (wrote && !wrote.ok) {
+      return { ok: false, problems: [wrote.error ?? "The rollback was NOT stored - behavior is unchanged."] };
+    }
     bustOverlayCache();
   }
-  await sbUpdate("policy_versions", `kind=eq.${row.kind}&active=is.true`, { active: false }).catch(
+  const problems: string[] = [];
+  const cleared = await sbUpdate("policy_versions", `kind=eq.${row.kind}&active=is.true`, { active: false }).catch(
     () => false
   );
   const patch: Record<string, unknown> = { active: true };
   if (replayReport) patch.replay_score = replayReport;
-  await sbUpdate("policy_versions", `id=eq.${row.id}`, patch).catch(() => false);
-  await setConfig("ops_active_rev", String(row.id)).catch(() => {});
+  const marked = await sbUpdate("policy_versions", `id=eq.${row.id}`, patch).catch(() => false);
+  if (!cleared || !marked) {
+    problems.push("Behavior rolled back, but the version history did not update - the Versions list may show the wrong row as active.");
+  }
+  const revWrote = await setConfig("ops_active_rev", String(row.id)).catch(
+    () => ({ ok: false, persistent: false }) as { ok: boolean; persistent: boolean }
+  );
+  if (revWrote && !revWrote.ok) {
+    problems.push("Behavior rolled back, but the active-revision stamp did not update - new traces may carry the old revision id.");
+  }
   bustActiveRevCache();
-  return { ok: true, problems: [] };
+  return { ok: true, problems };
 }
 
 /** Version history for the Policy tab (newest first). */

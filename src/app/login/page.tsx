@@ -57,6 +57,50 @@ export default function LoginPage() {
   const [plans, setPlans] = useState<PlanView[]>([]);
   const [subBusy, setSubBusy] = useState(false);
 
+  // Password-reset redemption: /login?reset=<token> from the emailed link.
+  // The token only becomes a password change when THIS form submits it - the
+  // request that produced the email changed nothing (see /api/auth/forgot).
+  const [resetToken, setResetToken] = useState<string | null>(null);
+  const [resetPw, setResetPw] = useState("");
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetErr, setResetErr] = useState("");
+  useEffect(() => {
+    try {
+      const tok = new URLSearchParams(window.location.search).get("reset");
+      if (tok) setResetToken(tok);
+    } catch {
+      /* no query string - normal login */
+    }
+  }, []);
+
+  async function submitReset() {
+    if (resetPw.length < 6) {
+      setResetErr(t("New password needs at least 6 characters."));
+      return;
+    }
+    setResetBusy(true);
+    setResetErr("");
+    try {
+      const res = await fetchJson<any>("/api/auth/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        timeoutMs: 15000,
+        body: JSON.stringify({ token: resetToken, next: resetPw }),
+      });
+      if (res.ok) {
+        // The route signed us in - straight into the app.
+        startNav();
+        window.location.href = "/";
+        return;
+      }
+      setResetErr(
+        res.data?.error ?? res.error ?? t("Could not set the new password - try again.")
+      );
+    } finally {
+      setResetBusy(false);
+    }
+  }
+
   // WHICH sign-in methods exist is now a server-resolved list, not four
   // disconnected facts. The list is what renders, so the "OR" divider follows
   // from it (see components/auth/AuthMethodList) and this page can no longer
@@ -269,6 +313,54 @@ export default function LoginPage() {
     } finally {
       setForgotBusy(false);
     }
+  }
+
+  if (resetToken !== null) {
+    return (
+      <main className="mx-auto flex min-h-[100dvh] max-w-md flex-col justify-center px-5 pb-safe pt-safe">
+        <div className="mb-4 text-center">
+          <div className="mx-auto mb-2 w-fit animate-slide-up">
+            <BrandMark size={72} />
+          </div>
+          <h1 className="font-display text-2xl font-extrabold text-strong">
+            {t("Choose a new password")} 🔑
+          </h1>
+          <p className="mx-auto mt-1 max-w-[300px] text-sm text-soft">
+            {t("You opened a password reset link. Set the new password for your account here - it signs you in right away.")}
+          </p>
+        </div>
+        <div className="surface rounded-blob p-5">
+          <PasswordInput
+            value={resetPw}
+            onChange={setResetPw}
+            placeholder={t("New password (6+ characters)")}
+            minLength={6}
+            autoComplete="new-password"
+          />
+          {resetErr && (
+            <p className="mt-2 rounded-2xl bg-brandred-soft p-2.5 text-[12px] font-bold text-brandred">
+              {resetErr}
+            </p>
+          )}
+          <button
+            onClick={submitReset}
+            disabled={resetBusy}
+            className="btn btn-primary mt-3 w-full rounded-2xl py-3 text-[14px] disabled:opacity-50"
+          >
+            {resetBusy ? <LoadingDots /> : t("Set new password and sign in")}
+          </button>
+        </div>
+        <button
+          onClick={() => {
+            setResetToken(null);
+            setResetErr("");
+          }}
+          className="btn mx-auto mt-3 text-[11px] font-bold text-faint underline"
+        >
+          {t("Back to login")}
+        </button>
+      </main>
+    );
   }
 
   if (step === "whatsapp") {

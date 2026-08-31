@@ -139,6 +139,9 @@ export interface SessionSummary {
   best: (SessionOffer & { savedPct: number | null }) | null;
   avgAsk: number | null; // average asking price across shops (dominant currency)
   booking: {
+    /** The row id + lifecycle status - what the Trips tap controls PATCH. */
+    id: number | null;
+    status: string;
     vendorName: string;
     total: number | null;
     perDay: number | null;
@@ -807,6 +810,11 @@ export async function GET() {
       avgAsk,
       booking: booking
         ? {
+            // id + lifecycle status: what the Trips controls act on (bookings
+            // PATCH) - without them the card could render the rental but the
+            // traveller had no way to say "I picked it up" / "trip done".
+            id: booking.id ?? null,
+            status: booking.status ?? "confirmed",
             vendorName: booking.vendor_name ?? "Rental shop",
             total: booking.total_price != null ? Number(booking.total_price) : null,
             perDay: booking.price_per_day != null ? Number(booking.price_per_day) : null,

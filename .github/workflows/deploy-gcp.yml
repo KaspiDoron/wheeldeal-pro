@@ -11,7 +11,7 @@
 #                                    owner's phone is closed: the step below
 #                                    says so loudly instead of failing silently,
 #                                    and .github/workflows/heartbeat.yml keeps
-#                                    pinging every 5 minutes as a backstop.
+#                                    pinging HOURLY as a last-ditch backstop (it is not a drain cadence).
 #   GCP_PROJECT_ID                 - the GCP project id
 #   SUPABASE_URL                   - bootstrap runtime env (see CLAUDE.md Deploy)
 #   SUPABASE_SERVICE_ROLE_KEY
@@ -549,7 +549,7 @@ jobs:
             echo "    --uri '<service-url>/api/wa/ping?token=<token>' \\"
             echo "    --http-method GET --attempt-deadline 60s"
             echo ""
-            echo "Until then the GitHub Actions backstop pings every 5 minutes,"
+            echo "Until then the GitHub Actions backstop pings only HOURLY (heartbeat.yml),"
             echo "and Admin -> Keys shows the heartbeat age either way."
             echo "=============================================================="
             exit 0

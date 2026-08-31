@@ -136,6 +136,14 @@ async function handleStatus(s: StatusEvt) {
   // re-sending only spends quality rating to be told so again.
   if (code === 131049 && tail) {
     await markTemplateCapped(tail);
+    // ...and the LEAD whose send just capped goes back to HELD. The old early
+    // return skipped the lead lookup entirely, so an async cap status left
+    // the lead stranded in template_sent forever - waiting on a delivery that
+    // was never coming, invisible to the hold-flush that would have freed it.
+    if (s.id) {
+      const capped = await leadByMessageId(s.id);
+      if (capped) await advanceLead(capped.id, "held", { terminal_reason: null });
+    }
     return;
   }
 
@@ -165,6 +173,25 @@ async function handleStatus(s: StatusEvt) {
  */
 async function handleInbound(m: MsgEvt) {
   if (!m.from) return;
+  // STOP-INTENT FIRST (owner decision: fleet-wide). A shop telling the
+  // business number to stop is telling all of WheelDeal - record it before
+  // anything treats this inbound as a window-opening opportunity.
+  if (m.text?.body) {
+    try {
+      const { detectOptOutIntent } = await import("@/lib/inbound-risk");
+      if (detectOptOutIntent(m.text.body)) {
+        const { suppressShop } = await import("@/lib/wa/suppression");
+        await suppressShop(m.from, m.text.body.slice(0, 120), "stop-intent");
+        await noteWabaEvent("inbound", {
+          agencyTail: nationalTail(m.from) || undefined,
+          raw: { type: m.type, stopIntent: true },
+        });
+        return; // a stop is not a service-window to exploit
+      }
+    } catch {
+      /* detection is best-effort; the reply below still records the inbound */
+    }
+  }
   const { onAgencyReplied } = await import("@/lib/waba/dispatch");
   const { renderHeldHandoff } = await import("@/lib/waba/render");
   await onAgencyReplied(m.from, renderHeldHandoff);

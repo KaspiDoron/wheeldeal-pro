@@ -655,6 +655,47 @@ export function templateFor(ctx: TurnContext, move: MoveKind): string | undefine
       // substituted a whole greeting for it, shipping "Hey there! again!" on
       // every single nudge. The nudge is warmer without either.
       return `Just checking in - any chance on that better rate for ${nDays(days)}?`;
+    case "verify-recap": {
+      // STEP 7 - DETERMINISTIC BY DESIGN, grounded by construction: every
+      // number is the digest's own standing quote (verified extraction wrote
+      // it), never composed. A subject the thread still does not know is asked
+      // INSIDE the recap - the one legitimate re-ask, bundled into the
+      // confirmation, which is exactly what the priced-dead-end rescue needs.
+      const q = quoteOnTable(ctx);
+      if (typeof q !== "number" || q <= 0) return undefined; // no price, no recap
+      const cur = v.currency ?? ctx.session.currency ?? "";
+      const dg = ctx.thread.digest;
+      const kind = dg.comprehension?.depositKind;
+      const depositLine =
+        kind === "none"
+          ? "no deposit"
+          : kind === "cash"
+            ? "the cash deposit you mentioned"
+            : kind === "document"
+              ? "passport as deposit"
+              : kind === "cash-or-document"
+                ? "cash or passport as deposit"
+                : kind === "card"
+                  ? "card deposit"
+                  : undefined;
+      const mode = dg.comprehension?.handoverMode;
+      const handoverLine =
+        mode === "delivery" || mode === "both" || dg.deliveryOffered === true
+          ? "delivered to where I'm staying"
+          : mode === "pickup"
+            ? "you pick me up"
+            : dg.fulfillmentKnown
+              ? "I collect it at your shop"
+              : undefined;
+      const known = [`${q}${cur ? " " + cur : ""}/day for ${nDays(days)}`, depositLine, handoverLine]
+        .filter(Boolean)
+        .join(", ");
+      const asks: string[] = [];
+      if (!depositLine) asks.push("what deposit you need");
+      if (!handoverLine) asks.push("whether you deliver or I collect it");
+      const askTail = asks.length ? ` And could you also confirm ${listOf(asks)}?` : "";
+      return `Perfect - just to confirm before we lock it in: ${known}. All correct?${askTail}`;
+    }
     default:
       return undefined; // present / closing-message / silent
   }

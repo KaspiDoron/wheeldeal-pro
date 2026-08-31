@@ -135,7 +135,9 @@ describe("the wiring", () => {
   it("the gate runs in the drain, after cancellation and BEFORE the send claim", () => {
     const cancel = guard.indexOf("isCancelled");
     const stale = guard.indexOf("if (await staleDraftDropped(row, rowKind)) continue;");
-    const claim = guard.indexOf("const claim = await claimSendSlots({");
+    // Wave 8: the claim call became re-claimable (wait-not-repark), so the
+    // args build first and the claim reads `claimSendSlots(claimArgs)`.
+    const claim = guard.indexOf("let claim = await claimSendSlots(claimArgs)");
     expect(cancel).toBeGreaterThan(0);
     expect(stale).toBeGreaterThan(cancel);
     expect(claim).toBeGreaterThan(stale);
@@ -172,9 +174,13 @@ describe("the wiring", () => {
   });
 
   it("every engine stamps what its draft is an answer to", () => {
-    expect(readCode("src/lib/agent-loop.ts")).toMatch(/composedAgainst: \{/);
+    // The legacy loop's own stamp died with the legacy block; the LIVE engines
+    // are the writers now (SPTE below; the graph engine composes through the
+    // same guarded meta).
     expect(readCode("src/lib/spte/live.ts")).toMatch(/composedAgainst: \{/);
-    // ...and the inbound id is threaded from the turn that owns it.
+    // ...and the inbound id is threaded from the turn that owns it, through
+    // the routed input's ctx.
     expect(readCode("src/lib/agent-loop.ts")).toMatch(/inboundId: opts\.waMessageId/);
+    expect(readCode("src/lib/spte/live.ts")).toMatch(/inboundId: input\.ctx\.inboundId/);
   });
 });

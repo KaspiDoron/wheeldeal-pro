@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getSession } from "@/lib/session";
+import { getSession, setSessionCookie } from "@/lib/session";
 import { getUser, verifyPassword, setPassword } from "@/lib/access";
 
 // Change password (any signed-in user, from the Profile page). The new hash is
@@ -33,5 +33,15 @@ export async function POST(req: Request) {
       { status: 500 }
     );
   }
-  return NextResponse.json({ ok: true });
+  // setPassword moved the revocation horizon, which kills every outstanding
+  // cookie - including the one this request arrived on. Re-issue it so the
+  // person who changed the password stays signed in on THIS device while
+  // every other device's session ends. They just re-proved the credential,
+  // so the fresh cookie's 90-day absolute clock restarting is correct.
+  try {
+    setSessionCookie(session.email);
+  } catch {
+    /* worst case: they sign in again with the password they just set */
+  }
+  return NextResponse.json({ ok: true, signedOutElsewhere: true });
 }

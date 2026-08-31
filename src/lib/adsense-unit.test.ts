@@ -69,8 +69,10 @@ describe("the owner can set it without a redeploy, like every other integration"
     // The registry and its help-url map are module-private, so this reads the
     // source rather than widening config.ts's surface for a test.
     const cfg = readCode("src/lib/config.ts");
+    // secret: false - an ad-unit id ships in the page source; masking it in
+    // the vault only made it uncorrectable.
     expect(cfg).toMatch(
-      /\{ name: "ADSENSE_SLOT", label: "[^"]+", scope: "billing", editable: true \}/
+      /\{ name: "ADSENSE_SLOT", label: "[^"]+", scope: "billing", editable: true, secret: false \}/
     );
     // NB: readCode strips `//`, which eats a URL's own protocol slashes - so
     // this reads the raw file for the help link.

@@ -67,7 +67,24 @@ const STAGE_TITLES: Record<string, string> = {
   present: "Marked this offer ready for you",
   "closing-message": "Sent the closing message",
   deliver: "Message on its way to the shop",
+  // The PRIMARY engine's own moves (its trace stages are `spte:<move>`,
+  // normalized by stageKey below). Without these every trace the live engine
+  // wrote was silently dropped from the feed - the traveller watched an empty
+  // activity list while the negotiation ran.
+  farewell: "Wrapped up the conversation",
+  "redirect-close": "Wrapped up the conversation",
+  "graceful-close": "Wrapped up the conversation",
+  momentum: "Nudged the shop to keep things moving",
+  confirm: "Double-checked a detail with the shop",
+  "confirm-vehicle": "Made sure it's the exact vehicle you asked for",
+  "option-probe": "Asked what separates the options",
+  "restock-probe": "Asked when it's back in stock",
+  "verify-recap": "Recapped the deal for the shop to confirm",
 };
+
+/** SPTE writes trace stages as `spte:<move>`; the vocabulary above is the
+ *  moves themselves. `silent` and unknown moves stay plumbing (no title). */
+const stageKey = (s: string) => (s.startsWith("spte:") ? s.slice(5) : s);
 
 interface TraceRow {
   id: number;
@@ -455,7 +472,7 @@ export async function GET(req: Request) {
   for (const m of outbound) if (m.raw?.kind === "rfq") bumpState(m.raw?.vendorId, "messaged");
   // The agent is ACTIVELY working the thread (any engine trace) or the shop
   // has REPLIED - either way it is a live conversation, not a queued message.
-  for (const t of traces) if (STAGE_TITLES[t.stage]) bumpState(t.vendor_id, "active");
+  for (const t of traces) if (STAGE_TITLES[stageKey(t.stage)]) bumpState(t.vendor_id, "active");
   for (const r of replies) bumpState(r.vendor_id, "active");
   // A reply STORED but not yet derived counts too: join the raw inbound rows to
   // vendors by number via our own outbound rows. "Awaiting reply" can never
@@ -475,6 +492,29 @@ export async function GET(req: Request) {
   for (const m of inboundRows) bumpState(vendorByDigits[digitsOnly(m.from_number)], "active");
   // A real priced OFFER is the strongest state.
   for (const o of offers) if (o.price_per_day) bumpState(o.vendor_id, "offer");
+
+  // ---- THE FUNNEL LEDGER, SERVED (src/lib/funnel/stages.ts) -----------------
+  // The durable per-thread stage - the single vocabulary the tracker migrates
+  // onto, shipped ALONGSIDE the legacy 3-value rank so clients adopt it without
+  // a flag day. One cheap indexed read; keyed by vendorId with a digits
+  // fallback through the same join the raw-inbound rollup uses.
+  const vendorStages: Record<string, { stage: string; at: string | null }> = {};
+  {
+    const threadRows = await sbSelect<{
+      vendor_id: string | null;
+      to_number: string;
+      stage: string | null;
+      stage_at: string | null;
+    }>(
+      "negotiation_threads",
+      `select=vendor_id,to_number,stage,stage_at&user_email=eq.${enc}&stage=not.is.null&limit=200`
+    ).catch(() => []);
+    for (const t of threadRows) {
+      if (!t.stage) continue;
+      const id = t.vendor_id || vendorByDigits[digitsOnly(t.to_number)];
+      if (id) vendorStages[id] = { stage: t.stage, at: t.stage_at };
+    }
+  }
 
   // ---- COUNTER-OFFER DETECTION (derived, never cosmetic) --------------------
   // See deriveCountered(): a vendor is countered once the agent has sent a
@@ -536,7 +576,7 @@ export async function GET(req: Request) {
   const items: ActivityItem[] = [];
 
   for (const t of traces) {
-    const title = STAGE_TITLES[t.stage];
+    const title = STAGE_TITLES[stageKey(t.stage)];
     if (!title) continue; // plumbing stages stay out of the feed
     items.push({
       id: `trace:${t.id}`,
@@ -944,6 +984,7 @@ export async function GET(req: Request) {
     introBudget,
     whyByVendor,
     vendorStates,
+    vendorStages, // the funnel LEDGER stage per vendor: {stage, at} - the durable truth
     countered, // J: vendorIds where the agent countered a shop quote
     progress, // F4: the ONE two-segment bar derivation - the client renders it
     queueEtaDoneBy, // W2: honest "all done by" (max etaTo across the queue)

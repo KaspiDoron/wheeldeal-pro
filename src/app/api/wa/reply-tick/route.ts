@@ -38,7 +38,9 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 const CLAIM_WINDOW_MS = 20_000;
-const IN_CALL_BUDGET_MS = 45_000; // inside maxDuration, with room to return
+// Inside Cloud Run's --timeout 90 (the real ceiling - `maxDuration` above is
+// a Vercel-only hint, inert on standalone Next), with room to return.
+const IN_CALL_BUDGET_MS = 45_000;
 const MAX_HOPS = 12; // ~9 min of autonomous reply progression per kick
 const CHAIN_HORIZON_MS = 3 * 60_000; // a reply further out than this is not urgent
 
@@ -48,7 +50,8 @@ const slotFor = (sender: string, atMs: number) =>
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const expected = await webhookToken();
-  if (!expected || url.searchParams.get("token") !== expected) {
+  const { tokenMatches } = await import("@/lib/wa/webhook-token");
+  if (!expected || !tokenMatches(url.searchParams.get("token"), expected)) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
   const sender = (url.searchParams.get("sender") ?? "").trim();

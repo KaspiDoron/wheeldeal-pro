@@ -52,13 +52,16 @@ describe("the 8-second poll is scoped to the person who fired it", () => {
     expect(route).toMatch(/\[drain:wakeups\]/);
   });
 
-  it("the wakeup scope filters on thread_key, not on the nullable column", () => {
+  it("the wakeup scope filters on thread_key, not on the nullable column - LIKE-escaped", () => {
     // user_email is stamped best-effort (there is a schema-graceful insert
     // without it), so rows written before that migration have it null and would
     // silently vanish from every scoped drain. thread_key is `<email>:<vendor>`
-    // and has always been populated.
+    // and has always been populated. The email is WILDCARD-ESCAPED first:
+    // '_' in a LIKE pattern is a single-char wildcard, so "a_b@x.com" used to
+    // scoped-drain "aXb@x.com"'s wakeups too.
     const engine = readCode("src/lib/graph/engine.ts");
-    expect(engine).toMatch(/thread_key=like\.\$\{encodeURIComponent\(`\$\{opts\.userEmail\}:\*`\)\}/);
+    expect(engine).toContain('opts.userEmail.replace(/([\\\\%_])/g, "\\\\$1")');
+    expect(engine).toMatch(/thread_key=like\.\$\{encodeURIComponent\(/);
     // ...and an unscoped call still drains everyone - that is the heartbeat's job.
     expect(engine).toMatch(/const ownerFilter = opts\?\.userEmail/);
   });

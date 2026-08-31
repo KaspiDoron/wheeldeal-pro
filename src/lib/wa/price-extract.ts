@@ -29,6 +29,12 @@ import {
   CUR_TAIL_GENERIC,
 } from "./rate-expr";
 import { normalizeDigits } from "../integrity/translation";
+import { CURRENCIES } from "../currency";
+
+// The set of ISO codes the app can actually display and convert. A currency
+// token that does not resolve to one of these must never become the currency
+// of record - the traveller would see a bare code the converter cannot price.
+const CUR_CODES = new Set(CURRENCIES.map((c) => c.code));
 
 export type VehicleClassHint = "car" | "motorbike" | "scooter" | undefined;
 
@@ -120,8 +126,16 @@ const PRICE_TOTAL = new RegExp(
   "i"
 );
 // The day count BEFORE the total ("3 days 900", "5 days is 1750") - also divided.
+//
+// The glue between the day token and the amount is CONNECTIVE ONLY (whitespace,
+// a copula/colon, a currency lead). The old `[^\d]{0,10}` wildcard bridged a day
+// token to an unrelated number across a noun - "minimum 3 days rental 500
+// deposit" read 500/3 = 167/day off a DEPOSIT, and "open 7 days a week 8am" read
+// 8/7 = 1/day - phantom offers that could beat the shop's real quote. A word
+// like "rental"/"deposit"/"a week" between the two now breaks the match, which
+// is exactly the human reading: those numbers are not a rental total.
 const PRICE_TOTAL_REV = new RegExp(
-  `\\b(\\d{1,2})\\s*days?\\b[^\\d]{0,10}(?:${CUR_LEAD})?\\s*${NUM}`,
+  `\\b(\\d{1,2})\\s*days?\\b\\s*(?:is|are|=|:|-|~|for|at|cost|costs|price)?\\s*(?:${CUR_LEAD})?\\s*${NUM}`,
   "i"
 );
 // A whole-rental total stated WITHOUT the day count ("1000 or 1250 total",
@@ -263,10 +277,16 @@ function parseAmount(raw: string): number {
 // skipped and the scan continues to the next candidate.
 const CUR_ANYWHERE = new RegExp(`(${CUR_SYM})|(?:^|[^a-z])((?:${CUR_WORDS}))(?![a-z])`, "gi");
 
-function codeForToken(t: string): string {
+function codeForToken(t: string): string | undefined {
+  // `baht` is canonical, but shops routinely type `bath`/`bht` (the Krabi
+  // "Special price 900 bath for 4 day" is a real reply). Without these, the
+  // fallthrough below produced the INVALID ISO codes "BATH"/"BHT", which
+  // reconcileCurrency then defended (they were genuinely "mentioned"),
+  // nulling floorSameCur downstream and silently disabling the whole
+  // price-sanity net for that reply.
   if (/\$|usd|dollar/.test(t)) return "USD";
   if (/€|eur/.test(t)) return "EUR";
-  if (/฿|thb|baht/.test(t)) return "THB";
+  if (/฿|thb|baht|bath|bht/.test(t)) return "THB";
   if (/₱|php|peso|piso/.test(t)) return "PHP";
   if (/₹|inr|rupee/.test(t)) return "INR";
   if (/₫|vnd|dong/.test(t)) return "VND";
@@ -274,7 +294,11 @@ function codeForToken(t: string): string {
   if (/\brm\b|myr|ringgit/.test(t)) return "MYR";
   if (/ils|shekel/.test(t)) return "ILS";
   if (/dirham/.test(t)) return "AED";
-  return t.toUpperCase();
+  // An unrecognised token is NOT a currency. Inventing an ISO code from it
+  // (the old `t.toUpperCase()`) is how "bath" became "BATH": a code no
+  // converter knows, kept by reconcileCurrency because it was "mentioned".
+  // Return undefined so the region's currency wins instead.
+  return CUR_CODES.has(t.toUpperCase()) ? t.toUpperCase() : undefined;
 }
 
 /** Every currency the text EXPLICITLY names, letter-guarded. Order preserved. */
@@ -285,7 +309,7 @@ export function mentionedCurrencies(text: string): string[] {
     const tok = (m[1] ?? m[2] ?? "").toLowerCase();
     if (!tok || AMBIGUOUS_CUR.has(tok)) continue;
     const code = codeForToken(tok);
-    if (!out.includes(code)) out.push(code);
+    if (code && !out.includes(code)) out.push(code);
   }
   return out;
 }
@@ -306,6 +330,10 @@ export function reconcileCurrency(
   text: string
 ): string | undefined {
   if (!extracted) return regionCurrency;
+  // An `extracted` code that is not a real, displayable ISO currency (a stray
+  // "BATH"/"BHT" from an upstream reader) can never be the currency of record -
+  // fall back to the shop's region rather than store a code nothing can price.
+  if (!CUR_CODES.has(extracted)) return regionCurrency;
   if (!regionCurrency || extracted === regionCurrency) return extracted;
   return mentionedCurrencies(text).includes(extracted) ? extracted : regionCurrency;
 }
@@ -720,6 +748,18 @@ export function extractQuotedPrices(
       // anywhere in the message loses to it (a consistent total - 1500 beside
       // 300/day for 5 days - still divides fine).
       const amtAt = amountIndex(line, total, rev ? 2 : 1);
+      // The day token is group 1 for the reversed pattern, group 2 otherwise.
+      const dayAt = amountIndex(line, total, rev ? 1 : 2);
+      // A QUALIFYING DURATION is not a rental total: "minimum 3 days ..." states
+      // a floor on the hire, not a price. And a number inside a deposit /
+      // insurance / fine / bond clause is that charge, never the rental total.
+      // Both are read as a total by the raw arithmetic, so guard the division.
+      const subjectBefore = line.slice(Math.max(0, amtAt - 28), amtAt);
+      const inChargeClause =
+        /\b(?:deposit|deposits|down\s?payment|collateral|security|bond|insurance|excess|fine|fines|penalty|penalties|fee|fees|charge|surcharge)\b[^\d]{0,12}$/i.test(
+          subjectBefore
+        );
+      if (isDurationConditionAt(line, dayAt, total[0]) || inChargeClause) continue;
       const afterAmount = line.slice(amtAt + String(Math.round(whole)).length, amtAt + 24);
       const markedPerDay = /^\s*(?:baht|thb|php|pesos?|[a-z]{1,3}\.?)?\s*(?:\/|per\b|a\b|each\b|-)?\s*day/i.test(
         afterAmount
@@ -785,7 +825,15 @@ export function extractQuotedPrices(
     const week = line.match(PRICE_WEEK);
     if (week) {
       const whole = parseAmount(week[1] ?? week[2]);
-      if (whole > 0 && whole > 7) {
+      const weekAt = amountIndex(line, week, week[1] ? 1 : 2);
+      const afterWeekAmt = line.slice(weekAt + String(Math.round(whole)).length, weekAt + 6);
+      // "open 7 days a week, 8am to 8pm" is an availability line, not a weekly
+      // price: the "week" belongs to "days a week", and the number that follows
+      // is a CLOCK TIME. Reject a clock time after the amount, and the whole
+      // "N days a week" idiom, so it never mints an 8/7 = 1/day phantom.
+      const looksLikeClock = /^\s*(?:am|pm|[:.]\d|\s*[-–]\s*\d{1,2}\s*(?:am|pm))/i.test(afterWeekAmt);
+      const availabilityIdiom = /\bdays?\s+a\s+week\b/i.test(line);
+      if (whole > 0 && whole > 7 && !looksLikeClock && !availabilityIdiom) {
         hits.push({
           pricePerDay: Math.round(whole / 7),
           currency: currencyIn(line) ?? opts.localCurrency,
@@ -908,5 +956,11 @@ function pickCheapestOnSpec(hits: RentalPriceHit[]): RentalPriceHit | null {
   const matching = hits.filter((h) => h.classMatch === true);
   const agnostic = hits.filter((h) => h.classMatch === undefined);
   const pool = matching.length ? matching : agnostic.length ? agnostic : hits;
-  return pool.reduce((best, h) => (h.pricePerDay < best.pricePerDay ? h : best));
+  // A number the shop QUOTED beats one we DERIVED by dividing a total. Otherwise
+  // a phantom division ("500 for 3 days" -> 167) could undercut and replace the
+  // shop's real "250/day". Only fall back to derived hits when no quoted rate
+  // exists in the pool.
+  const quoted = pool.filter((h) => h.derivedFromDays === undefined);
+  const choose = quoted.length ? quoted : pool;
+  return choose.reduce((best, h) => (h.pricePerDay < best.pricePerDay ? h : best));
 }

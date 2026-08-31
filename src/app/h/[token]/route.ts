@@ -37,6 +37,7 @@ interface LeadRow {
   agency_name: string | null;
   link_tapped_at: string | null;
   state: string;
+  created_at: string | null;
 }
 
 export async function GET(
@@ -47,8 +48,12 @@ export async function GET(
   const c = await wabaConfig();
 
   // A token nobody can act on must not leak whether it ever existed. Every
-  // failure below lands on the same neutral page.
-  const dead = () => NextResponse.redirect(new URL("/", process.env.APP_DOMAIN ?? "https://wheeldeal.pro"));
+  // failure below lands on the same neutral page - resolved through site.ts
+  // (the vaulted APP_DOMAIN wins, so a domain move needs no redeploy here
+  // either; the old inline env read was the exact re-derivation site.ts ended).
+  const { resolveSiteOrigin } = await import("@/lib/site");
+  const origin = await resolveSiteOrigin();
+  const dead = () => NextResponse.redirect(new URL("/", origin));
 
   if (!token || token.length < 12) return dead();
 
@@ -66,12 +71,33 @@ export async function GET(
 
   const read = await sbSelectStrict<LeadRow & { user_phone?: string }>(
     "waba_leads",
-    `select=id,user_email,agency_name,link_tapped_at,state&link_token=eq.${encodeURIComponent(
+    `select=id,user_email,agency_name,link_tapped_at,state,created_at&link_token=eq.${encodeURIComponent(
       token
     )}&limit=1`
   );
   if ("error" in read || !read.rows.length) return dead();
   const lead = read.rows[0];
+
+  // TERMINAL BOUNDS. A `failed` lead's template never reached anyone, and an
+  // `expired` lead's template was never sent at all (the hold delivered
+  // nothing before rung 4 took the traveller's own wire) - so no one can
+  // legitimately hold either link, and resolving it would connect a stranger
+  // to a traveller off a token that leaked or was guessed at leisure.
+  // `handed_off` stays LIVE on purpose: the agency re-opening the chat it
+  // already started is normal, and the write-once tap stamp above/below
+  // already keeps the signal clean.
+  if (lead.state === "failed" || lead.state === "expired") return dead();
+
+  // TTL. The same clock that bounds how long a dispatched handoff authorises
+  // inbound from the agency (WABA_EXPECTATION_TTL_HOURS, default 72) bounds
+  // the link: a token in a months-old forwarded chat must not still open a
+  // path to a traveller whose search ended long ago.
+  {
+    const raw = Number(await (await import("@/lib/runtime-config")).getConfig("WABA_EXPECTATION_TTL_HOURS"));
+    const ttlHours = Number.isFinite(raw) && raw > 0 ? raw : 72;
+    const born = lead.created_at ? Date.parse(lead.created_at) : NaN;
+    if (!Number.isFinite(born) || Date.now() - born > ttlHours * 3600_000) return dead();
+  }
 
   // The traveller's number lives on their account, never in the token and never
   // in the URL - so a forwarded link cannot be mined for phone numbers by

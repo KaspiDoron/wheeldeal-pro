@@ -36,6 +36,11 @@ import type { Session, Role } from "./types";
 
 const COOKIE = "wd_session";
 const MAX_AGE = 60 * 60 * 24 * 30; // 30 days
+// ABSOLUTE ceiling: slide-renewal extends a session 30 days at a time, which
+// without a second clock makes one stolen cookie immortal - each renewal mints
+// a fresh issuedAt, forever. firstIssuedAt survives every renewal untouched,
+// and past 90 days the session ends no matter how active it looks.
+const ABSOLUTE_MAX_AGE = 60 * 60 * 24 * 90; // 90 days, from FIRST issue
 
 const INSECURE_DEFAULT = "dev-insecure-secret-change-me";
 
@@ -106,9 +111,9 @@ export async function roleFor(email: string): Promise<Role> {
  * issued moments after a promotion could rebuild the list from a stale snapshot
  * and hand the admin right back.
  */
-export async function setAdmin(email: string, admin: boolean): Promise<void> {
+export async function setAdmin(email: string, admin: boolean): Promise<boolean> {
   const e = email.trim().toLowerCase();
-  if (isOwner(e)) return;
+  if (isOwner(e)) return true;
   const current = await getConfigFresh("ADMIN_EMAILS_EXTRA").catch(() => ({
     error: "unavailable" as const,
   }));
@@ -120,7 +125,14 @@ export async function setAdmin(email: string, admin: boolean): Promise<void> {
   );
   if (admin) extra.add(e);
   else extra.delete(e);
-  await setConfig("ADMIN_EMAILS_EXTRA", Array.from(extra).join(","));
+  // The write's outcome IS the answer - a role change that did not persist is
+  // a role change that did not happen, and the caller must be able to say so
+  // (the status branch of admin/users already does exactly this).
+  const wrote = await setConfig("ADMIN_EMAILS_EXTRA", Array.from(extra).join(",")).catch(
+    () => ({ ok: false, persistent: false }) as { ok: boolean; persistent: boolean }
+  );
+  // A legacy/mocked setConfig that resolves undefined keeps the old behavior.
+  return wrote ? wrote.ok : true;
 }
 
 // ---- cookie plumbing --------------------------------------------------------
@@ -129,10 +141,14 @@ function sign(payload: string): string {
   return createHmac("sha256", secret()).update(payload).digest("hex");
 }
 
-export function setSessionCookie(email: string) {
+export function setSessionCookie(email: string, opts?: { firstIssuedAt?: number }) {
+  const now = Date.now();
   const payload = JSON.stringify({
     email: email.toLowerCase(),
-    issuedAt: Date.now(),
+    issuedAt: now,
+    // Carried through slide-renewals verbatim; a fresh login starts the
+    // 90-day absolute clock at zero.
+    firstIssuedAt: opts?.firstIssuedAt || now,
   });
   const b64 = Buffer.from(payload).toString("base64url");
   cookies().set(COOKIE, `${b64}.${sign(b64)}`, {
@@ -148,7 +164,9 @@ export function clearSessionCookie() {
   cookies().delete(COOKIE);
 }
 
-function decode(token: string | undefined): { email: string; issuedAt: number } | null {
+function decode(
+  token: string | undefined
+): { email: string; issuedAt: number; firstIssuedAt?: number } | null {
   if (!token) return null;
   const [b64, sig] = token.split(".");
   if (!b64 || !sig) return null;
@@ -168,7 +186,7 @@ function decode(token: string | undefined): { email: string; issuedAt: number } 
 
 /** Current session with a freshly-derived role and plan, or null. */
 export async function getSession(): Promise<Session | null> {
-  let raw: { email: string; issuedAt: number } | null = null;
+  let raw: { email: string; issuedAt: number; firstIssuedAt?: number } | null = null;
   try {
     raw = decode(cookies().get(COOKIE)?.value);
   } catch {
@@ -179,17 +197,18 @@ export async function getSession(): Promise<Session | null> {
   if (!raw?.email) return null;
   // SERVER-SIDE EXPIRY: maxAge only tells the BROWSER to drop the cookie -
   // a stolen token replayed directly would otherwise stay valid forever.
-  // Reject anything older than the same 30-day window, and slide-renew
-  // active sessions past the halfway mark so real users never notice.
+  // Reject anything older than the same 30-day window; active sessions are
+  // slide-renewed BELOW, after every validity gate has passed - renewing
+  // first would hand a blocked or revoked session a fresh cookie whose new
+  // issuedAt walks straight past the revocation horizon.
   const ageMs = Date.now() - (Number(raw.issuedAt) || 0);
   if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > MAX_AGE * 1000) return null;
-  if (ageMs > (MAX_AGE * 1000) / 2) {
-    try {
-      setSessionCookie(raw.email);
-    } catch {
-      /* renewal is best-effort (read-only contexts cannot set cookies) */
-    }
-  }
+  // Absolute lifetime, measured from the FIRST issue. Legacy cookies (minted
+  // before firstIssuedAt existed) fall back to issuedAt: their absolute clock
+  // starts at their newest renewal, which only ever errs longer by one 30-day
+  // window - and every cookie minted from here on carries the real thing.
+  const firstIssuedAt = Number(raw.firstIssuedAt) || Number(raw.issuedAt) || 0;
+  if (Date.now() - firstIssuedAt > ABSOLUTE_MAX_AGE * 1000) return null;
   const role = await roleFor(raw.email);
   // Management holds the Ultra plan automatically, free of charge.
   const { getUser, normalizePlan } = await import("./access");
@@ -208,10 +227,65 @@ export async function getSession(): Promise<Session | null> {
   // The owner is deliberately exempt: the owner is derived from OWNER_EMAIL, is
   // refused by the block route, and must not be lockable out of their own
   // product by a row in a table an admin can reach.
+  const rec = await getUser(raw.email);
   if (role !== "owner") {
-    const rec = await getUser(raw.email);
     if (rec?.status === "blocked") return null;
+    // AN ERASED ACCOUNT DOES NOT KEEP A SESSION. Erasure deletes the app_users
+    // row last - and the revocation horizon goes with it, so a cookie that was
+    // still cached somewhere would otherwise ride out its 30 days over an
+    // account that no longer exists, able to re-create data rows as it goes.
+    // Only a POSITIVE "the row is gone" answer refuses (sbSelectStrict
+    // separates gone from unreadable); an outage fails open like the blocked
+    // gate above, so a DB blip never signs the whole fleet out.
+    if (!rec) {
+      try {
+        const rc = await import("./runtime-config");
+        if (rc.supabaseConfigured?.()) {
+          const read = await rc.sbSelectStrict<{ email: string }>(
+            "app_users",
+            `select=email&email=eq.${encodeURIComponent(raw.email)}&limit=1`
+          );
+          if (read && "rows" in read && read.rows.length === 0) return null;
+        }
+      } catch {
+        /* unreadable - fail open, same direction as the blocked gate */
+      }
+    }
     if (role === "user") plan = normalizePlan(rec?.plan);
+  }
+  // REVOCATION HORIZON: any cookie issued before sessions_valid_from is dead,
+  // whatever its age. Set by password change, block, erasure and "Sign out
+  // everywhere" - those flows re-issue THEIR caller's cookie after moving the
+  // horizon, so the person who acted stays signed in while every other
+  // device's session ends.
+  //
+  // The OWNER is NOT exempt, unlike the block gate above - and that is not an
+  // inconsistency. A blocked owner row would lock the owner out permanently
+  // (login refuses blocked accounts), so the block gate must not honour it.
+  // The horizon can never do that: a fresh login always mints a cookie that
+  // postdates it, so the worst a horizon write can do to the owner is ask them
+  // to sign in again - and the owner's cookie is the one whose theft matters
+  // most, so their password change MUST end it. A horizon dated in the future
+  // is the one shape that WOULD refuse fresh logins; no code path writes one
+  // (revokeSessions writes now()), so it can only be corruption - ignored, for
+  // everyone, past a small clock-skew allowance.
+  const horizon = rec?.sessionsValidFrom;
+  if (
+    horizon &&
+    horizon <= Date.now() + 5 * 60_000 &&
+    (Number(raw.issuedAt) || 0) < horizon
+  ) {
+    return null;
+  }
+  // Slide-renew past the halfway mark so real users never notice the 30-day
+  // window - only now, once the session has proven valid, and carrying the
+  // original firstIssuedAt so renewal never resets the absolute clock.
+  if (ageMs > (MAX_AGE * 1000) / 2) {
+    try {
+      setSessionCookie(raw.email, { firstIssuedAt });
+    } catch {
+      /* renewal is best-effort (read-only contexts cannot set cookies) */
+    }
   }
   if (role === "user") {
     // TEST MODE: flagged testers ride Ultra for free while the switch is on -

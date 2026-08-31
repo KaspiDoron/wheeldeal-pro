@@ -425,6 +425,19 @@ export async function saveThreadState(state: NegotiationThreadState): Promise<vo
           ? winner.fields.pricePerDay ?? next.fields.pricePerDay
           : winner.fields.pricePerDay,
         currency: winner.fields.currency ?? next.fields.currency,
+        // THE DIGEST SURVIVES THE RACE TOO. `...winner.fields` above dropped
+        // OUR whole digest - the standing quote, the pending confirms, the
+        // durable comprehension, the once-flags - so a tick turn winning the
+        // version erased what the concurrent inbound turn had just learned,
+        // and the next turn re-asked the shop. Union rules in spte/digest.
+        ...(winner.fields.digest || next.fields.digest
+          ? {
+              digest: (await import("../spte/digest")).mergeStoredDigests(
+                winner.fields.digest,
+                next.fields.digest
+              ),
+            }
+          : {}),
       };
       const mergedPhase =
         nextReengaged && winner.phase === "dead"

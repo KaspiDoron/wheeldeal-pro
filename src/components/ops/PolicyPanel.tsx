@@ -40,7 +40,10 @@ export function PolicyPanel() {
   const [report, setReport] = useState<ReplayReport | null>(null);
   const [stepping, setStepping] = useState<number | null>(null);
 
+  const [loadErr, setLoadErr] = useState(false);
+
   const load = useCallback(async () => {
+    setLoadErr(false);
     const [p, g] = await Promise.all([
       fetch("/api/admin/ops/policy").then((r) => r.json()).catch(() => null),
       fetch("/api/admin/ops/golden").then((r) => r.json()).catch(() => null),
@@ -51,6 +54,12 @@ export function PolicyPanel() {
       setVersions(p.versions ?? []);
       setLearning(Boolean(p.learningEnabled));
       setActiveRev(p.activeRev ?? null);
+    } else {
+      // A 403, a 5xx, a non-JSON error page and an unreachable server all
+      // used to land in the same silent hole: a permanent spinner with no
+      // error and no retry - exactly the defect the Command tab's comment
+      // records fixing. An error is a card, never a forever-skeleton.
+      setLoadErr(true);
     }
     setGolden(Array.isArray(g?.cases) ? g.cases : []);
   }, []);
@@ -59,6 +68,24 @@ export function PolicyPanel() {
     void load();
   }, [load]);
 
+  if (loadErr && !overlay) {
+    return (
+      <div className="rounded-blob border-2 border-brandred/40 bg-brandred-soft p-4 text-center">
+        <p className="text-[13px] font-extrabold text-brandred">
+          The policy state could not be read - nothing here is known right now.
+        </p>
+        <button
+          onClick={() => {
+            setGolden(null);
+            void load();
+          }}
+          className="btn btn-sm mt-2 rounded-xl border-2 border-brandred/40 px-3 text-[11px] font-extrabold text-brandred"
+        >
+          ↻ Retry
+        </button>
+      </div>
+    );
+  }
   if (!overlay || golden === null) return <LoadingDots label="Loading policy state" />;
 
   const post = async (label: string, body: Record<string, unknown>) => {

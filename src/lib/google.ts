@@ -558,11 +558,11 @@ export async function findRealVendors(
     );
     const list = reachable.length > 0 ? reachable : mapped;
     // Tag the fastest-replying quartile (Ultra insight).
-    const { fastResponderPhones } = await import("./stats");
+    const { fastResponderPhones, responsePhoneKey } = await import("./stats");
     const fast = await fastResponderPhones();
     if (fast.size) {
       for (const v of list) {
-        if (fast.has(digitsOnly(v.whatsapp))) v.fastResponder = true;
+        if (fast.has(responsePhoneKey(v.whatsapp))) v.fastResponder = true;
       }
     }
     // Paid placements: glowing "Recommended" cards pinned to the top.

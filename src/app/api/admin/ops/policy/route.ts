@@ -40,11 +40,23 @@ export async function POST(req: Request) {
   if (!session) return NextResponse.json({ error: "Owner only." }, { status: 403 });
   const body = await req.json().catch(() => ({}));
 
-  // Kill switch for the whole compiled-learning channel.
+  // Kill switch for the whole compiled-learning channel. HONEST WRITE: the
+  // response echoes the STORED value (a fresh re-read), never the requested
+  // one - the panel repaints its toggle from this field, and echoing the
+  // request painted a flip the vault may have refused.
   if (body.action === "learning") {
-    await setConfig("OPS_LEARNING", body.on ? "on" : "off").catch(() => {});
+    const wrote = await setConfig("OPS_LEARNING", body.on ? "on" : "off").catch(
+      () => ({ ok: false, persistent: false }) as { ok: boolean; persistent: boolean }
+    );
     bustOpsLearningCache();
-    return NextResponse.json({ ok: true, learningEnabled: Boolean(body.on) });
+    const stored = await opsLearningEnabled();
+    if (!wrote.ok) {
+      return NextResponse.json(
+        { ok: false, learningEnabled: stored, error: "The switch did NOT change - the write failed." },
+        { status: 502 }
+      );
+    }
+    return NextResponse.json({ ok: stored === Boolean(body.on), learningEnabled: stored });
   }
 
   if (body.action === "save" && body.kind === "policy_overlay") {

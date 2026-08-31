@@ -1094,6 +1094,9 @@ create table if not exists public.wa_send_claims (
   primary key (sender_key, slot_key)
 );
 alter table public.wa_send_claims enable row level security;
+-- The GC's two ranged deletes (gcSendClaims) scan on created_at; without this
+-- index each one is a full table scan on every run.
+create index if not exists wa_send_claims_created_idx on public.wa_send_claims (created_at);
 
 -- Exact ownership scoping for the risk feed (replaces a LIKE substring
 -- filter on detail that could match across users).
@@ -1714,3 +1717,123 @@ begin
   end if;
 end;
 $$;
+
+-- ---- The funnel stage ledger (src/lib/funnel/stages.ts) ---------------------
+--
+-- `stage` is the thread's CURRENT funnel stage - the single vocabulary the
+-- traveller tracker, the Ops console and analytics all read, advanced only by
+-- advanceThreadStage() (forward-only + terminal refusal enforced in the PATCH
+-- filter, never read-then-write). Transition HISTORY is append-only in
+-- agent_events kind='funnel-stage' (join columns user_email/to_number/
+-- vendor_id/decision_id; detail JSON carries {from,to,evidence,transport,
+-- engine,entry}). `stage_at` is when the current stage was entered - dwell
+-- times come from the event history, this is just the cheap "since when" the
+-- tracker shows without an events query.
+alter table public.negotiation_threads add column if not exists stage text;
+alter table public.negotiation_threads add column if not exists stage_at timestamptz;
+create index if not exists negotiation_threads_stage_idx
+  on public.negotiation_threads (user_email, stage);
+
+-- ---- The booking lifecycle (src/lib/bookings.ts) ----------------------------
+--
+-- `status` grows a real vocabulary: confirmed -> deposit_pending ->
+-- deposit_settled|deposit_waived -> picked_up -> completed, terminals
+-- cancelled / no_show. Advanced ONLY by advanceBooking() (forward-only +
+-- terminal refusal + ownership in the PATCH filter); history is append-only in
+-- agent_events kind='booking-stage'. The doctrine: the funnel never asserts
+-- what nobody witnessed - picked_up/completed come from traveller taps, and
+-- the schedule timeout only ever SUGGESTS completion (completion_suggested_at
+-- throttles that push to once per booking). thread_key joins the money record
+-- to the negotiation that produced it.
+alter table public.bookings add column if not exists deposit_status text;
+alter table public.bookings add column if not exists deposit_amount numeric;
+alter table public.bookings add column if not exists deposit_currency text;
+alter table public.bookings add column if not exists picked_up_at timestamptz;
+alter table public.bookings add column if not exists completed_at timestamptz;
+alter table public.bookings add column if not exists cancelled_at timestamptz;
+alter table public.bookings add column if not exists cancel_reason text;
+alter table public.bookings add column if not exists thread_key text;
+alter table public.bookings add column if not exists completion_suggested_at timestamptz;
+
+-- waba_leads joins the real conversation spine: thread_key (user_email:digits)
+-- replaces the dead search_sessions uuid as the lead's join to
+-- negotiation_threads / whatsapp_messages. Stamped by the WABA dispatch when
+-- the takeover leg wires up (Wave 6); additive and null until then.
+alter table public.waba_leads add column if not exists thread_key text;
+
+-- The webhook re-arm's shared clock (src/lib/evolution reassertWebhook) lives
+-- on the instance's own session row now - the old per-instance WH_REARM_*
+-- app_config rows polluted the owner's Key Vault, and the clock advanced even
+-- on a FAILED set (throttling a broken re-arm into staying broken for an
+-- hour). Stamped only on a verified outcome.
+alter table public.wa_sessions add column if not exists webhook_rearmed_at timestamptz;
+
+-- ---- WABA compliance + ledger completion (Wave 6) ---------------------------
+--
+-- opted_in_at: the Meta-policy gate. A cold template may only go to a shop
+-- that opted in to WheelDeal leads (QR/wa.me inbound to the WABA, or the
+-- partner form); admitLead fails CLOSED on this - an un-migrated or unreadable
+-- store refuses the lane and Evolution stays the path.
+alter table public.waba_agencies add column if not exists opted_in_at timestamptz;
+-- dry_run: a rehearsal is not a send - persisted so the governor, cooldowns
+-- and every count can exclude it.
+alter table public.waba_leads add column if not exists dry_run boolean;
+-- fallback: rung 4's payload - the composed opener + rfq captured at HOLD
+-- time, so a hold that times out can re-dispatch the traveller's real message
+-- on their own wire (a held lead has no anchor row; nothing was ever sent).
+alter table public.waba_leads add column if not exists fallback jsonb;
+
+-- ---- Fleet-wide shop suppression (owner decision: opt-out is fleet-wide) ----
+--
+-- A shop that asked to stop hearing from WheelDeal asked WheelDeal, not one
+-- traveller. Keyed on the national number tail (same canonical key as the
+-- recipient ledger and waba_agencies); consulted by guardOutbound's cold gate,
+-- mass outreach admission and the WABA admitLead.
+create table if not exists public.wa_suppressions (
+  number_tail text primary key,
+  number      text,
+  reason      text,
+  source      text,               -- stop-intent | owner | wrong-number
+  created_at  timestamptz not null default now()
+);
+alter table public.wa_suppressions enable row level security;
+
+-- ---- Session revocation horizon (Wave 9) ------------------------------------
+--
+-- A password change, a block, an erasure or "Sign out everywhere" moves this
+-- timestamp to now; getSession rejects any cookie whose issuedAt predates it.
+-- Without it, revocation only reached the one browser that performed the
+-- action - every other device kept a valid 30-day cookie.
+alter table public.app_users add column if not exists sessions_valid_from timestamptz;
+
+-- ---- Consent data layer (Wave 9, owner problem #10) -------------------------
+--
+-- granted: a withdrawal is a ROW (granted=false), never a deletion, so the
+-- ledger proves the history in both directions. Legacy rows (null) are
+-- acceptances - that is what an un-flagged row always meant.
+alter table public.consent_events add column if not exists granted boolean;
+
+-- The structured behavioural event store: a consent-gated PROJECTION of the
+-- funnel/booking stage ledgers (the same advanceThreadStage/advanceBooking
+-- writes serve observability and, only under granted 'analytics' consent,
+-- this dataset). Typed columns, not JSON stuffed into agent_events.detail.
+create table if not exists public.product_events (
+  id          bigint generated always as identity primary key,
+  user_email  text not null,
+  session_id  text,
+  stage       text not null,
+  kind        text not null,             -- 'thread-stage' | 'booking-stage'
+  props       jsonb,
+  occurred_at timestamptz not null default now()
+);
+alter table public.product_events enable row level security;
+create index if not exists product_events_user_idx
+  on public.product_events (user_email, occurred_at desc);
+
+-- insights_ok: stamped at write time from the trader's commercial_insights
+-- consent. The row itself carries NO user identifier (that is deal_memory's
+-- whole shape); the stamp is how a consent decision survives into a store
+-- that cannot be filtered by person after the fact. The sellable rollup reads
+-- ONLY insights_ok=true rows - legacy null rows serve the in-product prior
+-- but never the commercial artefact.
+alter table public.deal_memory add column if not exists insights_ok boolean;

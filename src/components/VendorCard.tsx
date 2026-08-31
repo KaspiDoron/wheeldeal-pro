@@ -188,6 +188,13 @@ function VendorCardInner({
   const [pickupState, setPickupState] = useState<"idle" | "sending" | "shared" | "failed">("idle");
 
   const offer = vendor.offer;
+  // Facts the shop's replies established even when NO price was read (the
+  // facts pass, lib/client/reply-facts). The substitution choice, the call
+  // request and the deposit chips must render off these too - a shop that
+  // counter-offered a different bike has no `offer` yet by definition.
+  const facts = vendor.threadFacts;
+  const altOffer = offer?.alternativeOffer ?? facts?.alternativeOffer;
+  const callAsk = offer?.wantsCall ?? facts?.wantsCall;
   // ONE reading of the vehicle question for the whole card. Three separate
   // branches used to test `matchesSpec === false` independently, and that single
   // bit cannot tell "wrong bike" from "not established yet" - so a shop quoting
@@ -536,19 +543,19 @@ function VendorCardInner({
               The thread is paused while this sits here; the agent haggles
               nothing until the traveller answers, and declining ends it
               exactly where it would have ended anyway. */}
-          {offer?.alternativeOffer && (
+          {altOffer && (
             <div className="mt-2 rounded-2xl border-2 border-brandblue/40 bg-brandblue-soft p-2.5">
               <div className="text-[11px] font-extrabold text-brandblue">
                 🔁 {t("This shop offered a different vehicle")}
               </div>
               <div className="mt-0.5 text-[12.5px] font-bold text-strong">
-                {offer.alternativeOffer.vehicle}
-                {typeof offer.alternativeOffer.pricePerDay === "number"
-                  ? ` - ${offer.alternativeOffer.pricePerDay} ${offer.alternativeOffer.currency ?? ""}/${t("day")}`
+                {altOffer.vehicle}
+                {typeof altOffer.pricePerDay === "number"
+                  ? ` - ${altOffer.pricePerDay} ${altOffer.currency ?? ""}/${t("day")}`
                   : ""}
               </div>
-              {offer.alternativeOffer.reason && (
-                <p className="mt-0.5 text-[11px] leading-snug text-soft">{offer.alternativeOffer.reason}</p>
+              {altOffer.reason && (
+                <p className="mt-0.5 text-[11px] leading-snug text-soft">{altOffer.reason}</p>
               )}
               <div className="mt-2 flex gap-2">
                 <button
@@ -572,12 +579,12 @@ function VendorCardInner({
               glossed thread; until this chip, "can you call me?" scrolled past
               inside a foreign-language transcript and the agent kept texting.
               Informational, never blocking - the traveller decides. */}
-          {offer?.wantsCall && (
+          {callAsk && (
             <div className="mt-2 rounded-xl border-2 border-line bg-card2 p-2 text-[11px] font-bold text-soft">
               📞 {t("This shop asked to talk by phone")}
-              {offer.wantsCall.urgency === "now" ? ` (${t("right now")})` : ""}
-              {offer.wantsCall.quote && (
-                <span className="block font-medium text-strong">&ldquo;{offer.wantsCall.quote}&rdquo;</span>
+              {callAsk.urgency === "now" ? ` (${t("right now")})` : ""}
+              {callAsk.quote && (
+                <span className="block font-medium text-strong">&ldquo;{callAsk.quote}&rdquo;</span>
               )}
             </div>
           )}
@@ -1044,6 +1051,51 @@ function VendorCardInner({
               )}
             </div>
           </div>
+        ) : facts?.replyUnparsed && !vendor.cancelled ? (
+          /* REPLIED, BUT NOT UNDERSTOOD (owner problem #8). A blank card is
+             ambiguous and looks like a rendering bug; this state says exactly
+             what happened - the shop answered, no price could be read - quotes
+             the shop's own words, shows any terms that WERE understood, and
+             offers a real next action instead of a dead passive button. */
+          <div className="mt-3 rounded-2xl border-2 border-brandyellow/50 bg-brandyellow-soft p-3">
+            <div className="text-[12px] font-extrabold text-warn">
+              💬 {t("The shop replied, but the price is unclear")}
+            </div>
+            {(facts.replyEnglish || facts.replyText) && (
+              <p className="mt-1 text-[12px] leading-snug text-strong">
+                &ldquo;{(facts.replyEnglish ?? facts.replyText ?? "").slice(0, 160)}&rdquo;
+              </p>
+            )}
+            {(facts.depositType || facts.deposit || facts.delivers === true || facts.insuranceIncluded === true) && (
+              <div className="mt-1.5 flex flex-wrap gap-1.5 text-[10.5px] font-bold text-soft">
+                {(facts.depositType || facts.deposit) && (
+                  <span className="rounded-lg bg-card px-1.5 py-0.5">
+                    🔐 {t("Deposit")}: {facts.deposit ?? facts.depositType}
+                  </span>
+                )}
+                {facts.delivers === true && (
+                  <span className="rounded-lg bg-card px-1.5 py-0.5">🛵 {t("Delivers")}</span>
+                )}
+                {facts.insuranceIncluded === true && (
+                  <span className="rounded-lg bg-card px-1.5 py-0.5">🛡 {t("Insurance included")}</span>
+                )}
+              </div>
+            )}
+            <p className="mt-1.5 text-[11px] leading-snug text-soft">
+              {t("Your agent keeps working on it. You can also nudge the shop for a number now.")}
+            </p>
+            <button
+              onClick={sendRfq}
+              disabled={!waConnected || rfqState === "sending" || queuedActive}
+              className="btn mt-2 w-full rounded-2xl border-2 border-line bg-card py-2 text-[12px] font-extrabold text-strong disabled:opacity-60"
+            >
+              {rfqState === "sending" ? (
+                <LoadingDots label={t("Sending")} />
+              ) : (
+                `🔁 ${t("Ask for the price again")}`
+              )}
+            </button>
+          </div>
         ) : (
           <div className="mt-3 rounded-2xl bg-card2 p-3">
             <div className="text-[12px] font-bold text-soft">
@@ -1077,9 +1129,12 @@ function VendorCardInner({
                 disabled={!waConnected || rfqState === "sending" || askDone || queuedActive}
                 aria-disabled={!waConnected || rfqState === "sending" || askDone || queuedActive}
                 className={`btn w-full rounded-2xl py-2.5 text-[13px] font-extrabold ${
-                  queuedActive
-                    ? // Queued is a STATUS, not a call to action: a muted,
-                      // clearly non-interactive chip, never the green primary.
+                  (queuedActive || askDone) && rfqState !== "sending"
+                    ? // Queued AND "sent, waiting for a reply" are both STATUSES,
+                      // not calls to action: a muted, clearly non-interactive
+                      // chip, never the green primary. "Sent - reply lands here"
+                      // in the green primary invited taps on an element that
+                      // does nothing (the green-button trap).
                       "cursor-default bg-card2 text-soft disabled:opacity-100"
                     : `text-white disabled:opacity-60 ${
                         waConnected ? "bg-savings hover:brightness-95" : "bg-faint"
@@ -1094,7 +1149,10 @@ function VendorCardInner({
                   // and the reason is the guard's real one, never a guess.
                   `🕘 ${t(queueReasonLabel(vendor.queuedReason))}`
                 ) : askDone ? (
-                  `✓ ${t("Sent - reply lands here")}`
+                  // A reply has ALREADY landed once lastInboundAt is set - the
+                  // "reply lands here" promise is stale then, and the card is
+                  // showing the reply above. Say what is true.
+                  vendor.lastInboundAt ? t("Reply received") : t("Sent - reply lands here")
                 ) : waConnected ? (
                   t("Ask for price")
                 ) : (

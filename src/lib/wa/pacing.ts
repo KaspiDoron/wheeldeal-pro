@@ -232,8 +232,19 @@ export type ClaimOutcome =
    * mid-send to this exact shop right now. It is NOT a pacing hold to retry
    * quietly - the traveller is standing there with their thumb on the button,
    * so the caller tells them their agent is already talking to this shop.
+   *
+   * `retryAtMs` (pacing/recipient refusals only): when the lane that refused
+   * FREES - the next bucket edge, or the straddle window's end. The lanes a
+   * reply loses are measured in seconds, and the flat re-park penalty for
+   * losing one was the dominant latency in the whole system; a caller that
+   * can afford to WAIT to this instant and re-claim skips the re-park, the
+   * outbox round-trip and the next drain's whole pipeline.
    */
-  | { ok: false; kind: "pacing" | "duplicate" | "error" | "recipient-busy" };
+  | {
+      ok: false;
+      kind: "pacing" | "duplicate" | "error" | "recipient-busy";
+      retryAtMs?: number;
+    };
 
 /**
  * Atomically claim the right to SEND now.
@@ -329,7 +340,11 @@ export async function claimSendSlots(opts: {
   });
   if (mine === "lost") {
     await releaseMessageClaim(opts.senderKey, opts.toDigits, opts.text);
-    return { ok: false, kind: opts.auto ? "pacing" : "recipient-busy" };
+    return {
+      ok: false,
+      kind: opts.auto ? "pacing" : "recipient-busy",
+      retryAtMs: (recipientBucket + 1) * RECIPIENT_LOCK_SEC * 1000,
+    };
   }
   if (mine === "error") {
     await releaseMessageClaim(opts.senderKey, opts.toDigits, opts.text);
@@ -358,7 +373,11 @@ export async function claimSendSlots(opts: {
         )}`
       ).catch(() => {});
       await releaseMessageClaim(opts.senderKey, opts.toDigits, opts.text);
-      return { ok: false, kind: opts.auto ? "pacing" : "recipient-busy" };
+      return {
+        ok: false,
+        kind: opts.auto ? "pacing" : "recipient-busy",
+        retryAtMs: prevAt + RECIPIENT_LOCK_SEC * 1000,
+      };
     }
   }
 
@@ -388,7 +407,7 @@ export async function claimSendSlots(opts: {
   });
   if (cur === "lost") {
     await releaseOwn([msgSlot, ownRecipientSlot]); // let the queued retry re-claim it
-    return { ok: false, kind: "pacing" };
+    return { ok: false, kind: "pacing", retryAtMs: (bucket + 1) * opts.gapSeconds * 1000 };
   }
   if (cur === "error") {
     await releaseOwn([msgSlot, ownRecipientSlot]);
@@ -411,7 +430,7 @@ export async function claimSendSlots(opts: {
     const prevAt = "rows" in row ? Date.parse(row.rows[0]?.created_at ?? "") : NaN;
     if (Number.isFinite(prevAt) && now - prevAt < opts.gapSeconds * 1000) {
       await releaseOwn([msgSlot, ownRecipientSlot, slotFor(bucket)]);
-      return { ok: false, kind: "pacing" };
+      return { ok: false, kind: "pacing", retryAtMs: prevAt + opts.gapSeconds * 1000 };
     }
   }
   // prev === "error" is tolerable: the current-bucket claim already
@@ -434,7 +453,11 @@ export async function claimSendSlots(opts: {
     });
     if (fleet === "lost") {
       await releaseOwn([msgSlot, ownRecipientSlot, slotFor(bucket)]);
-      return { ok: false, kind: "pacing" };
+      return {
+        ok: false,
+        kind: "pacing",
+        retryAtMs: (fleetBucket + 1) * opts.fleetGapSeconds * 1000,
+      };
     }
     if (fleet === "error") {
       await releaseOwn([msgSlot, ownRecipientSlot, slotFor(bucket)]);
@@ -461,7 +484,7 @@ export async function claimSendSlots(opts: {
       const prevAt = "rows" in row ? Date.parse(row.rows[0]?.created_at ?? "") : NaN;
       if (Number.isFinite(prevAt) && now - prevAt < opts.fleetGapSeconds * 1000) {
         await releaseOwn([msgSlot, ownRecipientSlot, slotFor(bucket), fleetSlotFor(fleetBucket)]);
-        return { ok: false, kind: "pacing" };
+        return { ok: false, kind: "pacing", retryAtMs: prevAt + opts.fleetGapSeconds * 1000 };
       }
     }
     // prevFleet === "error" is tolerable for the same reason as the gap lane:
@@ -490,8 +513,23 @@ export async function releaseMessageClaim(
   ).catch(() => {});
 }
 
+// ACTUALLY throttled now: the docstring said "throttled" while the function
+// ran two ranged DELETEs on EVERY drain call - and drains fire from four
+// triggers up to several times a minute, against a table whose only index is
+// the primary key (neither `created_at` nor `not like` is indexable without
+// the schema.sql index this wave adds). Once per instance per 5 minutes keeps
+// the table just as bounded; the expired rows have hours of slack by design.
+const GC_EVERY_MS = 5 * 60_000;
+declare global {
+  // eslint-disable-next-line no-var
+  var __wd_claims_gc_at__: number | undefined;
+}
+
 /** Throttled GC (call from the drain tail). Two horizons by slot type. */
 export async function gcSendClaims(): Promise<void> {
+  const last = globalThis.__wd_claims_gc_at__ ?? 0;
+  if (Date.now() - last < GC_EVERY_MS) return;
+  globalThis.__wd_claims_gc_at__ = Date.now();
   // Every NON-idempotency claim (gap: pacing, chain: tick self-chain lock,
   // game: score rate-limit, and any future prefix) only guards a short window -
   // clear after 2h. `not.like.msg:*` restores the pre-split guarantee that the

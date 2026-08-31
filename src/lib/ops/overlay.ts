@@ -11,7 +11,8 @@ import { getConfig } from "../runtime-config";
 export interface PolicyOverlay {
   /** A quote within floor*X counts as "great price" (default 1.05). */
   floorTolerance: number;
-  /** Price counts as far above floor when > floor*X (default 1.25). */
+  /** Price counts as far above floor when > floor*X (default 1.08 - see
+   *  DEFAULT_OVERLAY's rationale for the aggressive stance). */
   priceFarAboveFloor: number;
   /** Effective floor vs a posted price sheet: sheet*X (default 0.8). */
   sheetAnchor: number;

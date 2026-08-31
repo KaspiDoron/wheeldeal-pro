@@ -27,12 +27,16 @@ import {
   admitLead,
   advanceLead,
   createLead,
+  expiredHolds,
+  expireHold,
   heldLeadsFor,
+  holdLead,
   markTemplateCapped,
   markTemplateSent,
   noteWabaEvent,
   openWindow,
   type Lead,
+  type LeadFallback,
 } from "./leads";
 import { nationalTail } from "../wa/phone-key";
 
@@ -91,6 +95,11 @@ export interface DispatchInput {
   language?: string;
   /** Rendered by the caller for the free-form lane - informal is fine here. */
   freeformText: string;
+  /** The structured RFQ, stamped onto the anchor row so the takeover leg can
+   *  resolve the thread (raw.rfq is what resolveThreadContext anchors on). */
+  rfq?: unknown;
+  /** Discovery vendor id, for the anchor row's identity. */
+  vendorId?: string;
 }
 
 /**
@@ -130,6 +139,19 @@ export async function dispatchHandoff(input: DispatchInput): Promise<DispatchOut
 
   const admission = await admitLead(input.agencyNumber);
   if ("refuse" in admission) {
+    // NOT-OPTED-IN is a lane verdict, not a reachability verdict: the shop is
+    // perfectly contactable on the traveller's own number, and Meta's rules
+    // only forbid OUR cold template. Fallback, so the traveller's enquiry
+    // proceeds exactly as it always has. A SUPPRESSED shop is the opposite -
+    // it asked all of WheelDeal to stop, and no lane may contact it.
+    if (admission.reason === "not-opted-in") {
+      return {
+        leadId: null,
+        outcome: "fallback-legacy",
+        reason: "not-opted-in",
+        userMessage: say(USER_COPY.fallback, shop),
+      };
+    }
     return {
       leadId: null,
       outcome: "refused",
@@ -156,7 +178,9 @@ export async function dispatchHandoff(input: DispatchInput): Promise<DispatchOut
   if ("hold" in admission) {
     // HELD, not dropped. The agency is contactable, just not right now - and the
     // moment it answers anyone, `flushHeldLeads` releases this one for free.
-    await advanceLead(lead.id, "held", { terminal_reason: null });
+    // The fallback payload rides the hold so rung 4 (sweepExpiredHolds) has the
+    // real composed opener + rfq to re-dispatch on the traveller's own wire.
+    await holdLead(lead.id, fallbackFor(input));
     await noteWabaEvent("held", { leadId: lead.id, agencyTail: lead.agency_tail, raw: { reason: admission.reason } });
     return {
       leadId: lead.id,
@@ -169,14 +193,59 @@ export async function dispatchHandoff(input: DispatchInput): Promise<DispatchOut
   return sendForLead(lead, admission.lane, input);
 }
 
+/** The rung-4 payload a hold carries: what to say and who it is about. */
+function fallbackFor(
+  input: Pick<DispatchInput, "freeformText" | "rfq" | "vendorId" | "agencyName">
+): LeadFallback | null {
+  if (!input.freeformText) return null;
+  return {
+    text: input.freeformText,
+    rfq: input.rfq ?? null,
+    vendorId: input.vendorId ?? null,
+    vendorName: input.agencyName ?? null,
+  };
+}
+
 /** The send itself, shared by the first attempt and by the window flush. */
 export async function sendForLead(
   lead: Lead,
   lane: "template" | "freeform",
-  input: Pick<DispatchInput, "vehicle" | "dates" | "language" | "freeformText" | "agencyName">
+  input: Pick<DispatchInput, "vehicle" | "dates" | "language" | "freeformText" | "agencyName" | "rfq" | "vendorId">
 ): Promise<DispatchOutcome> {
   const c = await wabaConfig();
   const shop = input.agencyName ?? lead.agency_name ?? "";
+
+  // THE TEMPLATE-LANE CLAIM. templateAllowed is a check-then-act on
+  // last_template_at, so two travellers dispatching the same cold agency in
+  // the same second both read "no recent template" and BOTH pay - and the
+  // second send is exactly the double-message the cooldown exists to prevent
+  // on a shared, metered, quality-rated asset. One atomic day slot per agency
+  // tail: the loser HOLDS (its lead rides the window flush like any other).
+  // A dry run takes no claim (isolation: a rehearsal spends nothing), and a
+  // claims-store outage proceeds - the cooldown already passed, and "error"
+  // here is the pre-migration state the pacing layer treats the same way.
+  if (lane === "template" && !c.dryRun) {
+    const { sbInsertClaim } = await import("../runtime-config");
+    const day = new Date().toISOString().slice(0, 10);
+    const claim = await sbInsertClaim("wa_send_claims", {
+      sender_key: "waba",
+      slot_key: `template:${lead.agency_tail}:${day}`,
+    }).catch(() => "error" as const);
+    if (claim === "lost") {
+      await holdLead(lead.id, fallbackFor(input));
+      await noteWabaEvent("held", {
+        leadId: lead.id,
+        agencyTail: lead.agency_tail,
+        raw: { reason: "template-claim-lost" },
+      });
+      return {
+        leadId: lead.id,
+        outcome: "held",
+        reason: "agency-cooldown",
+        userMessage: say(USER_COPY.held, shop),
+      };
+    }
+  }
 
   const result =
     lane === "freeform"
@@ -206,8 +275,66 @@ export async function sendForLead(
       lane,
       sent_at: new Date().toISOString(),
       preview: result.preview,
+      // The provider's id, so a delivery/read/failed status can find its lead
+      // (the column + index existed; nothing ever wrote it). Never the
+      // "dry-run" sentinel - a rehearsal id would shadow a real one.
+      provider_message_id:
+        result.messageId && result.messageId !== "dry-run" ? result.messageId : null,
+      // A rehearsal is not a send: persisted so the governor, the cooldown
+      // and every count can exclude it.
+      dry_run: result.dryRun,
     });
-    if (lane === "template") await markTemplateSent(lead.agency_tail, lead.agency_number);
+    // A DRY RUN spends nothing: no cooldown (markTemplateSent is what starts
+    // the 24h per-agency clock), no anchor row (nothing reached the shop).
+    if (lane === "template" && !result.dryRun) {
+      await markTemplateSent(lead.agency_tail, lead.agency_number);
+    }
+    if (!result.dryRun) {
+      // THE TRUTHFUL ANCHOR (the decided crux): the template/handoff GENUINELY
+      // reached this shop - it just left from the company number - so the
+      // outbound row satisfies the repo's TRUTH RULE and every downstream
+      // surface works unchanged. Above all the takeover leg: when the agency
+      // messages the traveller, resolveThreadContext anchors on raw.rfq of
+      // this very row, and the reply no longer dies as `no-rfq-thread`.
+      const { sbInsert } = await import("../runtime-config");
+      const digits = lead.agency_number.replace(/\D+/g, "");
+      await sbInsert("whatsapp_messages", [
+        {
+          wa_message_id:
+            result.messageId && result.messageId !== "dry-run" ? result.messageId : null,
+          to_number: digits || lead.agency_number,
+          body: result.preview,
+          type: "text",
+          direction: "outbound",
+          raw: {
+            sender: lead.user_email,
+            channel: "waba",
+            transport: "waba",
+            kind: "waba-lead",
+            ok: true,
+            confirmed: true,
+            auto: true,
+            leadId: lead.id,
+            ...(input.rfq ? { rfq: input.rfq } : {}),
+            ...(input.vendorId ? { vendorId: input.vendorId } : {}),
+            ...(shop ? { vendorName: shop } : {}),
+          },
+        },
+      ]).catch(() => false);
+      // FUNNEL LEDGER: the lead reached the shop - on the company wire.
+      const { advanceThreadStage } = await import("../funnel/stages");
+      await advanceThreadStage(
+        {
+          userEmail: lead.user_email,
+          toNumber: lead.agency_number,
+          vendorId: input.vendorId,
+          vendorName: shop || undefined,
+          transport: "waba",
+        },
+        "contacted",
+        lane === "template" ? "WABA lead template delivered" : "WABA handoff delivered"
+      ).catch(() => {});
+    }
     return {
       leadId: lead.id,
       outcome: "sent",
@@ -223,7 +350,7 @@ export async function sendForLead(
   // governor stops choosing this agency, and hold the lead for the window.
   if (result.recipientCapped) {
     await markTemplateCapped(lead.agency_tail);
-    await advanceLead(lead.id, "held", { terminal_reason: null });
+    await holdLead(lead.id, fallbackFor(input));
     return {
       leadId: lead.id,
       outcome: "held",
@@ -254,13 +381,34 @@ export async function sendForLead(
  */
 export async function onAgencyReplied(
   agencyNumber: string,
-  render: (lead: Lead) => Pick<DispatchInput, "vehicle" | "dates" | "language" | "freeformText" | "agencyName">
+  render: (
+    lead: Lead
+  ) =>
+    | Pick<DispatchInput, "vehicle" | "dates" | "language" | "freeformText" | "agencyName" | "rfq" | "vendorId">
+    | Promise<Pick<DispatchInput, "vehicle" | "dates" | "language" | "freeformText" | "agencyName" | "rfq" | "vendorId">>
 ): Promise<{ opened: boolean; flushed: number }> {
   const tail = nationalTail(agencyNumber);
   if (!tail) return { opened: false, flushed: 0 };
 
   await openWindow(tail, agencyNumber);
   await noteWabaEvent("inbound", { agencyTail: tail });
+  // AN INBOUND ON THE BUSINESS NUMBER IS THE OPT-IN Meta's rules recognise -
+  // record it durably so the next cold template to this shop is legitimate.
+  {
+    const { recordAgencyOptIn } = await import("./leads");
+    await recordAgencyOptIn(tail, agencyNumber).catch(() => false);
+  }
+  // The ledger column existed and nothing wrote it: stamp agency_replied_at on
+  // every live lead for this tail that lacks it, so the console can show WHEN
+  // the agency answered instead of inferring it from the window.
+  {
+    const { sbUpdate } = await import("../runtime-config");
+    await sbUpdate(
+      "waba_leads",
+      `agency_tail=eq.${encodeURIComponent(tail)}&agency_replied_at=is.null&handed_off_at=is.null`,
+      { agency_replied_at: new Date().toISOString() }
+    ).catch(() => false);
+  }
 
   const held = await heldLeadsFor(tail);
   let flushed = 0;
@@ -269,8 +417,98 @@ export async function onAgencyReplied(
     // AGENCY to contact the traveller, not on us to send again - re-sending
     // would double-message the agency about the same person.
     if (lead.state !== "held") continue;
-    const out = await sendForLead(lead, "freeform", render(lead));
+    const out = await sendForLead(lead, "freeform", await render(lead));
     if (out.outcome === "sent") flushed += 1;
   }
   return { opened: true, flushed };
+}
+
+/**
+ * RUNG 4 OF THE LADDER - the hold times out, the legacy path takes over.
+ *
+ * Constraint 1 (absolute shop choice) is why this exists: a traveller who
+ * picked a shop gets that shop contacted, and an agency our business number
+ * could not reach inside the hold window still has to be reachable somehow -
+ * the traveller's own number, exactly as before the WABA lane existed.
+ *
+ * The race with the window flush is settled by `expireHold`'s atomic
+ * state=held claim: exactly one of the two paths contacts the shop. The
+ * legacy re-dispatch is a PARKED wa_outbox row, not a direct send - the drain
+ * re-runs the full anti-ban guard (fleet suppression included) at delivery,
+ * so rung 4 cannot bypass a single rule of the wire it falls back to. The
+ * thread was never stamped waba (a held lead delivered nothing), so the
+ * Evolution delivery stamps the thread's transport honestly.
+ *
+ * Runs from the ping (the one periodic runner production has). Never throws.
+ */
+export async function sweepExpiredHolds(now = Date.now()): Promise<{ expired: number; redispatched: number }> {
+  const due = await expiredHolds(now).catch(() => [] as Lead[]);
+  let expired = 0;
+  let redispatched = 0;
+  for (const lead of due) {
+    if (!(await expireHold(lead.id))) continue; // flush won the race - its send stands
+    expired += 1;
+    const fb = lead.fallback ?? null;
+    const key = lead.thread_key ?? "";
+    const idx = key.lastIndexOf(":");
+    const email = idx > 0 ? key.slice(0, idx) : "";
+    const digits = idx > 0 ? key.slice(idx + 1) : "";
+    if (!fb?.text || !email || !digits) {
+      // Nothing real to re-send (pre-migration hold, or no thread join). The
+      // drop is recorded, never silent - Part 5.5's rule.
+      await noteWabaEvent("expired-unrecoverable", {
+        leadId: lead.id,
+        agencyTail: lead.agency_tail,
+        raw: { hasText: Boolean(fb?.text), hasThread: Boolean(email && digits) },
+      });
+      continue;
+    }
+    const { sbInsert } = await import("../runtime-config");
+    const { outboxToKeyPatch } = await import("../wa/outbox-columns");
+    const { humanizeForOutbound } = await import("../wa-guard");
+    const parked = await sbInsert("wa_outbox", [
+      {
+        sender_key: email,
+        to_number: digits,
+        ...(await outboxToKeyPatch(digits)),
+        // Humanize at park (the drain delivers parked rows verbatim), as a
+        // FIRST outbound: the WABA hold delivered nothing, so this genuinely
+        // is the first thing the traveller's wire says to this shop.
+        body: humanizeForOutbound(email, digits, fb.text, { firstOutbound: true }),
+        not_before: new Date(now).toISOString(),
+        meta: {
+          sender: email,
+          vendorId: fb.vendorId ?? "",
+          vendorName: fb.vendorName ?? lead.agency_name ?? "",
+          kind: "rfq",
+          round: 0,
+          rfq: fb.rfq ?? null,
+          reason: "waba-hold-timeout - falling back to your own WhatsApp",
+        },
+      },
+    ]).catch(() => false);
+    if (parked) {
+      redispatched += 1;
+      const { advanceThreadStage } = await import("../funnel/stages");
+      await advanceThreadStage(
+        {
+          userEmail: email,
+          toNumber: digits,
+          vendorId: fb.vendorId ?? undefined,
+          vendorName: fb.vendorName ?? lead.agency_name ?? undefined,
+          transport: "evolution",
+        },
+        "contact_queued",
+        "WABA hold timed out - re-dispatched on the traveller's own wire"
+      ).catch(() => {});
+      await noteWabaEvent("expired-redispatched", { leadId: lead.id, agencyTail: lead.agency_tail });
+    } else {
+      await noteWabaEvent("expired-unrecoverable", {
+        leadId: lead.id,
+        agencyTail: lead.agency_tail,
+        raw: { parked: false },
+      });
+    }
+  }
+  return { expired, redispatched };
 }

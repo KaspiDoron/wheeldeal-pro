@@ -63,6 +63,63 @@ export default function ProfilePage() {
   const [pwMsg, setPwMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [mustChangePw, setMustChangePw] = useState(false);
 
+  // "Sign out everywhere" (revokes every other device's session).
+  const [outAllBusy, setOutAllBusy] = useState(false);
+  const [outAllMsg, setOutAllMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+  // Account erasure (typed confirmation, not a click - see /api/profile/erase).
+  const [eraseOpen, setEraseOpen] = useState(false);
+  const [eraseConfirm, setEraseConfirm] = useState("");
+  const [eraseBusy, setEraseBusy] = useState(false);
+  const [eraseMsg, setEraseMsg] = useState<string | null>(null);
+
+  // The two opt-in data purposes (W9). null = not loaded yet; the toggles
+  // render disabled until the real values arrive - a default-looking toggle
+  // that lies about the recorded state is the one thing this UI must not do.
+  const [consents, setConsents] = useState<{
+    analytics: boolean;
+    commercial_insights: boolean;
+  } | null>(null);
+  const [consentBusy, setConsentBusy] = useState<string | null>(null);
+  const [consentMsg, setConsentMsg] = useState<string | null>(null);
+  useEffect(() => {
+    fetch("/api/profile/consent")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (d && typeof d.analytics === "boolean") {
+          setConsents({
+            analytics: d.analytics,
+            commercial_insights: Boolean(d.commercial_insights),
+          });
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  async function flipConsent(kind: "analytics" | "commercial_insights") {
+    if (!consents) return;
+    const next = !consents[kind];
+    setConsentBusy(kind);
+    setConsentMsg(null);
+    try {
+      const res = await fetch("/api/profile/consent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind, granted: next }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setConsents({ ...consents, [kind]: next });
+      } else {
+        setConsentMsg(String(d?.error || t("Could not save your choice - try again.")));
+      }
+    } catch {
+      setConsentMsg(t("Could not save your choice - try again."));
+    } finally {
+      setConsentBusy(null);
+    }
+  }
+
   // Phone editing (mirrored to the database + used by WhatsApp threads).
   const [phoneEdit, setPhoneEdit] = useState(false);
   const [phoneVal, setPhoneVal] = useState("");
@@ -810,6 +867,173 @@ export default function ProfilePage() {
           </div>
         </section>
 
+        {/* Your data - the DSAR pair: take a copy, or delete everything. */}
+        <section className="surface rounded-blob p-4">
+          <div className="text-[13px] font-extrabold text-strong">🗂️ {t("Your data")}</div>
+          <p className="mt-1 text-[12px] text-soft">
+            {t("Download a copy of everything WheelDeal holds about you, or delete your account and every trace of your data - conversations, searches, offers, all of it.")}
+          </p>
+          {/* The two OPT-IN purposes. Off by default, a withdrawal is recorded
+              as its own ledger row, and neither gates any product feature. */}
+          <div className="mt-2 space-y-2">
+            {(
+              [
+                {
+                  kind: "analytics" as const,
+                  label: t("Product analytics"),
+                  hint: t("Allow WheelDeal to keep a structured record of your funnel steps (searches, replies, bookings) to understand how the product is used."),
+                },
+                {
+                  kind: "commercial_insights" as const,
+                  label: t("Market insights"),
+                  hint: t("Allow your closed deals to feed anonymous market statistics (region, vehicle, price - never your name or number, and only in groups of 20+ deals)."),
+                },
+              ]
+            ).map((c) => (
+              <div key={c.kind} className="rounded-2xl bg-card2 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-[12px] font-extrabold text-strong">{c.label}</div>
+                  <button
+                    onClick={() => flipConsent(c.kind)}
+                    disabled={!consents || consentBusy === c.kind}
+                    aria-pressed={Boolean(consents?.[c.kind])}
+                    className={`btn btn-sm rounded-full px-3 py-1 text-[11px] font-extrabold ${
+                      consents?.[c.kind]
+                        ? "bg-brandgreen-soft text-brandgreen"
+                        : "bg-card text-faint"
+                    }`}
+                  >
+                    {!consents
+                      ? "..."
+                      : consentBusy === c.kind
+                        ? "..."
+                        : consents[c.kind]
+                          ? t("On")
+                          : t("Off")}
+                  </button>
+                </div>
+                <p className="mt-1 text-[11px] leading-snug text-soft">{c.hint}</p>
+              </div>
+            ))}
+            {consentMsg && (
+              <p className="rounded-2xl bg-brandred-soft p-2.5 text-[12px] font-bold text-brandred">
+                {consentMsg}
+              </p>
+            )}
+          </div>
+          <a
+            href="/api/profile/export"
+            download
+            className="btn btn-ghost mt-2 block w-full rounded-2xl py-2.5 text-center text-[13px]"
+          >
+            {t("Download my data (JSON)")}
+          </a>
+          {!eraseOpen ? (
+            <button
+              onClick={() => setEraseOpen(true)}
+              className="btn mt-2 w-full rounded-2xl py-2.5 text-[13px] font-bold text-brandred underline"
+            >
+              {t("Delete my account and data...")}
+            </button>
+          ) : (
+            <div className="mt-2 rounded-2xl border-2 border-brandred bg-brandred-soft p-3">
+              <p className="text-[12px] font-bold text-brandred">
+                {t("This permanently deletes your account, your WhatsApp link and all your data. It cannot be undone. Type your email address to confirm.")}
+              </p>
+              <input
+                value={eraseConfirm}
+                onChange={(e) => setEraseConfirm(e.target.value)}
+                placeholder={session?.email ?? "you@example.com"}
+                autoComplete="off"
+                className="input mt-2 w-full rounded-xl px-3 py-2.5 text-[16px]"
+              />
+              {eraseMsg && (
+                <p className="mt-2 text-[12px] font-bold text-brandred">{eraseMsg}</p>
+              )}
+              <div className="mt-2 flex gap-2">
+                <button
+                  onClick={() => {
+                    setEraseOpen(false);
+                    setEraseConfirm("");
+                    setEraseMsg(null);
+                  }}
+                  className="btn btn-ghost flex-1 rounded-2xl py-2.5 text-[13px]"
+                >
+                  {t("Cancel")}
+                </button>
+                <button
+                  onClick={async () => {
+                    setEraseMsg(null);
+                    setEraseBusy(true);
+                    try {
+                      const res = await fetch("/api/profile/erase", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ confirm: eraseConfirm }),
+                      });
+                      const d = await res.json().catch(() => ({}));
+                      if (res.ok) {
+                        window.location.href = "/login";
+                        return;
+                      }
+                      setEraseMsg(String(d?.error || t("Could not delete your account - try again.")));
+                    } catch {
+                      setEraseMsg(t("Could not delete your account - try again."));
+                    } finally {
+                      setEraseBusy(false);
+                    }
+                  }}
+                  disabled={eraseBusy}
+                  className="btn btn-danger flex-1 rounded-2xl py-2.5 text-[13px]"
+                >
+                  {eraseBusy ? t("Deleting...") : t("Delete everything")}
+                </button>
+              </div>
+            </div>
+          )}
+        </section>
+
+        {outAllMsg && (
+          <p
+            className={`rounded-2xl p-2.5 text-[12px] font-bold ${
+              outAllMsg.ok ? "bg-brandgreen-soft text-brandgreen" : "bg-brandred-soft text-brandred"
+            }`}
+          >
+            {outAllMsg.text}
+          </p>
+        )}
+        <button
+          onClick={async () => {
+            setOutAllMsg(null);
+            setOutAllBusy(true);
+            try {
+              const res = await fetch("/api/auth/logout-all", { method: "POST" });
+              const d = await res.json().catch(() => ({}));
+              if (res.ok) {
+                setOutAllMsg({
+                  ok: true,
+                  text: t("Done - every other device is signed out. This one stays signed in.") + " ✓",
+                });
+              } else {
+                setOutAllMsg({
+                  ok: false,
+                  text: String(d?.error || t("Could not sign out your other devices - try again.")),
+                });
+              }
+            } catch {
+              setOutAllMsg({
+                ok: false,
+                text: t("Could not sign out your other devices - try again."),
+              });
+            } finally {
+              setOutAllBusy(false);
+            }
+          }}
+          disabled={outAllBusy}
+          className="btn btn-ghost w-full rounded-2xl py-3 text-sm"
+        >
+          {outAllBusy ? t("Signing out other devices...") : t("Sign out everywhere else")}
+        </button>
         <button onClick={signOut} className="btn btn-danger w-full rounded-2xl py-3 text-sm">
           {t("Sign out")}
         </button>

@@ -15,7 +15,7 @@
 
 import "server-only";
 import { createHash } from "crypto";
-import { getConfig, sbInsert, sbSelect, sbDelete, sbSelectStrict } from "./runtime-config";
+import { getConfig, sbInsert, sbSelect, sbUpdate, sbDelete, sbSelectStrict } from "./runtime-config";
 import { deriveWebhookToken, sameWebhookTarget, classifyRegisteredWebhook } from "./wa/webhook-token";
 import type { TokenState } from "./wa/webhook-token";
 import { jidMatches } from "./wa/jid";
@@ -197,16 +197,27 @@ export async function checkRateLimit(
   // Unreadable now means at-limit: hold the send until the count can be
   // trusted. A table that does not exist yet stays fail-open, because a fresh
   // install has genuinely sent nothing.
+  // EXACT HEAD COUNTS, not a 300-row body read. The old read shipped up to
+  // 300 id+timestamp rows per send just to .length them - the largest single
+  // cost inside the serial drain loop - and, being UNORDERED with a limit, it
+  // silently under-counted past 300 rows/day (the cap stopped counting right
+  // when it mattered). Two count=exact HEADs transfer nothing and cannot cap.
+  // Fail direction preserved: sbCountDark answers 0 for a missing table (a
+  // fresh install has genuinely sent nothing) and null for an outage - which
+  // holds the send, exactly as before.
   const hourIso = new Date(now - 3600_000).toISOString();
-  const read = await sbSelectStrict<{ id: number; received_at: string }>(
-    "whatsapp_messages",
-    `select=id,received_at&direction=eq.outbound&to_number=not.in.(session,takeover,cancel)&raw->>sender=eq.${encodeURIComponent(
-      email
-    )}&received_at=gte.${encodeURIComponent(
-      new Date(now - 24 * 3600_000).toISOString()
-    )}${LANE_FILTER[lane]}&limit=300`
-  );
-  if ("error" in read && read.error === "unavailable") {
+  const { sbCountDark } = await import("./runtime-config");
+  const rateBase =
+    `direction=eq.outbound&to_number=not.in.(session,takeover,cancel)` +
+    `&raw->>sender=eq.${encodeURIComponent(email)}${LANE_FILTER[lane]}`;
+  const [dayCount, hourCount] = await Promise.all([
+    sbCountDark(
+      "whatsapp_messages",
+      `${rateBase}&received_at=gte.${encodeURIComponent(new Date(now - 24 * 3600_000).toISOString())}`
+    ),
+    sbCountDark("whatsapp_messages", `${rateBase}&received_at=gte.${encodeURIComponent(hourIso)}`),
+  ]);
+  if (dayCount === null || hourCount === null) {
     return {
       allowed: false,
       reason:
@@ -214,9 +225,8 @@ export async function checkRateLimit(
       waitSeconds: 120,
     };
   }
-  const rows = "rows" in read ? read.rows : [];
-  const lastHour = rows.filter((r) => r.received_at >= hourIso).length;
-  const lastDay = rows.length;
+  const lastHour = hourCount;
+  const lastDay = dayCount;
 
   const { limitFor } = await import("./usage");
   const maxHour = await limitFor(
@@ -472,7 +482,11 @@ function markTeardown(email: string, trigger: string): void {
  * with the current token (reassertWebhook), not to accept stale tokens. */
 export async function webhookToken(): Promise<string | null> {
   if ((await getHosts()).length === 0) return null;
-  return deriveWebhookToken({ secret: process.env.SESSION_SECRET, nodeEnv: process.env.NODE_ENV });
+  return deriveWebhookToken({
+    secret: process.env.SESSION_SECRET,
+    nodeEnv: process.env.NODE_ENV,
+    salt: process.env.WEBHOOK_TOKEN_SALT,
+  });
 }
 
 /**
@@ -487,7 +501,11 @@ export async function webhookToken(): Promise<string | null> {
  * point at) keeps the host-gated webhookToken().
  */
 export function webhookAuthToken(): string | null {
-  return deriveWebhookToken({ secret: process.env.SESSION_SECRET, nodeEnv: process.env.NODE_ENV });
+  return deriveWebhookToken({
+    secret: process.env.SESSION_SECRET,
+    nodeEnv: process.env.NODE_ENV,
+    salt: process.env.WEBHOOK_TOKEN_SALT,
+  });
 }
 
 /** The canonical public origin the webhook must point at. The admin-set
@@ -533,27 +551,48 @@ function rearmStore(): Map<string, number> {
 const REARM_THROTTLE_MS = 60 * 60 * 1000; // ~1h per instance unless forced
 const rearmConfigKey = (instance: string) => `WH_REARM_${instance}`;
 
-/** The last re-arm time for an instance, from the shared config row (falling
- *  back to this process's own memory). Returns 0 when never re-armed / unread. */
-async function lastRearmAt(instance: string): Promise<number> {
+/** The last re-arm time for an instance. The shared clock lives on the
+ *  instance's OWN wa_sessions row (webhook_rearmed_at) - the old per-instance
+ *  app_config rows polluted the owner's Key Vault with one WH_REARM_* entry
+ *  per traveller. The legacy config row is still READ (so existing throttles
+ *  carry over a deploy) but never written again. */
+async function lastRearmAt(email: string, instance: string): Promise<number> {
   const local = rearmStore().get(instance) ?? 0;
+  let shared = NaN;
   try {
-    const raw = await getConfig(rearmConfigKey(instance));
-    const shared = raw ? Date.parse(raw) : NaN;
-    return Number.isFinite(shared) ? Math.max(local, shared) : local;
+    const rows = await sbSelect<{ webhook_rearmed_at: string | null }>(
+      "wa_sessions",
+      `select=webhook_rearmed_at&email=eq.${encodeURIComponent(email)}&limit=1`
+    );
+    shared = rows[0]?.webhook_rearmed_at ? Date.parse(rows[0].webhook_rearmed_at) : NaN;
   } catch {
-    return local; // vault unreadable - the local clock still throttles this process
+    /* fall through to the legacy row */
   }
+  if (!Number.isFinite(shared)) {
+    try {
+      const raw = await getConfig(rearmConfigKey(instance));
+      shared = raw ? Date.parse(raw) : NaN;
+    } catch {
+      /* vault unreadable - the local clock still throttles this process */
+    }
+  }
+  return Number.isFinite(shared) ? Math.max(local, shared) : local;
 }
 
-/** Stamp the re-arm time in BOTH the shared row and this process's memory. */
-async function stampRearm(instance: string, atMs: number): Promise<void> {
-  rearmStore().set(instance, atMs);
+/** Stamp the shared re-arm clock - called ONLY on a verified outcome (a
+ *  successful set, or a read that proved the registration healthy). A FAILED
+ *  set must not advance the shared clock: it used to, so a broken re-arm was
+ *  throttled into staying broken for the next hour on every instance. */
+async function stampRearmShared(email: string, atMs: number): Promise<void> {
   try {
-    const { setConfig } = await import("./runtime-config");
-    await setConfig(rearmConfigKey(instance), new Date(atMs).toISOString());
+    const ok = await sbUpdate(
+      "wa_sessions",
+      `email=eq.${encodeURIComponent(email)}`,
+      { webhook_rearmed_at: new Date(atMs).toISOString() }
+    );
+    if (!ok) throw new Error("no wa_sessions row");
   } catch {
-    /* the local stamp above still throttles this process */
+    /* pre-migration / rowless: the local clock still throttles this process */
   }
 }
 
@@ -583,28 +622,47 @@ export async function reassertWebhook(
   if (!origin) return { ok: false, changed: false, registeredUrl: null, skipped: "no-origin" };
 
   const now = Date.now();
-  if (!opts.force && now - (await lastRearmAt(instance)) < REARM_THROTTLE_MS) {
+  if (!opts.force && now - (await lastRearmAt(email, instance)) < REARM_THROTTLE_MS) {
     return { ok: true, changed: false, registeredUrl: null, skipped: "throttled" };
   }
-  await stampRearm(instance, now);
+  // In-process stampede guard only. The SHARED clock is stamped below, and
+  // only on a verified outcome - a failed set used to advance it, throttling a
+  // broken re-arm into staying broken for the next hour, fleet-wide.
+  rearmStore().set(instance, now);
 
   const token = await webhookToken();
   if (!token) return { ok: false, changed: false, registeredUrl: null, skipped: "no-host" };
   const webhookUrl = `${origin}/api/webhooks/evolution?token=${token}`;
   const events = [...WEBHOOK_EVENTS];
 
-  // Read-before-write: don't churn a healthy instance.
+  // Read-before-write: don't churn a healthy instance. "Healthy" means the
+  // URL+token match AND the EVENTS SET matches: an instance registered before
+  // a new event was added (qrcode.updated, messages.update...) used to read
+  // as healthy on the URL alone and never gained the event - the exact
+  // silent-degrade this reconcile exists to end. Events unreadable from the
+  // find response -> URL-only verdict (unknown must not cause hourly churn).
   let registeredUrl: string | null = null;
+  let registeredEvents: string[] | null = null;
   try {
     const found = await evoFetch(host, `/webhook/find/${instance}`);
     registeredUrl =
       (typeof found.data?.url === "string" && found.data.url) ||
       (typeof found.data?.webhook?.url === "string" && found.data.webhook.url) ||
       null;
+    const ev = Array.isArray(found.data?.events)
+      ? found.data.events
+      : Array.isArray(found.data?.webhook?.events)
+        ? found.data.webhook.events
+        : null;
+    registeredEvents = ev ? ev.filter((e: unknown): e is string => typeof e === "string") : null;
   } catch {
     /* proceed to set */
   }
-  if (registeredUrl && sameWebhookTarget(registeredUrl, origin, token)) {
+  const eventsMatch =
+    registeredEvents === null ||
+    (registeredEvents.length === events.length && events.every((e) => registeredEvents!.includes(e)));
+  if (registeredUrl && sameWebhookTarget(registeredUrl, origin, token) && eventsMatch) {
+    await stampRearmShared(email, now);
     return { ok: true, changed: false, registeredUrl };
   }
 
@@ -637,6 +695,9 @@ export async function reassertWebhook(
     }
   }
 
+  // The shared clock advances ONLY on success - a failed set leaves the next
+  // cycle (or the next instance) free to repair immediately.
+  if (set.ok) await stampRearmShared(email, now);
   return { ok: set.ok, changed: set.ok, registeredUrl: set.ok ? webhookUrl : registeredUrl };
 }
 
@@ -712,7 +773,7 @@ export async function webhookDiagnostics(
       null;
   }
   const { tokenState, originMatch } = classifyRegisteredWebhook(registeredUrl, token, origin);
-  const liveState = await connectionState(email).catch(() => null);
+  const liveState = await connectionState(email, { fresh: true }).catch(() => null);
   return { instance, hosts, liveState, webhook: { expectedUrl, registeredUrl, tokenState, originMatch } };
 }
 
@@ -1609,7 +1670,7 @@ export async function connectInstance(
   // the user has connected - return that instead of wiping it (this was the
   // cause of "WhatsApp says linked but the app keeps asking to connect": a
   // re-entry into connect() deleted the fresh session).
-  const existing = await connectionState(email);
+  const existing = await connectionState(email, { fresh: true });
   if (existing === "open") {
     await markOpen(email);
     // RE-ARM the webhook even for an already-open instance: this is the only
@@ -1665,7 +1726,7 @@ export async function connectInstance(
         ? conn.data.code
         : undefined);
     // The state may have flipped to open while we polled - honor it.
-    const nowState = await connectionState(email);
+    const nowState = await connectionState(email, { fresh: true });
     if (nowState === "open") {
       await markOpen(email);
       return { ok: true, state: "open" };
@@ -1918,7 +1979,7 @@ export async function connectInstance(
     qr = qr ?? pickQr(conn.data);
   }
 
-  const state = await connectionState(email);
+  const state = await connectionState(email, { fresh: true });
   // Stamp WHEN this fresh code was minted so retries can tell live from dead
   // (the whole B1 "Invalid code" class). The stamp is the MINT moment, not
   // "now" - the connectionState round trip above already spent part of the
@@ -2452,8 +2513,31 @@ async function stateFromFetchInstances(email: string): Promise<string | null> {
   return s === "connected" ? "open" : s;
 }
 
-/** "open" = paired and ready to send. Cross-checks both Evolution endpoints. */
-export async function connectionState(email: string): Promise<string | null> {
+// A recently-confirmed OPEN socket, per email. Only the "open" verdict is
+// cached, and briefly: a send that races a just-dropped socket already has a
+// retry path (the probe was belt-and-braces), while caching a NON-open state
+// would delay recovery detection - the direction that actually hurts. Before
+// this, every drained row paid one or two live Evolution HTTP probes, the
+// second-largest per-send cost in the serial loop.
+const OPEN_STATE_TTL_MS = 45_000;
+declare global {
+  // eslint-disable-next-line no-var
+  var __wd_open_state__: Map<string, number> | undefined;
+}
+function openStateCache(): Map<string, number> {
+  return (globalThis.__wd_open_state__ ??= new Map());
+}
+
+/** "open" = paired and ready to send. Cross-checks both Evolution endpoints.
+ *  `opts.fresh` bypasses the short open-verdict cache (link/status flows). */
+export async function connectionState(
+  email: string,
+  opts?: { fresh?: boolean }
+): Promise<string | null> {
+  if (!opts?.fresh) {
+    const cachedAt = openStateCache().get(email);
+    if (cachedAt && Date.now() - cachedAt < OPEN_STATE_TTL_MS) return "open";
+  }
   const instance = instanceNameFor(email);
   const res = await evo(email, `/instance/connectionState/${instance}`);
   let state: string | null = res.ok
@@ -2467,7 +2551,12 @@ export async function connectionState(email: string): Promise<string | null> {
     if (alt === "open") state = "open";
     else if (!state && alt) state = alt;
   }
-  if (state === "open") markOpen(email).catch(() => {});
+  if (state === "open") {
+    boundedSet(openStateCache(), email, Date.now(), 2000);
+    markOpen(email).catch(() => {});
+  } else {
+    openStateCache().delete(email);
+  }
   return state;
 }
 

@@ -53,6 +53,33 @@ async function num(key: string, fallback: number): Promise<number> {
 }
 
 /**
+ * Read template-lane lead rows from the last 24h, EXCLUDING dry runs.
+ *
+ * A rehearsal is not a send: the platform never saw it, so it must not spend
+ * tier or dollars here - rehearsing against 200 agencies used to consume the
+ * entire day's real budget. `dry_run=not.is.true` keeps rows where the column
+ * is false OR null; null (pre-column rows) counts as real, which errs toward
+ * throttling - the safe direction on a rented asset. On an un-migrated DB the
+ * filter itself fails the read, so the query RETRIES without it (createLead's
+ * pattern) rather than holding the whole lane closed on a pending ALTER.
+ */
+async function templateLeads24h(
+  select: string,
+  now: number
+): Promise<{ rows: Record<string, unknown>[]; unreadable: boolean }> {
+  const since = new Date(now - 24 * 3600_000).toISOString();
+  const base = `select=${select}&lane=eq.template&sent_at=gte.${encodeURIComponent(since)}&limit=5000`;
+  const read = await sbSelectStrict<Record<string, unknown>>(
+    "waba_leads",
+    `${base}&dry_run=not.is.true`
+  );
+  if (!("error" in read)) return { rows: read.rows, unreadable: false };
+  const legacy = await sbSelectStrict<Record<string, unknown>>("waba_leads", base);
+  if (!("error" in legacy)) return { rows: legacy.rows, unreadable: false };
+  return { rows: [], unreadable: legacy.error === "unavailable" };
+}
+
+/**
  * Unique agencies templated in the last 24h.
  *
  * Counts DISTINCT agency tails on template-lane leads only. Free-form sends
@@ -63,26 +90,17 @@ async function num(key: string, fallback: number): Promise<number> {
 async function uniqueRecipients24h(
   now: number
 ): Promise<{ count: number; unreadable: boolean }> {
-  const since = new Date(now - 24 * 3600_000).toISOString();
-  const read = await sbSelectStrict<{ agency_tail: string }>(
-    "waba_leads",
-    `select=agency_tail&lane=eq.template&sent_at=gte.${encodeURIComponent(since)}&limit=5000`
-  );
-  if ("error" in read) {
-    return { count: 0, unreadable: read.error === "unavailable" };
-  }
-  return { count: new Set(read.rows.map((r) => r.agency_tail)).size, unreadable: false };
+  const read = await templateLeads24h("agency_tail", now);
+  return {
+    count: new Set(read.rows.map((r) => r.agency_tail as string)).size,
+    unreadable: read.unreadable,
+  };
 }
 
 /** Templates sent today, for the spend estimate. */
 async function templatesToday(now: number): Promise<{ n: number; unreadable: boolean }> {
-  const since = new Date(now - 24 * 3600_000).toISOString();
-  const read = await sbSelectStrict<{ id: number }>(
-    "waba_leads",
-    `select=id&lane=eq.template&sent_at=gte.${encodeURIComponent(since)}&limit=5000`
-  );
-  if ("error" in read) return { n: 0, unreadable: read.error === "unavailable" };
-  return { n: read.rows.length, unreadable: false };
+  const read = await templateLeads24h("id", now);
+  return { n: read.rows.length, unreadable: read.unreadable };
 }
 
 /**

@@ -18,6 +18,14 @@ export type MoveKind =
   | "answer"
   | "clarify"
   | "present"
+  // STEP 7 OF THE FUNNEL: recap the agreed deal back to the SHOP - price,
+  // duration, deposit, handover - and ask them to confirm it. Once per thread
+  // (digest.recapSent), deterministic template (grounded by construction),
+  // and the ONLY shop-facing move in the presentation family: `present`
+  // itself is state-only (it marks the offer presentable to the TRAVELLER and
+  // sends nothing - its composed text used to go to the shop under a haggling
+  // prompt, which is how an internal recap leaked to the counterparty).
+  | "verify-recap"
   // A WARM GOODBYE, and nothing else.
   //
   // It was called `close`, and the model was never told what that meant. The
@@ -133,6 +141,16 @@ export interface PendingConfirm {
   state: "open" | "waiting";
   /** Turns spent in the CURRENT state. Incremented once per engine turn. */
   turns: number;
+  /**
+   * Wall clock (ms) when the wait STARTED - the second bound. The turn bound
+   * only advances when a turn happens, and a shop that never replies causes no
+   * turns: the freeze the confirm-wait finding proved. The live path stamps
+   * this on the turn the confirm is delivered and arms one tick; when that
+   * tick (or any later turn) sees the clock expired, the wait releases with
+   * the same never-claim-they-confirmed note as the turn bound. Absent on
+   * replays, which keep the pure turn arithmetic.
+   */
+  at?: number;
 }
 
 /** Where a shop stands with us, as a person would read it (W4.3). */
@@ -314,6 +332,25 @@ export interface ThreadDigest {
    * negotiation assistant would become a slow broadcast loop.
    */
   priceWatchArmed?: boolean;
+  /**
+   * STEP 7-8 STATE (funnel: verifying -> shop_confirmed).
+   *
+   * `recapSent` is the deterministic once-per-thread latch (set by mergeDigest
+   * when the verify-recap move is taken, so golden replays see it too);
+   * `recapSentAt` is the wall clock the live path stamps for the answer bound;
+   * `recapConfirmedAt` is set when the ConfirmAnswer read says the shop said
+   * yes - which is what makes `present` legal and the ledger reach
+   * shop_confirmed. A recap the shop CORRECTS clears the corrected subject and
+   * (once, ever) re-opens the latch so one amended recap can go out.
+   */
+  recapSent?: boolean;
+  recapSentAt?: number;
+  recapConfirmedAt?: number;
+  /** One amendment allowed, ever - see the correction path in live.ts. */
+  recapAmended?: boolean;
+  /** The silent-but-owing re-entry has been armed (same design as
+   *  priceWatchArmed: once, durable, or the watch becomes a broadcast loop). */
+  oweWatchArmed?: boolean;
 }
 
 export interface VerifiedExtraction {
@@ -412,7 +449,14 @@ export interface TurnContext {
     vendorId: string;
     shop: string;
     digest: ThreadDigest;
+    /** fields.presented, read in by the live glue - the once-latch that stops
+     *  `present` re-marking an already-presented deal on every later inbound. */
+    presented?: boolean;
   };
+  /** Wall clock for the live path's wall-clock bounds (confirm wait, recap
+   *  wait). ABSENT on replays and unit runs, which then use pure turn
+   *  arithmetic - determinism is the property the golden gate needs. */
+  nowMs?: number;
   tail: Array<{ dir: "in" | "out"; text: string; at: string }>;
   inbound: { text: string; verified: VerifiedExtraction };
   /** The ONLY moves the single pass may choose from (policy rails output). */

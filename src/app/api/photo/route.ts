@@ -28,14 +28,27 @@ const REF_RX = /^[A-Za-z0-9_.~-]{1,2048}$/;
  *  whole session even after the real cause cleared. */
 const FAIL_HEADERS = { "Cache-Control": "private, no-store" };
 
-function fail(status: number, reason: string): Response {
-  // Visible in Safari's network inspector and in any log pipeline, without
-  // leaking the key or the upstream URL.
-  console.warn(`[api/photo] ${status} ${reason}`);
+function fail(status: number, reason: string, logDetail?: string): Response {
+  // The DETAIL goes to the log pipeline (where the owner reads it); the header
+  // carries only `reason`, which for upstream failures is a coarse code - this
+  // route is deliberately unauthenticated, and Google's own error text names
+  // the GCP project id, which is not the anonymous internet's business.
+  console.warn(`[api/photo] ${status} ${logDetail ?? reason}`);
   return new Response(null, {
     status,
     headers: { ...FAIL_HEADERS, "X-Photo-Error": reason.slice(0, 200) },
   });
+}
+
+/** Collapse Google's raw error text into a coarse, project-id-free code. The
+ *  distinct fixes the detailed messages point at ("enable the API", "raise the
+ *  quota", "fix the key") stay distinguishable - by code, not by echo. */
+function coarseUpstreamCode(status: number, msg: string): string {
+  if (/has not been used|is disabled|not enabled/i.test(msg)) return "places-api-not-enabled";
+  if (/quota|RESOURCE_EXHAUSTED|rate/i.test(msg) || status === 429) return "quota-exceeded";
+  if (/API key|expired|denied|PERMISSION/i.test(msg) || status === 403) return "api-key-refused";
+  if (/not found|NOT_FOUND/i.test(msg) || status === 404) return "photo-not-found";
+  return `google-${status}`;
 }
 
 export async function GET(req: Request) {
@@ -107,7 +120,9 @@ export async function GET(req: Request) {
     if (res.ok) break;
     // Read Google's own explanation - "Places API (New) has not been used in
     // project X", "quota exceeded" and "API key not valid" are different
-    // problems with different fixes, and the old 404 hid all three.
+    // problems with different fixes, and the old 404 hid all three. The full
+    // text goes to the SERVER LOG only (W9): it names the GCP project, and
+    // this endpoint answers anyone. The header gets the coarse code.
     const body = await res.text().catch(() => "");
     let msg = "";
     try {
@@ -115,9 +130,10 @@ export async function GET(req: Request) {
     } catch {
       msg = body.replace(/\s+/g, " ").slice(0, 200);
     }
-    lastError = `Google ${res.status}${msg ? `: ${msg}` : ""}`;
+    lastError = coarseUpstreamCode(res.status, msg);
+    const logDetail = `Google ${res.status}${msg ? `: ${msg}` : ""}`;
     // 4xx is a settled answer (bad id, key refused) - retrying just burns quota.
-    if (res.status < 500) return fail(502, lastError);
+    if (res.status < 500) return fail(502, lastError, logDetail);
     res = null;
   }
 

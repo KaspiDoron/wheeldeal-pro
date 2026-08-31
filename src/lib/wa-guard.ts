@@ -32,6 +32,7 @@ import {
   pgTimestamp,
 } from "./runtime-config";
 import { parseFlag } from "./config-flags";
+import type { SendResult } from "./wa/transport";
 import { policyRowValue } from "./wa/policy-values";
 import {
   resolveOffset,
@@ -2610,6 +2611,35 @@ export async function guardOutbound(rawOpts: {
     };
   }
 
+  //      ...AND STOP IS FLEET-WIDE (owner decision). The per-sender stamp above
+  //      only protects the traveller the shop said it to; the fleet store is
+  //      what stops a DIFFERENT traveller cold-introducing the same shop the
+  //      next day - a Meta policy signal and an anti-ban risk under Evolution,
+  //      and structurally mandatory under a single company number. Checked for
+  //      COLD contacts only: a shop mid-conversation with THIS traveller has
+  //      its own per-sender state, and an unreadable store proceeds (the
+  //      per-sender veto above still stands).
+  if (isNewContact) {
+    const { shopSuppression } = await import("./wa/suppression");
+    const sup = await shopSuppression(opts.toDigits).catch(
+      () => ({ suppressed: false }) as { suppressed: boolean }
+    );
+    if (sup.suppressed) {
+      void recordSendDropped(
+        opts.senderKey,
+        opts.toDigits,
+        "suppressed - this shop asked WheelDeal not to contact it",
+        opts.meta
+      );
+      return {
+        allow: false,
+        terminal: true,
+        reason: "suppressed - this shop asked WheelDeal not to contact it",
+        text,
+      };
+    }
+  }
+
   // 0.0 THE OWNER'S KILL SWITCH, ENFORCED WHERE SENDS ACTUALLY HAPPEN.
   //
   //     KILL_SWITCH was checked in six API routes - vendors, geocode, outreach,
@@ -3459,20 +3489,7 @@ export async function drainOutbox(
     // metered against one shared pool and a full batch starved its own
     // replies. Passing it is the whole fix.
     lane?: "intro" | "reply"
-  ) => Promise<{
-    ok: boolean;
-    error?: string;
-    rateLimited?: boolean;
-    /** The budget could not be READ - neither a cap nor a host fault. */
-    budgetUnreadable?: boolean;
-    /** The limiter's own wait. Present only on a cap refusal. */
-    retryAfterSeconds?: number;
-    unconfirmed?: boolean;
-    messageId?: string;
-    /** Ambiguous (status-0) failure - may have landed; do not release the
-     * idempotency claim. See sendFromUser (OR11 H2.2). */
-    ambiguous?: boolean;
-  }>,
+  ) => Promise<SendResult>,
   opts?: DrainOptions
 ): Promise<number> {
   const due = new Date().toISOString();
@@ -3546,11 +3563,25 @@ export async function drainOutbox(
   const isCold = (row: OutboxRow) => (row.meta as { kind?: string } | null)?.kind === "rfq";
   const rfqBySender = new Map<string, number>();
   const replySentToRecipient = new Set<string>();
-  // Modest per-invocation reply budget: the ATOMIC fleet gap slot (in
+  // Modest per-invocation reply budgets: the ATOMIC fleet gap slot (in
   // claimSendSlots) is the real velocity ceiling now, so a high budget here just
   // churns doomed claims. Frequent invocations (polls + the self-chaining tick)
   // supply the throughput; each drains a few and the fleet gap paces the total.
-  let replyBudget = 6;
+  //
+  // PER SENDER, like the cold lane's rfqBySender - the old single global
+  // counter meant one busy traveller consumed the whole fleet's reply
+  // allowance in the cron drain, and everyone else's replies waited a full
+  // cadence for a queueing artefact. A small global ceiling still bounds the
+  // invocation's total work.
+  const replyBySender = new Map<string, number>();
+  const REPLY_PER_SENDER = 3;
+  let replyGlobalBudget = 8;
+  // The wait-not-repark allowance (see the claim block below): how much of
+  // this invocation may be spent SLEEPING to a lane's bucket edge instead of
+  // re-parking. Bounded so a burst of contended replies cannot hold the
+  // request slot indefinitely; per-loss the ceiling is one lane window.
+  const REPLY_WAIT_CEILING_MS = 8_000;
+  let waitAllowanceMs = 15_000;
   for (const cand of candidates) {
     // TOO OLD TO SEND. `not_before <= now` is a floor, not a ceiling: a row
     // overdue by three days passed it exactly as well as one overdue by three
@@ -3593,7 +3624,9 @@ export async function drainOutbox(
     const rcptKey = `${cand.sender_key}|${digitsOnly(cand.to_number)}`;
     const overCap = cold
       ? (rfqBySender.get(cand.sender_key) ?? 0) >= 2
-      : replyBudget <= 0 || replySentToRecipient.has(rcptKey);
+      : replyGlobalBudget <= 0 ||
+        (replyBySender.get(cand.sender_key) ?? 0) >= REPLY_PER_SENDER ||
+        replySentToRecipient.has(rcptKey);
     if (overCap) {
       // SMOOTH the remainder so the NEXT drain doesn't instantly fire it either
       // (a slow-motion burst). Cold intros are held 2-4 min - velocity to new
@@ -3819,7 +3852,7 @@ export async function drainOutbox(
     // per-sender velocity lane the other two put it on. One row, three
     // different opinions about which budget it draws from.
     const isReplyRow = rowKind !== "rfq" && rowKind !== "custom" && rowKind !== "human-manual";
-    const claim = await claimSendSlots({
+    const claimArgs = {
       senderKey: row.sender_key,
       toDigits: row.to_number,
       text: verdict.text,
@@ -3833,7 +3866,34 @@ export async function drainOutbox(
       // the atomic ceiling that keeps the fleet a trickle, not a burst.
       perRecipient: isReplyRow,
       fleetGapSeconds: isReplyRow ? replyFleetGapSeconds(p) : undefined,
-    });
+    };
+    let claim = await claimSendSlots(claimArgs);
+    // WAIT, DON'T RE-PARK (the fairness fix that killed the penalty stack).
+    //
+    // The lanes a reply loses are measured in SECONDS - the 5s per-shop gap,
+    // the 6s fleet slot, the 8s recipient mutex - and every loss used to cost
+    // a 10-14s re-park PLUS the wait for the next drain invocation to pick the
+    // row back up. claimSendSlots now says exactly when the refusing lane
+    // frees (retryAtMs); when that edge is seconds away and this invocation's
+    // wait allowance still has room, sleeping to it and re-claiming ONCE beats
+    // re-running the entire guard pipeline later. Bounded twice: per-loss by
+    // REPLY_WAIT_CEILING_MS, per-invocation by the shared wait allowance, so
+    // one contended lane cannot stall the rest of the batch for long. Cold
+    // intros never wait - velocity to new numbers is the ban vector, and their
+    // minute-scale holds are the point.
+    if (
+      !claim.ok &&
+      claim.kind === "pacing" &&
+      isReplyRow &&
+      typeof claim.retryAtMs === "number"
+    ) {
+      const waitMs = claim.retryAtMs - Date.now();
+      if (waitMs > 0 && waitMs <= REPLY_WAIT_CEILING_MS && waitMs <= waitAllowanceMs) {
+        waitAllowanceMs -= waitMs;
+        await new Promise((res) => setTimeout(res, waitMs + 120 + Math.random() * 380));
+        claim = await claimSendSlots(claimArgs);
+      }
+    }
     if (!claim.ok) {
       if (claim.kind === "duplicate") {
         // Another invocation holds this message's idempotency slot. Usually it
@@ -3847,6 +3907,10 @@ export async function drainOutbox(
           await sbInsert("agent_events", [
             {
               kind: "wa-send-dropped",
+              // Join columns as COLUMNS - same fix as the give-up dropEvent
+              // below; without them this event was invisible to messagePath.
+              user_email: row.sender_key,
+              to_number: row.to_number,
               vendor_id: String((row.meta as { vendorId?: string } | null)?.vendorId ?? ""),
               vendor_name: String(
                 (row.meta as { vendorName?: string } | null)?.vendorName ?? row.to_number
@@ -3929,7 +3993,8 @@ export async function drainOutbox(
         rfqBySender.set(row.sender_key, (rfqBySender.get(row.sender_key) ?? 0) + 1);
       } else {
         replySentToRecipient.add(rcptKey);
-        replyBudget--;
+        replyBySender.set(row.sender_key, (replyBySender.get(row.sender_key) ?? 0) + 1);
+        replyGlobalBudget--;
       }
       await afterSend(row.sender_key, row.to_number);
       await sbInsert("whatsapp_messages", [
@@ -3954,6 +4019,10 @@ export async function drainOutbox(
             ok: true,
             auto: true,
             queued: true,
+            // Which wire carried it (design piece 4): the drain only ever
+            // sends via the traveller's Evolution instance; the WABA lane
+            // stamps 'waba' on its own rows. One key, one vocabulary.
+            transport: "evolution",
             confirmed: r.unconfirmed ? false : true,
             // The chat's privacy identity when the provider reported one. An
             // outbound anchor carrying raw.lid is what lets the shop's FIRST
@@ -3970,6 +4039,28 @@ export async function drainOutbox(
       // briefly in both tables (every surface prefers "sent"), and never in
       // neither - which is what made it disappear mid-send.
       await completeOutboxRow(row.id);
+      // FUNNEL LEDGER: a drained RFQ reaching the shop IS the contact (the
+      // TRUTH RULE - the outbound row above is the evidence); a drained bargain
+      // is the negotiation moving. Keyed on the row's own meta.kind so a
+      // mid-thread answer or follow-up stamps nothing. Best-effort, deduped
+      // inside advanceThreadStage.
+      {
+        const mk = (row.meta as { kind?: string } | null)?.kind;
+        if (mk === "rfq" || mk === "bargain") {
+          const { advanceThreadStage } = await import("./funnel/stages");
+          await advanceThreadStage(
+            {
+              userEmail: row.sender_key,
+              toNumber: row.to_number,
+              vendorId: String((row.meta as { vendorId?: string } | null)?.vendorId ?? "") || undefined,
+              vendorName: String((row.meta as { vendorName?: string } | null)?.vendorName ?? "") || undefined,
+              transport: "evolution",
+            },
+            mk === "rfq" ? "contacted" : "negotiating",
+            mk === "rfq" ? "queued RFQ delivered to the shop" : "queued bargain delivered to the shop"
+          ).catch(() => {});
+        }
+      }
       // THE NUMBER THE PROMISE IS MADE OF: inbound -> wire, wall clock. The
       // turn-latency stamp measures compose time plus the PLANNED delay, which
       // is the latency we intended - not the latency that happened. Every hold,
@@ -3997,6 +4088,11 @@ export async function drainOutbox(
         await sbInsert("agent_events", [
           {
             kind: "wa-send-unconfirmed",
+            // Join columns as COLUMNS - without user_email/to_number this event
+            // was invisible to messagePath and every per-user surface (the
+            // wa-send-dropped lesson).
+            user_email: row.sender_key,
+            to_number: row.to_number,
             vendor_id: String((row.meta as { vendorId?: string } | null)?.vendorId ?? ""),
             vendor_name: String((row.meta as { vendorName?: string } | null)?.vendorName ?? row.to_number),
             detail: `Sent to +${row.to_number} (sender ${row.sender_key}) but WhatsApp returned no delivery receipt - shown as unverified.`,
@@ -4054,15 +4150,32 @@ export async function drainOutbox(
                 : "recipient",
         });
       }
-      const dropEvent = (detail: string) =>
-        sbInsert("agent_events", [
+      const dropEvent = async (detail: string) => {
+        await sbInsert("agent_events", [
           {
             kind: "wa-send-dropped",
+            // Join columns as COLUMNS (same fix as wa-send-unconfirmed above).
+            user_email: row.sender_key,
+            to_number: row.to_number,
             vendor_id: String((row.meta as { vendorId?: string } | null)?.vendorId ?? ""),
             vendor_name: String((row.meta as { vendorName?: string } | null)?.vendorName ?? row.to_number),
             detail,
           },
         ]).catch(() => {});
+        // FUNNEL LEDGER: a dropped RFQ is a shop the funnel never reached.
+        // Only the RFQ - a dropped mid-thread message is that message's
+        // problem - and the ledger itself additionally refuses `unreachable`
+        // once the shop has ever replied, so this can never mislabel a live
+        // thread even on a stale meta.kind.
+        if ((row.meta as { kind?: string } | null)?.kind === "rfq") {
+          const { advanceThreadStage } = await import("./funnel/stages");
+          await advanceThreadStage(
+            { userEmail: row.sender_key, toNumber: row.to_number, transport: "evolution" },
+            "unreachable",
+            "gave up delivering the RFQ"
+          ).catch(() => {});
+        }
+      };
 
       // A CAP IS NOT A FAULT, AND IT MUST BE TESTED FIRST.
       //

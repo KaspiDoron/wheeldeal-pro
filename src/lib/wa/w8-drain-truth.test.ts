@@ -31,9 +31,11 @@ const evo = readCode("src/lib/evolution.ts");
 
 describe("W8 A2: the send path reports WHICH refusal it was", () => {
   it("REPRODUCTION: the two outcomes are genuinely different in the limiter", () => {
-    // The unreadable branch returns no rateLimited flag, on purpose.
+    // The unreadable branch returns no rateLimited flag, on purpose. (Wave 8
+    // turned the 300-row body read into two exact HEAD counts - null is the
+    // unreadable signal now, and the fail direction is unchanged.)
     expect(evo).toMatch(
-      /if \("error" in read && read\.error === "unavailable"\) \{\s*return \{\s*allowed: false,\s*reason:/
+      /if \(dayCount === null \|\| hourCount === null\) \{\s*return \{\s*allowed: false,\s*reason:/
     );
     // The cap branches do stamp it.
     expect((evo.match(/rateLimited: true,/g) ?? []).length).toBeGreaterThanOrEqual(2);

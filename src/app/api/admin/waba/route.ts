@@ -1,10 +1,83 @@
 import { NextResponse } from "next/server";
-import { requireManagement } from "@/lib/session";
-import { sbSelectStrict } from "@/lib/runtime-config";
+import { requireManagement, requireOwner } from "@/lib/session";
+import { getConfig, sbSelectStrict, setConfig } from "@/lib/runtime-config";
 import { wabaConfig, wabaBlockReason, WABA_BLOCK_LABELS } from "@/lib/waba/config";
 import { governorVerdict } from "@/lib/waba/governor";
+import { parseTransportMode } from "@/lib/wa/transports";
 
 export const dynamic = "force-dynamic";
+
+// THE ARCHITECTURE TOGGLES - the no-redeploy switchboard the modular-transport
+// design promised. Exactly these keys, validated per key: an owner tapping a
+// card must not be able to typo the product into an unknown state, and no
+// other config key is writable through this route (the Key Vault remains the
+// door for everything else).
+const ARCHITECTURE_KEYS = {
+  TRANSPORT_MODE: {
+    validate: (v: string) => v === "" || parseTransportMode(v) === v,
+    hint: "evolution | waba-first | waba-fallback (empty = evolution)",
+  },
+  WABA_ENABLED: { validate: onOffOrEmpty, hint: "on | off" },
+  WABA_DRY_RUN: { validate: onOffOrEmpty, hint: "on | off (default ON - off means REALLY send)" },
+  WABA_KILL: { validate: onOffOrEmpty, hint: "on = halt all company-number first contact NOW" },
+  CLOUD_API_ENABLED: { validate: onOffOrEmpty, hint: "on | off (legacy owner-number sender)" },
+} as const;
+
+function onOffOrEmpty(v: string): boolean {
+  return v === "" || v === "on" || v === "off";
+}
+
+/** The stored value of every architecture toggle, for the card's readout. */
+async function architectureState() {
+  const entries = await Promise.all(
+    (Object.keys(ARCHITECTURE_KEYS) as (keyof typeof ARCHITECTURE_KEYS)[]).map(async (k) => ({
+      key: k,
+      value: (await getConfig(k).catch(() => undefined)) ?? "",
+      hint: ARCHITECTURE_KEYS[k].hint,
+    }))
+  );
+  return entries;
+}
+
+/**
+ * Flip one architecture toggle. OWNER only - these switches start and stop
+ * live senders, which is above the management tier.
+ *
+ * HONEST WRITES (the repo's rule for every admin toggle): the response echoes
+ * what the vault now actually HOLDS (a fresh read-back), never what was
+ * requested - and a write that did not persist says so instead of rendering a
+ * happy toggle that resets on the next deploy.
+ */
+export async function POST(req: Request) {
+  const session = await requireOwner();
+  if (!session) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+
+  const body = (await req.json().catch(() => ({}))) as { key?: unknown; value?: unknown };
+  const key = String(body.key ?? "");
+  const value = String(body.value ?? "").trim().toLowerCase();
+  const spec = (ARCHITECTURE_KEYS as Record<string, { validate: (v: string) => boolean; hint: string }>)[key];
+  if (!spec) {
+    return NextResponse.json(
+      { error: `unknown toggle - this route writes only: ${Object.keys(ARCHITECTURE_KEYS).join(", ")}` },
+      { status: 400 }
+    );
+  }
+  if (!spec.validate(value)) {
+    return NextResponse.json({ error: `invalid value for ${key} - expected ${spec.hint}` }, { status: 400 });
+  }
+
+  const wrote = await setConfig(key, value);
+  const stored = (await getConfig(key).catch(() => undefined)) ?? "";
+  return NextResponse.json({
+    ok: wrote.ok && stored === value,
+    key,
+    // What the vault holds NOW - the card renders this, not the request.
+    stored,
+    persistent: wrote.persistent,
+    ...(wrote.error ? { warning: wrote.error } : {}),
+    architecture: await architectureState(),
+  });
+}
 
 /**
  * The Business Platform console's data. Admin only, bounded reads, no polling.
@@ -75,19 +148,40 @@ export async function GET() {
 
   // THE FUNNEL. `tapped` is the column that says whether the message WORKED -
   // delivered and read only say it arrived. No other surface in this product
-  // has that signal.
-  const funnel = leads
-    ? {
-        sent: leads.filter((l) => l.sent_at).length,
-        delivered: leads.filter((l) => l.delivered_at).length,
-        read: leads.filter((l) => l.read_at).length,
-        tapped: leads.filter((l) => l.link_tapped_at).length,
-        travellerContacted: leads.filter((l) => l.traveller_inbound_at).length,
-        handedOff: leads.filter((l) => l.handed_off_at).length,
-        held: leads.filter((l) => l.state === "held").length,
-        failed: leads.filter((l) => l.state === "failed").length,
-      }
-    : null;
+  // has that signal. EXACT COUNTS, not .length over the newest-200 slice -
+  // the exact busy-day-plateaus-at-the-cap defect the Command tab was
+  // rewritten to eliminate; the 200-row read stays only for the ledger list
+  // below, which is labelled as recent. Dry runs are excluded the same way
+  // the governor excludes them (null = pre-migration = counted).
+  const { sbCountDark } = await import("@/lib/runtime-config");
+  const stageCount = (filter: string) =>
+    sbCountDark("waba_leads", `${filter}&dry_run=not.is.true`).then(
+      (n) => (n === null ? sbCountDark("waba_leads", filter) : n)
+    );
+  const [sent, delivered, readN, tapped, travellerContacted, handedOff, held, failed] =
+    await Promise.all([
+      stageCount("sent_at=not.is.null"),
+      stageCount("delivered_at=not.is.null"),
+      stageCount("read_at=not.is.null"),
+      stageCount("link_tapped_at=not.is.null"),
+      stageCount("traveller_inbound_at=not.is.null"),
+      stageCount("handed_off_at=not.is.null"),
+      stageCount("state=eq.held"),
+      stageCount("state=eq.failed"),
+    ]);
+  const funnel =
+    sent === null && delivered === null && handedOff === null
+      ? null
+      : {
+          sent,
+          delivered,
+          read: readN,
+          tapped,
+          travellerContacted,
+          handedOff,
+          held,
+          failed,
+        };
 
   const gov = await governorVerdict();
 
@@ -133,17 +227,27 @@ export async function GET() {
               ? "Flag on, but WABA_DRY_RUN is on - composes and records, sends nothing."
               : "LIVE - the official number makes first contact.",
       },
-      {
-        id: "cloud-api",
-        label: "Meta Cloud API direct sender (legacy)",
-        live: await (await import("@/lib/whatsapp")).whatsappConfigured(),
-        detail: !c.enabled
-          ? (await (await import("@/lib/whatsapp")).whatsappCredentialsPresent())
-            ? "Off - credentials ARE set, but WABA_ENABLED is not on. This is the intended state."
-            : "Off - WABA_ENABLED is not on, and no credentials are set."
-          : "LIVE - WABA_ENABLED is on and Cloud API credentials are set.",
-      },
+      await (async () => {
+        // Its OWN switch (CLOUD_API_ENABLED), deliberately not WABA_ENABLED:
+        // rehearsing the handoff lane must never arm this ungoverned sender.
+        const wa = await import("@/lib/whatsapp");
+        const live = await wa.whatsappConfigured();
+        const creds = await wa.whatsappCredentialsPresent();
+        return {
+          id: "cloud-api",
+          label: "Meta Cloud API direct sender (legacy)",
+          live,
+          detail: live
+            ? "LIVE - CLOUD_API_ENABLED is on and Cloud API credentials are set."
+            : creds
+              ? "Off - credentials ARE set, but CLOUD_API_ENABLED is not on. This is the intended state."
+              : "Off - CLOUD_API_ENABLED is not on, and no credentials are set.",
+        };
+      })(),
     ],
+    // The architecture toggles the POST below accepts, with their STORED
+    // values - so the card renders what the vault holds, not what it hopes.
+    architecture: await architectureState(),
     governor: gov,
     funnel,
     leads,

@@ -57,6 +57,7 @@ import { waDigits, numberFilter } from "./wa/phone-key";
 import { resolveThreadContext } from "./wa/thread-context";
 import type { TraceRow } from "./orchestrator";
 import type { StructuredRFQ, Vendor } from "./types";
+import type { SendResult } from "./wa/transport";
 import { digitsOnly } from "./phone";
 
 /**
@@ -118,10 +119,7 @@ interface ThreadMsg {
   wa_message_id?: string | null;
 }
 
-export type SendFn = (
-  to: string,
-  message: string
-) => Promise<{ ok: boolean; error?: string }>;
+export type SendFn = (to: string, message: string) => Promise<SendResult>;
 
 // Gracious one-time closers (varied further by the anti-ban content variator).
 // CRITICAL: these must NEVER imply a deal is accepted or a booking confirmed
@@ -739,6 +737,12 @@ export async function processVendorReply(opts: {
         if (!ours.some((o) => norm(o.body || "") === norm(text))) {
           const { markRecipientOptedOut } = await import("./wa-guard");
           await markRecipientOptedOut(ctx.sender, from, ctx.vendorName ?? undefined).catch(() => {});
+          // FLEET-WIDE (owner decision): a shop that told ONE traveller's agent
+          // to stop told WheelDeal. The per-sender stamp above keeps its
+          // existing veto; this is the store every lane consults - cold intros
+          // from OTHER travellers, mass outreach, and the WABA template lane.
+          const { suppressShop } = await import("./wa/suppression");
+          await suppressShop(from, text.slice(0, 120), "stop-intent").catch(() => false);
         }
       }
     } catch {
@@ -765,6 +769,9 @@ export async function processVendorReply(opts: {
         if (verdict.optOut) {
           const { markRecipientOptedOut } = await import("./wa-guard");
           await markRecipientOptedOut(ctx.sender!, from, ctx.vendorName ?? undefined).catch(() => {});
+          // Fleet-wide too (same doctrine as the regex fast path above).
+          const { suppressShop } = await import("./wa/suppression");
+          await suppressShop(from, text.slice(0, 120), "stop-intent").catch(() => false);
         }
         if (verdict.risk === "none") return;
         // user_email column = EXACT ownership scoping for the risk feed (the
@@ -845,6 +852,19 @@ export async function processVendorReply(opts: {
    *  Filled by the menu block below and written onto the offers row. */
   let priceBasisDays: number | undefined;
 
+  // THE LOCAL CURRENCY OF RECORD, resolved ONCE and NEVER defaulted to USD here.
+  // The old chain read `currencyForRegion(ctx.region)`, a free-text regex that
+  // returns undefined for a region with no country token ("Ao Nang", "Krabi"),
+  // and every site then fell back to USD - so a +66 shop's bare "250 per day"
+  // was stored as $250/day, the trust-killer the owner reported. The shop's
+  // phone prefix is a far more reliable signal and it was never consulted:
+  // resolve region -> shop-prefix country, and only leave it undefined (not USD)
+  // when truly nothing is known.
+  const { countryForShop: _countryForShop } = await import("./copy/region");
+  const localCur =
+    currencyForRegion(ctx.region || undefined) ??
+    currencyForRegion(_countryForShop(from) || undefined);
+
   // DETERMINISTIC BACKSTOP (the "3 of 4 offers vanished" fix): the LLM
   // extractor can miss/fail (quota, odd phrasing) - but a price a human can
   // read in the text must NEVER be dropped. extractRentalDailyPrice reads the
@@ -856,7 +876,7 @@ export async function processVendorReply(opts: {
     const det = extractRentalDailyPrice(extractText, {
       vehicleClass: rfq.vehicleClass === "car" ? "car" : rfq.vehicleClass,
       durationDays: rfq.durationDays,
-      localCurrency: currencyForRegion(ctx.region || undefined) ?? undefined,
+      localCurrency: localCur ?? undefined,
       engineSizeCc: rfq.engineSizeCc,
     });
     if (det && det.classMatch !== false) {
@@ -887,7 +907,7 @@ export async function processVendorReply(opts: {
       const det = extractRentalDailyPrice(extractText, {
         vehicleClass: rfq.vehicleClass === "car" ? "car" : rfq.vehicleClass,
         durationDays: rfq.durationDays,
-        localCurrency: currencyForRegion(ctx.region || undefined) ?? undefined,
+        localCurrency: localCur ?? undefined,
         engineSizeCc: rfq.engineSizeCc,
       });
       const dur = rfq.durationDays;
@@ -956,7 +976,7 @@ export async function processVendorReply(opts: {
   if (extractText) {
     const { ladderRateFor } = await import("./wa/rate-ladder");
     const board = ladderRateFor(extractText, rfq.durationDays, {
-      localCurrency: currencyForRegion(ctx.region || undefined) ?? undefined,
+      localCurrency: localCur ?? undefined,
     });
     if (board && board.pricePerDay > 0) {
       usablePrice = board.pricePerDay;
@@ -1004,7 +1024,7 @@ export async function processVendorReply(opts: {
     const quoted = extractQuotedPrices(extractText, {
       vehicleClass: rfq.vehicleClass === "car" ? "car" : rfq.vehicleClass,
       durationDays: rfq.durationDays,
-      localCurrency: currencyForRegion(ctx.region || undefined) ?? undefined,
+      localCurrency: localCur ?? undefined,
       engineSizeCc: rfq.engineSizeCc,
     });
     const candidates = quoted.allOffers.map((h) => ({
@@ -1164,12 +1184,11 @@ export async function processVendorReply(opts: {
   // the shop actually typed it - a photo-only reply or a mis-read token can
   // never turn a Thai quote into ringgit ("RM 300/day" on a Krabi thread).
   const { reconcileCurrency } = await import("./wa/price-extract");
-  const cur =
-    reconcileCurrency(
-      extraction.currency,
-      currencyForRegion(ctx.region || undefined),
-      extractText || ""
-    ) || "USD";
+  // Resolve against the shop-prefix-aware localCur, not the region alone. USD
+  // is only the ABSOLUTE last resort - when the region, the shop's prefix and
+  // the reply all fail to name a currency - so a Thai shop's bare number is
+  // stored as THB, not dollars.
+  const cur = reconcileCurrency(extraction.currency, localCur, extractText || "") || localCur || "USD";
 
   // THE SHOP'S MENU. A reply naming more than one price is a CHOICE, not a
   // quote: "some models 200 and some new 250/day". Collapsing that to one number
@@ -1291,6 +1310,35 @@ export async function processVendorReply(opts: {
       }
     }
   }
+  // UNGROUNDED-PRICE RAIL (owner problem #4: hallucinated prices on automated /
+  // no-price template replies). The model can return found=true with a number
+  // that appears NOWHERE - not in the shop's message, not as a total, not in a
+  // photo, and not as a number we proposed and the shop agreed to. There is no
+  // honest source for such a price, so we must never show it: prefer "unknown"
+  // over inventing information. Deliberately conservative - it only fires when
+  // the price is groundless on EVERY source, so a real quote is never dropped:
+  //   - a photo/board was read      -> the price can come from the image
+  //   - the price is DERIVED        -> the total is in the text (priceBasisDays)
+  //   - the number (or number x days) is verbatim in the shop's reply
+  //   - the number is in the recent conversation (a proposal the shop agreed to)
+  if (usablePrice && extractText && images.length === 0 && priceBasisDays === undefined) {
+    const { isPriceGrounded } = await import("./wa/price-grounding");
+    if (!isPriceGrounded(usablePrice, rfq.durationDays, [extractText, history])) {
+      await sbInsert("agent_events", [
+        {
+          kind: "price-ungrounded",
+          user_email: ctx.sender ?? null,
+          to_number: from,
+          vendor_id: ctx.vendorId ?? "",
+          vendor_name: ctx.vendorName ?? "",
+          detail: `Model read ${usablePrice} ${extraction.currency ?? "?"} but it is nowhere in the reply, no photo, no agreement - dropped rather than shown. "${(extractText ?? "").slice(0, 160)}"`,
+        },
+      ]).catch(() => {});
+      usablePrice = undefined;
+      extraction.found = false;
+      extraction.pricePerDay = undefined;
+    }
+  }
   // CREDIBILITY CLAMP (the Bargained-0 kill): a "floor" at/above the shop's
   // own live quote is bad data, not a reason to go mute - it used to flip
   // priceAtOrBelowFloor true and make the bargain edge illegal for EVERY shop
@@ -1353,6 +1401,16 @@ export async function processVendorReply(opts: {
             }).slice(0, 500),
           },
         ]).catch(() => {});
+        // FUNNEL LEDGER: a typed price agreeing with the price we read off the
+        // shop's own photo is the strongest verification the funnel has.
+        if (verdict.agreement === "confirmed" && extraction.matchesSpec !== false) {
+          const { advanceThreadStage } = await import("./funnel/stages");
+          await advanceThreadStage(
+            { userEmail: ctx.sender ?? "", toNumber: from, vendorId: ctx.vendorId, vendorName: ctx.vendorName, transport: "evolution" },
+            "price_verified",
+            "typed price matches the price sheet photo"
+          ).catch(() => {});
+        }
       }
     } catch {
       /* the reconciliation is telemetry - it must never break a turn */
@@ -1396,6 +1454,51 @@ export async function processVendorReply(opts: {
       { ...replyBase, currency: cur, deposit: extraction.deposit ?? null, delivers: extraction.delivers ?? null },
     ]);
     if (!okBasic) await sbInsert("vendor_replies", [replyBase]);
+  }
+  // ---- FUNNEL LEDGER: what this reply proved (src/lib/funnel/stages.ts) ------
+  //
+  // `replied` was stamped at ingest when the frame was stored; HERE is where the
+  // reply becomes understanding, so here is where the ledger learns it. One
+  // progression stamp (the highest stage this reply's facts support) plus at
+  // most one lateral - each internally deduped, so a repeat costs one select.
+  // matchesSpec===false keeps a substitute's price out of price_received for
+  // the same reason it never becomes an offers row: the REQUESTED vehicle has
+  // no price yet.
+  {
+    const { advanceThreadStage } = await import("./funnel/stages");
+    const stageArgs = {
+      userEmail: ctx.sender ?? "",
+      toNumber: from,
+      vendorId: ctx.vendorId,
+      vendorName: ctx.vendorName,
+      transport: "evolution",
+    };
+    // The shop explicitly said the vehicle IS available - the one evidence
+    // class allowed to pull a thread back out of out_of_stock.
+    const stageOpts = { overridesOutOfStock: extraction.shopUnavailable === false };
+    const priced = Boolean(usablePrice) && extraction.matchesSpec !== false;
+    const understood =
+      priced ||
+      extraction.found ||
+      (extraction.options?.length ?? 0) > 0 ||
+      Boolean(extraction.deposit || extraction.depositType) ||
+      extraction.delivers != null ||
+      extraction.insuranceIncluded != null ||
+      extraction.deliveryFee != null ||
+      extraction.pickupOffered != null ||
+      extraction.onShopOnly != null ||
+      typeof extraction.shopUnavailable === "boolean" ||
+      extraction.shopDeclined === true;
+    if (priced) {
+      await advanceThreadStage(stageArgs, "price_received", "shop quoted a grounded price", stageOpts);
+    } else if (understood) {
+      await advanceThreadStage(stageArgs, "understood", "reply carried an actionable fact", stageOpts);
+    }
+    if (extraction.shopDeclined === true) {
+      await advanceThreadStage(stageArgs, "declined", "shop walked away");
+    } else if (extraction.shopUnavailable === true) {
+      await advanceThreadStage(stageArgs, "out_of_stock", "shop said the vehicle is not available");
+    }
   }
   // Verified shop tags (item #13): record what this reply explicitly stated.
   // A tag only ever SHOWS after >= 2 distinct replies confirm it.
@@ -2000,7 +2103,13 @@ export async function processVendorReply(opts: {
       .map((m) => m.raw?.move ?? m.raw?.kind ?? undefined),
     priorInbound: thread
       .filter((m) => m.direction === "inbound")
-      .map((m) => m.body ?? "")
+      // THE GLOSS, NOT THE RAW THAI, when one exists. Every deterministic
+      // scanner downstream (the claim ledger, thread-facts, the options
+      // accumulator) is written in English; feeding it raw local-language
+      // priors made every prior message invisible to all of them - the
+      // engine "forgot" facts stated two messages ago on localized threads.
+      // Digits survive translation, so prices are unaffected.
+      .map((m) => (m.raw as { english?: string } | null)?.english ?? m.body ?? "")
       .filter(Boolean),
     legacyCounts: {
       clarify: autoClarifies,
@@ -2025,6 +2134,24 @@ export async function processVendorReply(opts: {
   const { runThreadTurn } = await import("./engine-route");
   const routed = await runThreadTurn(turnInput, io, "inbound");
   if (routed.engine !== "none") {
+    // THE SPEED PANEL'S ONLY WRITER, on the path that actually runs. Its only
+    // callers used to live in the legacy orchestrator block (now deleted), so
+    // the WA doctor's turn-latency panel was structurally empty for every
+    // routed (i.e. every real) turn. Outcome vocabulary maps
+    // onto the panel's three buckets: sent stays "sent", queued/held read as
+    // "parked", blocked/failed read as "send-failed"; a deliberate silent turn
+    // is not stamped - there was nothing to deliver, so it has no latency.
+    {
+      const d = routed.spte?.delivered ?? "sent";
+      if (d !== "silent") {
+        stampTurnLatency(ctx.sender, from, {
+          composeMs: Date.now() - turnStartedAt,
+          plannedDelayS: 0,
+          outcome:
+            d === "sent" ? "sent" : d === "queued" || d === "held" ? "parked" : "send-failed",
+        });
+      }
+    }
     // WHAT WE ACTUALLY DID ABOUT THE PHOTO, written next to the photo. The
     // proof panel renders this; with nothing recorded it now claims nothing.
     if (routed.spte) await recordMediaFollowUp(routed.spte.move, routed.spte.delivered);
@@ -2045,11 +2172,30 @@ export async function processVendorReply(opts: {
     // after the turn (never on the reply path), and if it is close enough,
     // park a choice for the traveller; the policy then holds the thread silent
     // instead of closing it.
-    if (extraction?.matchesSpec === false && ctx.sender && ctx.vendorId) {
+    // TRIGGER ON THE UNION, not on matchesSpec alone (owner problem #6). The old
+    // gate only fired when the extractor had ALREADY set matchesSpec=false - i.e.
+    // when a DIFFERENT CLASS word or an explicit cc mismatch appeared. The common
+    // phrasing "no Click today, only Nmax, 300 per day" has 'nmax' in the scooter
+    // vocabulary and no cc token, so classMatch was true, matchesSpec was true,
+    // and the substitution read never ran: the 300 landed as the requested
+    // vehicle's price. Run the read whenever a substitution is plausible, then
+    // let the LLM's own "a different vehicle was offered" judgement (read.offered)
+    // drive wrongVehicle - decideSubstitution still gates on closeness/confidence,
+    // so a genuine same-vehicle reply is a no-op.
+    const substitutionHint =
+      /\b(?:no|dont|don'?t|out of|sold out|instead|only have|only got|we have|i have|but (?:i|we)|another|other|different|alternative)\b/i.test(
+        opts.text ?? ""
+      );
+    const assessmentSuspect =
+      extraction?.vehicleAssessment != null && extraction.vehicleAssessment.status !== "confirmed";
+    const substitutionSuspected =
+      extraction?.matchesSpec === false || assessmentSuspect || substitutionHint;
+    if (substitutionSuspected && ctx.sender && ctx.vendorId) {
       const email = ctx.sender;
       const vendorId = ctx.vendorId;
       const inboundText = opts.text ?? "";
       const threadKey = turnInput.event.threadKey;
+      const assessmentWrong = extraction?.vehicleAssessment?.status === "wrong-vehicle";
       await finishBeforeResponse("substitution-offer", async () => {
         const { readAlternativeOffer } = await import("./semantic/classifiers");
         const { decideSubstitution } = await import("./vehicle/substitution");
@@ -2058,8 +2204,14 @@ export async function processVendorReply(opts: {
           (rfq?.engineSizeCc ? ` around ${rfq.engineSizeCc}cc` : "") +
           (rfq?.transmission && rfq.transmission !== "any" ? `, ${rfq.transmission}` : "");
         const read = await readAlternativeOffer(inboundText, context).catch(() => null);
+        // The shop genuinely offered a DIFFERENT vehicle when: the extractor
+        // flagged a class/cc mismatch, the assessment says wrong-vehicle, OR the
+        // classifier read a distinct vehicle offer. Any of these makes it a real
+        // substitution rather than a same-vehicle quote.
+        const wrongVehicle =
+          extraction?.matchesSpec === false || assessmentWrong || Boolean(read?.value?.offered);
         const decision = decideSubstitution({
-          wrongVehicle: true,
+          wrongVehicle,
           alternative: read?.value ?? null,
           currency: cur,
           now: Date.now(),
@@ -2167,638 +2319,26 @@ export async function processVendorReply(opts: {
     return;
   }
 
-  // ==== THE LEGACY ORCHESTRATOR PIPELINE (GRAPH_ENGINE=off) ===================
-  // Stage order per reply: extract (done above) -> deterministic discipline
-  // ladder (what is ALLOWED) -> strategist (session-wide thinking + timing) ->
-  // drafting agent (reply/price) -> validator (critique/revise) -> localize ->
-  // deliver. Every stage writes a trace row; with no AI key every stage
-  // degrades to the deterministic behavior.
-  const {
-    getOrchestratorConfig,
-    runStrategist,
-    validateDraft,
-    sessionDigestFor,
-    ownerDirectives,
-    registerRules,
-    stripGreeting,
-    newDecisionId,
-    writeTrace,
-  } = await import("./orchestrator");
-  const cfg = await getOrchestratorConfig();
-  const decisionId = newDecisionId();
-  const traces: TraceRow[] = [];
-  const traceBase = {
-    decisionId,
-    userEmail: ctx.sender ?? undefined,
-    vendorId: ctx.vendorId ?? undefined,
-    vendorName: ctx.vendorName ?? undefined,
-  };
-  traces.push({
-    ...traceBase,
-    stage: "extract",
-    input: text.slice(0, 600) || "(price-list photo)",
-    reasoning: `found=${extraction.found} matchesSpec=${extraction.matchesSpec} confidence=${extraction.confidence}`,
-    output: usablePrice ? `${usablePrice} ${cur}/day` : "(no usable price)",
-  });
-
-  // ---- Negotiation numbers: pure inputs to the branching engine -------------
-  // These are computed here (they need the DB for cross-shop leverage) and fed
-  // to the pure decide() engine as plain booleans, so the DECISION itself is
-  // fully owner-editable and testable.
-  const floorPrice: number | undefined = floorSameCur?.floor;
-  const priceAtOrBelowFloor = Boolean(usablePrice && floorPrice && usablePrice <= floorPrice * 1.05);
-  let rivalPrice: number | undefined;
-  let target: number | undefined;
-  // CROSS-SHOP LEVERAGE on EVERY composing turn (owner report 4/W2.2): this
-  // fetch was gated inside "first bargain with a usable price", so a
-  // second-round push or an answer turn cited nothing - while SPTE fetches
-  // session leverage on all paths via buildSession. A lower real offer from
-  // another shop is honest negotiating power on any turn that has a quote to
-  // beat; the TARGET math below keeps its original first-push gate.
-  if (ctx.sender && usablePrice) {
-    const { vehicleKeyFor } = await import("./market");
-    const { cheapestRivalFor } = await import("./search-session");
-    rivalPrice = await cheapestRivalFor(ctx.sender, {
-      vendorId: ctx.vendorId ?? "",
-      currency: cur,
-      vehicleKey: vehicleKeyFor(rfq),
-      belowPrice: usablePrice,
-    }).catch(() => undefined);
-  }
-  if (usablePrice && !priceAtOrBelowFloor && extraction.matchesSpec !== false && autoBargains === 0) {
-    const baseTarget = floorPrice
-      ? Math.max(floorPrice, Math.round(usablePrice * 0.6))
-      : Math.round(usablePrice * 0.85);
-    target = rivalPrice
-      ? Math.max(floorPrice ?? 0, Math.min(baseTarget, rivalPrice))
-      : baseTarget;
-  }
-  const targetIsRealSaving = Boolean(usablePrice && target && target < usablePrice * 0.95);
-
-  // ---- The branching engine decides the ALLOWED move (never composes text) --
-  const { decide } = await import("./branching");
-  const { getDecisionGraph } = await import("./orchestrator");
-  const graph = await getDecisionGraph();
-  const decisionCtx = {
-    sessionClosed,
-    shopAskedQuestion: shopAskedQuestion(text),
-    shopSentVehiclePhoto: extraction.imageKind === "vehicle",
-    hasUsablePrice: Boolean(usablePrice),
-    verified: isVerified(),
-    hasClarifyMessage: Boolean(extraction.clarifyMessage),
-    matchesSpecNotFalse: extraction.matchesSpec !== false,
-    priceAtOrBelowFloor,
-    targetIsRealSaving,
-    rivalCheaper: Boolean(rivalPrice),
-    counts: {
-      clarify: autoClarifies,
-      bargain: autoBargains,
-      answer: autoAnswers,
-      close: autoCloses,
-    },
-  };
-  const decision = decide(decisionCtx, graph);
-  const direction = decision.direction;
-  const ladderWhy = decision.why;
-
-  // Deterministic post-decision details the engine intentionally leaves out:
-  // the close copy (warm-yes vs polite-no) and the round bump.
-  let closeVariants = CLOSE_OK;
-  let nextRound = round;
-  if (direction === "bargain") {
-    nextRound = 1;
-  } else if (direction === "close" && autoBargains >= 1) {
-    // A close that FOLLOWS our single ask: match the shop's answer's tone.
-    nextRound = round + 1;
-    const saidYes =
-      usablePrice !== undefined ||
-      /\b(ok|okay|yes|sure|deal|can do|no problem)\b/i.test(text);
-    closeVariants = saidYes ? CLOSE_OK : CLOSE_NO;
-  }
-  traces.push({
-    ...traceBase,
-    stage: "discipline",
-    input: `counters: clarifies=${autoClarifies} bargains=${autoBargains} answers=${autoAnswers} closes=${autoCloses} sessionClosed=${sessionClosed}`,
-    reasoning: `rule: ${decision.ruleId ?? "default"} - ${ladderWhy}`,
-    output: direction,
-  });
-
-  // ---- Strategist: the whole search session + reply timing ------------------
-  const sessionDigest = ctx.sender
-    ? await sessionDigestFor(ctx.sender, ctx.vendorId).catch(() => "")
-    : "";
-  const strat = await runStrategist({
-    cfg,
-    history,
-    sessionDigest,
-    shopMessage: text,
-    ladderDirection: direction,
-    quotedPerDay: usablePrice,
-    targetPerDay: target,
-    rivalPerDay: rivalPrice,
-    currency: cur,
-  });
-  traces.push({
-    ...traceBase,
-    stage: "strategist",
-    input: sessionDigest || "(only this shop in session)",
-    reasoning: strat.reasoning,
-    output:
-      strat.action + (strat.waitSeconds ? ` ${strat.waitSeconds}s` : "") +
-      (strat.leverageNote ? ` | leverage: ${strat.leverageNote}` : ""),
-    verdict: strat.fromAi ? undefined : "deterministic",
-  });
-  if (strat.action === "silent" || direction === "silent") {
-    await writeTrace(traces);
-    return;
-  }
-
-  // ---- Drafting agent (reply / price) ---------------------------------------
-  let followUp: string | null = null;
-  let followKind: string = direction;
-  let englishGloss: string | undefined;
-  // W4.6 - THE LANGUAGE DOCTRINE, INVERTED, AND THE TICK ASYMMETRY CLOSED.
+  // ==== BOTH ENGINES EXPLICITLY OFF ==========================================
   //
-  // This used to call `threadPrefersEnglish(text, priorInboundBodies)` - the
-  // demonstration test - with NO tick guard, while the graph engine wrapped the
-  // same call in `input.event.kind !== "tick"`. So one engine could flip a
-  // thread to English on our own timer firing and the other could not, on the
-  // same conversation. Both now READ the thread's stored decision, which is
-  // taken only on an explicit statement from the shop, so there is nothing left
-  // for a tick to flip and nothing left for the two engines to disagree about.
-  const { threadWritesEnglish, threadLanguageFromStored } = await import("./wa/thread-language");
-  const { loadThreadState: loadLangState, threadKeyFor: langThreadKey } = await import(
-    "./graph/state"
-  );
-  const storedLanguage = threadLanguageFromStored(
-    (
-      await loadLangState(langThreadKey(ctx.sender ?? undefined, from)).catch(() => null)
-    )?.fields?.language
-  );
-  // ONE PREDICATE (entitlements.localLanguageAllowed). This read
-  // `ctx.plan === "ultra"` - a hardcoded tier on the one path that actually
-  // composes the message to the shop, so a new tier would have been honoured by
-  // every other surface and silently refused here.
-  const { localLanguageAllowed } = await import("./entitlements");
-  const useLocalLang =
-    localLanguageAllowed({
-      requested: ctx.localLang,
-      plan: ctx.plan,
-      enabled: await localLanguageEnabled(),
-    }) && !threadWritesEnglish(storedLanguage);
-  const register = registerRules(cfg, cur, ctx.region || undefined);
-  // The shop's phone number resolves the country when the thread carries no
-  // region label - the 4-country ceiling fix (owner report 4). Feeds every
-  // localizeMessage/composeBargain call on this path.
-  const { countryForShop } = await import("./copy/region");
-  const localeRegion = ctx.region || countryForShop(from) || undefined;
-
-  if (direction === "answer") {
-    const { chat } = await import("./ai");
-    const spec = fallbackAnswer(rfq);
-    // A photo of the actual VEHICLE (not a price sheet) is not a question - it
-    // is the shop showing off the ride. Thank them warmly and keep the door open.
-    const vehiclePhoto = extraction.imageKind === "vehicle" && !shopAskedQuestion(text);
-    if (vehiclePhoto) {
-      const veh =
-        rfq.vehicleClass === "car" ? "car" : rfq.vehicleClass === "scooter" ? "scooter" : "bike";
-      const thanksFallback = `Thanks for the photo, the ${veh} looks great! Could you confirm your best daily price for it?`;
-      const llm = await chat([
-        {
-          role: "system",
-          content:
-            "You are the traveller in a WhatsApp chat with a vehicle rental shop. " +
-            "The shop just sent a PHOTO of the actual vehicle (not a price list). " +
-            "Reply in ONE short, warm, casual sentence (max 25 words): thank them for " +
-            "the photo and, only if we do not already have a price for our exact " +
-            "vehicle, gently ask their best daily price. " +
-            "You are MID-CONVERSATION: never greet again. NEVER accept a deal or " +
-            "confirm a booking - only the traveller decides. " +
-            (register ? register + " " : "") +
-            ownerDirectives(cfg, "reply") +
-            " Reply with the message text only.",
-        },
-        { role: "user", content: `Conversation so far:\n${history}\n\nThe shop sent a photo of the ${veh}.` },
-      ]);
-      followUp = (llm ?? "").trim().slice(0, 300) || thanksFallback;
-    } else {
-      const llm = await chat([
-        {
-          role: "system",
-          content:
-            "You are the traveller in a WhatsApp chat with a vehicle rental shop. " +
-            "The shop just asked a question. Answer ONLY that question in ONE short, " +
-            "casual, friendly sentence (max 25 words), strictly using these facts - " +
-            `never invent anything: ${spec} ` +
-            "You are MID-CONVERSATION: never greet again (no hey/hi/hello). " +
-            "Do not re-ask for the price if the shop already gave one for our exact vehicle. " +
-            "HARD RULE: NEVER accept a deal, never confirm a booking, never say a price " +
-            "'works' - only the traveller decides that. If the shop is asking whether we " +
-            "take their offer, say you will think it over and get back to them. " +
-            (register ? register + " " : "") +
-            ownerDirectives(cfg, "reply") +
-            " Reply with the message text only.",
-        },
-        { role: "user", content: `Conversation so far:\n${history}\n\nShop's question: ${text}` },
-      ]);
-      followUp = (llm ?? "").trim().slice(0, 300) || spec;
-    }
-  } else if (direction === "clarify") {
-    followUp = extraction.clarifyMessage ?? null;
-  } else if (direction === "close") {
-    followUp = closeVariants[Math.floor(Math.random() * closeVariants.length)];
-  } else if (direction === "bargain" && usablePrice && target) {
-    const draft = await composeBargain({
-      rfq,
-      vendor: { name: ctx.vendorName ?? "the shop" } as Vendor,
-      currentPricePerDay: usablePrice,
-      rivalPricePerDay: rivalPrice,
-      region: localeRegion,
-      // The REAL round (0-based). A hardcoded 1 framed the first-ever counter as
-      // a "SECOND PUSH" that falsely implies the shop already refused an ask -
-      // so the opener's days-leverage play never fired on first contact.
-      round: autoBargains,
-      currency: cur,
-      localLanguage: useLocalLang,
-      targetPricePerDay: target,
-      floorPricePerDay: floorPrice,
-      history,
-      voiceKey: ctx.sender ?? undefined,
-      // The strategist's leverageNote is LLM-authored free text. NEVER pass it
-      // as licensed leverage when it asserts a competitor PRICE that is not our
-      // one server-verified rival - that is exactly how an invented "another
-      // shop offered 220" gets laundered into the message. A real rival is
-      // force-injected by composeBargain via rivalPricePerDay; the note may only
-      // carry NON-price strategic hints ("shop sounds flexible", "low season").
-      extraDirectives: [
-        register,
-        ownerDirectives(cfg, "price"),
-        safeLeverageNote(strat.leverageNote, rivalPrice),
-        // Module 4: deterministic per-turn structural shape (sentence order,
-        // contractions, emoji rule) so no two turns share a skeleton.
-        (await import("./copy/promptCompiler")).compileStyleDirectives(
-          { threadId: `${ctx.sender ?? ""}:${from}`, vendorId: ctx.vendorId ?? "", nonce: autoBargains },
-          ctx.region || undefined
-        ),
-      ]
-        .filter(Boolean)
-        .join("\n"),
-    });
-    if (draft.localizeFailed) {
-      // Template AND localizer failed on a local-language thread: fluent
-      // English here is a mid-negotiation language flip. Suppress and say so;
-      // the next inbound or tick recomposes with the AI back.
-      traces.push({
-        ...traceBase,
-        stage: "price-agent",
-        input: text.slice(0, 500),
-        reasoning:
-          "local-language bargain suppressed - localization unavailable; waiting beats an English flip mid-thread",
-        output: "(suppressed)",
-        verdict: "veto",
-      });
-      void sbInsert("agent_events", [
-        {
-          kind: "localize-fallback",
-          user_email: ctx.sender ?? "",
-          vendor_name: ctx.vendorName ?? from,
-          detail: JSON.stringify({
-            reason: "ai-unavailable",
-            region: localeRegion ?? null,
-            path: "legacy-bargain-fallback",
-            action: "suppressed",
-          }).slice(0, 500),
-        },
-      ]).catch(() => {});
-      await writeTrace(traces);
-      return;
-    }
-    followUp = draft.message;
-    if (useLocalLang && draft.english) englishGloss = draft.english;
-    await sbInsert("bargain_drafts", [
-      {
-        user_email: ctx.sender ?? null,
-        vendor_id: ctx.vendorId ?? "",
-        tactic: draft.tacticId,
-        message: draft.message,
-      },
-    ]);
-  }
-  traces.push({
-    ...traceBase,
-    stage: direction === "bargain" ? "price-agent" : "reply-agent",
-    input: `direction=${direction}${target ? ` target=${target} ${cur}` : ""}${rivalPrice ? ` rival=${rivalPrice}` : ""}`,
-    reasoning: ladderWhy,
-    output: followUp ?? "(no draft)",
-  });
-  if (!followUp) {
-    await writeTrace(traces);
-    return;
-  }
-
-  // ---- Validator: critique + revise before anything sends -------------------
-  const priorOutbound = thread
-    .filter((m) => m.direction === "outbound")
-    .map((m) => m.body ?? "")
-    .filter(Boolean);
-  // Mid-thread messages never greet again (deterministic, runs even with AI).
-  if (priorOutbound.length > 0) followUp = stripGreeting(followUp);
-  // Localized bargains are validated deterministically only (an English
-  // critique pass on Thai text risks flipping the language - stickiness wins).
-  const skipAiValidation = direction === "bargain" && useLocalLang;
-  const validation = await validateDraft({
-    cfg: skipAiValidation
-      ? { ...cfg, stages: cfg.stages.map((s) => (s.id === "validator" ? { ...s, enabled: false } : s)) }
-      : cfg,
-    history,
-    draft: followUp,
-    shopMessage: text,
-    priorOutbound,
-    currency: cur,
-  });
-  traces.push({
-    ...traceBase,
-    stage: "validator",
-    input: followUp,
-    reasoning: validation.reasons.join("; ") || "clean",
-    output: validation.verdict === "veto" ? "(vetoed)" : validation.text,
-    verdict: validation.verdict,
-  });
-  if (validation.verdict === "veto" || !validation.text) {
-    await writeTrace(traces);
-    return;
-  }
-  followUp = validation.text;
-
-  // ---- NEGOTIATION INTEGRITY (deterministic, the legacy path's missing gate) -
-  // The graph engine (default) runs checkOutboundNumbers + a duration guard on
-  // every outbound; the legacy pipeline (GRAPH_ENGINE=off) shipped whatever the
-  // LLM wrote. That is how a hallucinated "another shop quoted 220" and a wrong
-  // "3 days" (search was 5) reached a real shop. Mirror the engine's gate here.
-  // Only English drafts are validated numerically (a localized bargain is Thai
-  // etc.; its levers were preserved at compose time and a strip would corrupt it).
-  if (followUp && !(useLocalLang && followKind === "bargain")) {
-    // (a) DURATION: rewrite any wrong rental length to the real duration.
-    const dur = correctDuration(followUp, rfq.durationDays);
-    if (dur.changed) {
-      traces.push({
-        ...traceBase,
-        stage: "integrity",
-        input: followUp,
-        reasoning: `duration guard: draft said ${dur.from.join("/")} day(s), traveller's rental is ${rfq.durationDays} - corrected`,
-        output: dur.text,
-        verdict: "revised",
-      });
-      followUp = dur.text;
-      if (englishGloss) englishGloss = undefined;
-    }
-    // (b) NUMERIC SANITY: fabricated rival (all directions) + sub-floor /
-    // inverted-ask bounds (bargain only). rivalPrice is a SERVER-VERIFIED
-    // same-session offer - the only thing that licenses a rival claim.
-    const isBargain = followKind === "bargain";
-    const excludeExact = [rfq.durationDays, rfq.engineSizeCc, rfq.seats].filter(
-      (n): n is number => typeof n === "number"
-    );
-    const numCheck = checkOutboundNumbers({
-      text: followUp,
-      ceiling: isBargain ? usablePrice : undefined,
-      floor: isBargain ? floorPrice : undefined,
-      rivalPrice,
-      excludeExact,
-      // PROVENANCE: the numbers this thread actually holds. A draft numeral
-      // must be one of these or a closed derivation (total/days, daily*days,
-      // rounding) - the field's invented "Your price 300 is too much" had no
-      // path here and dies; a derived "200/day" from "1200 for 6 days" lives.
-      grounded: [
-        usablePrice,
-        target,
-        floorPrice,
-        extraction.pricePerDay,
-        ...(extraction.options ?? []).map((o) => o.pricePerDay),
-        // Every numeral the conversation verbatim contains, both directions -
-        // a number either party already said is never an invention.
-        ...verbatimNumerals([text, ...thread.map((m) => m.body ?? "")]),
-      ].filter((n): n is number => typeof n === "number" && n > 0),
-      durationDays: rfq.durationDays,
-      checkAskBounds: isBargain,
-    });
-    if (!numCheck.ok) {
-      const safe = isBargain
-        ? buildSafeBargainAsk({
-            target,
-            ceiling: usablePrice,
-            floor: floorPrice,
-            durationDays: rfq.durationDays,
-            currency: cur,
-            money,
-          })
-        : stripRivalClaims(followUp);
-      traces.push({
-        ...traceBase,
-        stage: "integrity",
-        input: followUp,
-        reasoning: `numeric guard (${numCheck.violation}): ${numCheck.detail} - ${
-          safe ? "repaired to a safe, rival-free message" : "no honest repair - suppressing this send"
-        }`,
-        output: safe ?? "(suppressed)",
-        verdict: safe ? "revised" : "veto",
-      });
-      if (!safe) {
-        await writeTrace(traces);
-        return; // never ship a lie; the next inbound recomposes cleanly
-      }
-      followUp = safe;
-      if (englishGloss) englishGloss = undefined;
-    }
-  }
-
-  // LANGUAGE STICKINESS: a thread that started in the shop's local language
-  // NEVER flips to English mid-conversation (the "agent suddenly switched to
-  // English" bug). Bargains come localized from composeBargain already; the
-  // clarify / answer / close paths are localized here, keeping the faithful
-  // English gloss for the traveller. Street register applies (orchestrator).
-  if (followUp && useLocalLang && followKind !== "bargain") {
-    const { localizeMessage } = await import("./agents");
-    const localized = await localizeMessage(followUp, localeRegion, ctx.sender, cfg.streetLocal);
-    if (localized.text && localized.text !== followUp) {
-      englishGloss = localized.english ?? followUp;
-      followUp = localized.text;
-    }
-    // This path used to fall back to English SILENTLY - only the mass-send
-    // route ever emitted localize-fallback. Honest reason, here too.
-    if (!localized.localized && localized.reason && localized.reason !== "english-region") {
-      void sbInsert("agent_events", [
-        {
-          kind: "localize-fallback",
-          user_email: ctx.sender ?? "",
-          vendor_name: ctx.vendorName ?? from,
-          detail: JSON.stringify({
-            reason: localized.reason,
-            region: localeRegion ?? null,
-            path: "legacy-reply",
-          }).slice(0, 500),
-        },
-      ]).catch(() => {});
-    }
-  }
-
-  if (followUp && (await runSafety(followUp)).allowed) {
-    // HUMAN THINKING TIME: a real person does not reply to a WhatsApp message
-    // in under two seconds - instant replies are THE robotic tell. When the
-    // sender has their own session (the queue can deliver for them), park the
-    // reply with a jittered natural delay; the drain re-runs the anti-ban gate
-    // at send time and uses the typing-presence path. Closers reply a bit
-    // faster (a quick "thanks!" is natural), bargains "think" longer. A
-    // strategist WAIT extends the hold - patience is a deliberate tactic.
-    if (opts.humanDelay && ctx.sender) {
-      // Snappy but human: an engaged shop is waiting, so replies land within a
-      // strict ~1-2 min ceiling (owner). Still jittered - a sub-second reply is
-      // the robotic tell. A strategist WAIT is deliberate but clamped to 90s so
-      // it never blows the ceiling for an engaged shop.
-      //
-      // These bounds are pure SCHEDULING, not safety: every parked row is
-      // re-gated at drain time (guardOutbound + the atomic claims), so tightening
-      // them cannot outrun a floor - it only stops the delay stacking on top of
-      // the LLM turn and the drain cadence into the minutes the field test saw.
-      // The lower bound stays above the ~6s fleet gap; below that the claim
-      // would just re-park the message and the cut would buy nothing.
-      const delayS =
-        strat.action === "wait" && strat.waitSeconds
-          ? Math.min(strat.waitSeconds, 90)
-          : followKind === "close" || followKind === "answer"
-          ? 6 + Math.floor(Math.random() * 10) // 6-15s
-          : 10 + Math.floor(Math.random() * 16); // 10-25s (a bargain "thinks")
-      // Dedup: one pending row per shop (parkOutboxOnce replaces any older
-      // pending row) so an awaiting-reply shop never accumulates duplicates.
-      const { parkOutboxOnce } = await import("./wa/park");
-      await parkOutboxOnce({
-        senderKey: ctx.sender,
-        toNumber: from,
-        body: followUp,
-        notBeforeMs: Date.now() + delayS * 1000,
-        meta: {
-          ...ctx,
-          kind: `auto-${followKind}`,
-          round: nextRound,
-          auto: true,
-          ...(englishGloss ? { englishGloss } : {}),
-          // WHAT THIS DRAFT IS AN ANSWER TO. The drain re-reads it and refuses
-          // to send a reply to a message the shop has already moved past - the
-          // 12:39 bargain and the 12:43 close both went out after the shop had
-          // said its piece, because nothing on the send path knew what they
-          // were replying to. See wa/freshness.ts.
-          composedAgainst: {
-            inboundId: opts.waMessageId,
-            inboundAt: new Date(turnStartedAt).toISOString(),
-            quotePerDay: usablePrice,
-            move: followKind,
-          },
-          reason:
-            strat.action === "wait"
-              ? "strategist hold - choosing the best reply order"
-              : "human reply pacing (thinking time)",
-        },
-      });
-      traces.push({
-        ...traceBase,
-        stage: "deliver",
-        input: followUp,
-        reasoning:
-          strat.action === "wait"
-            ? `strategist hold for ${delayS}s`
-            : `parked with human thinking delay ${delayS}s`,
-        output: `queued until +${delayS}s`,
-      });
-      stampTurnLatency(ctx.sender, from, {
-        composeMs: Date.now() - turnStartedAt,
-        plannedDelayS: delayS,
-        outcome: "parked",
-      });
-      await writeTrace(traces);
-      return;
-    }
-
-    // Anti-ban gate: engagement, business hours, reputation caps, variance.
-    const verdict = await guardOutbound({
-      senderKey: ctx.sender ?? "system",
-      toDigits: from,
-      text: followUp,
-      auto: true,
-      queueIfBlocked: true,
-      meta: { ...ctx, kind: `auto-${followKind}`, round: nextRound, auto: true },
-    });
-    if (!verdict.allow) {
-      traces.push({
-        ...traceBase,
-        stage: "deliver",
-        input: followUp,
-        reasoning: verdict.reason ?? "held by the anti-ban gate",
-        output: "(queued/held)",
-      });
-      await writeTrace(traces);
-      return;
-    }
-    // THE LAST SEND SITE WITHOUT AN ATOMIC CLAIM. guardOutbound's checks are
-    // read-then-act, so N concurrent turns for the same sender all pass them
-    // together - this branch could emit two replies milliseconds apart while
-    // every drained row was properly serialized. It matters more now that the
-    // engaged lane is fast: the window this races through is seconds wide.
-    const senderKey = ctx.sender ?? "system";
-    const claim = await claimForSend(senderKey, from, verdict.text, true, true);
-    if (!claim.ok) {
-      traces.push({
-        ...traceBase,
-        stage: "deliver",
-        input: followUp,
-        reasoning:
-          claim.kind === "duplicate"
-            ? "another turn is already delivering this exact message"
-            : "pacing slot held by a concurrent send",
-        output: "(held)",
-      });
-      await writeTrace(traces);
-      return;
-    }
-    const result = await opts.send(from, verdict.text);
-    // A failed send must free the message slot or its own retry reads as a
-    // duplicate of itself. The gap slot is deliberately kept - the attempt
-    // consumed the pacing window either way.
-    if (!result.ok) await releaseSendClaim(senderKey, from, verdict.text);
-    stampTurnLatency(ctx.sender, from, {
-      composeMs: Date.now() - turnStartedAt,
-      plannedDelayS: 0,
-      outcome: result.ok ? "sent" : "send-failed",
-    });
-    if (result.ok) {
-      await afterSend(ctx.sender ?? "system", from);
-      await sbInsert("whatsapp_messages", [
-        {
-          // Provider id: lets the webhook's fromMe echo-check recognise OUR
-          // send by id instead of guessing from the body (a wrong guess wrote a
-          // fake "human takeover" row that orphaned the thread).
-          wa_message_id: (result as { messageId?: string }).messageId ?? null,
-          to_number: from,
-          body: verdict.text,
-          type: "text",
-          direction: "outbound",
-          raw: {
-            ...ctx,
-            kind: `auto-${followKind}`,
-            round: nextRound,
-            auto: true,
-            ...(englishGloss ? { englishGloss } : {}),
-          },
-        },
-      ]);
-    }
-    traces.push({
-      ...traceBase,
-      stage: "deliver",
-      input: followUp,
-      reasoning: result.ok ? "sent through the user's WhatsApp" : `send failed: ${result.error ?? "unknown"}`,
-      output: verdict.text,
-    });
-  }
-  await writeTrace(traces);
+  // The ~630-line legacy orchestrator pipeline that lived here was UNREACHABLE
+  // for every configuration except "both engines switched off by hand": the
+  // routed block above returns for v3 and graph alike, and engineV3Enabled
+  // returns true even when config is unreadable. Unreachable code with its own
+  // divergent leverage logic is not a fallback, it is drift waiting for a
+  // config accident - so it is deleted (see engine-route for the ladder, and
+  // the dead-code pin in engine-route.test.ts). Both engines off is an owner's
+  // explicit choice; the honest behaviour is to say so loudly and send
+  // nothing, never to answer shops with a third brain nobody maintains.
+  await sbInsert("agent_events", [
+    {
+      kind: "engine-disabled",
+      user_email: ctx.sender ?? "",
+      to_number: from,
+      vendor_id: ctx.vendorId ?? "",
+      vendor_name: ctx.vendorName ?? "",
+      detail: `reply stored but unanswered: ${routed.fallbackReason ?? "both engines disabled"}`,
+    },
+  ]).catch(() => {});
   }
 }

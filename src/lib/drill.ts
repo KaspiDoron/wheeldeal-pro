@@ -36,7 +36,11 @@ export { DRILL_INGEST_WINDOW_MS, REAL_THREAD_INGEST_WINDOW_MS };
  */
 export async function isVendorThread(
   fromDigits: string,
-  ownerEmail: string
+  ownerEmail: string,
+  /** The inbound's text, when the caller has it - used ONLY by the
+   *  staff-mobile opener allowance (waba/expectation wabaExpectsOpener),
+   *  reached after both the RFQ gate and the tail matcher said no. */
+  inboundText?: string
 ): Promise<boolean | null> {
   // Look at the recent outbound history of THIS user to THIS number (not just
   // the single newest row: a human-manual reply could be newest while the
@@ -86,5 +90,85 @@ export async function isVendorThread(
   // never "not a shop" - a genuine handoff reply eaten by our own outage is a
   // permanent loss, because the webhook's 200 stops the provider redelivering.
   if (expected === null) return null;
-  return expected ? true : false;
+  if (expected) {
+    // THE HANDOFF JUST COMPLETED: the agency messaged the traveller, the
+    // engine takes over from here. The ledger columns for exactly this moment
+    // (traveller_inbound_at, handed_off_at) existed and NOTHING wrote them -
+    // every lead sat in template_sent/handoff_sent forever, so the console
+    // could never say the handoff worked and the hold-timeout sweep saw live
+    // conversations as stalled. Stamped by (traveller, agency) pair with the
+    // terminal refusal in the filter (the advanceLead doctrine); thread_key
+    // joins the lead to the conversation the engine now owns. Best-effort with
+    // a schema-graceful retry - the authorisation verdict is already made.
+    try {
+      const { sbUpdate } = await import("./runtime-config");
+      const { nationalTail } = await import("./wa/phone-key");
+      const tail = nationalTail(fromDigits);
+      const email = ownerEmail.trim().toLowerCase();
+      const digits = fromDigits.replace(/\D+/g, "");
+      const nowIso = new Date().toISOString();
+      const filter =
+        `user_email=eq.${encodeURIComponent(email)}&agency_tail=eq.${encodeURIComponent(tail)}` +
+        `&state=in.(template_sent,handoff_sent)&handed_off_at=is.null`;
+      const full = await sbUpdate("waba_leads", filter, {
+        state: "handed_off",
+        handed_off_at: nowIso,
+        traveller_inbound_at: nowIso,
+        thread_key: `${email}:${digits}`,
+      });
+      if (!full) {
+        await sbUpdate("waba_leads", filter, {
+          state: "handed_off",
+          handed_off_at: nowIso,
+          traveller_inbound_at: nowIso,
+        }).catch(() => false);
+      }
+    } catch {
+      /* the stamp is ledger truth, never the gate */
+    }
+  }
+  if (expected) return true;
+
+  // THE STAFF-MOBILE ALLOWANCE - reached only after BOTH the RFQ gate and the
+  // tail matcher said no, and only when the caller could supply the text.
+  // Agencies routinely reply from a personal device, whose tail matches no
+  // lead; the prefilled opener we authored is then the only evidence this
+  // stranger is the shop we asked to call. wabaExpectsOpener holds the whole
+  // safety argument (live lead required, named match or unambiguous, TTL'd,
+  // flag-gated) - see waba/expectation.
+  if (inboundText) {
+    const { wabaExpectsOpener } = await import("./waba/expectation");
+    const byOpener = await wabaExpectsOpener(inboundText, ownerEmail);
+    if (byOpener === null) return null;
+    if (byOpener.authorised && byOpener.leadId) {
+      // Stamp the MATCHED lead (the staff number's own tail has no lead row):
+      // same terminal-refusing filter shape as the tail path, keyed by id.
+      try {
+        const { sbUpdate } = await import("./runtime-config");
+        const email = ownerEmail.trim().toLowerCase();
+        const digits = fromDigits.replace(/\D+/g, "");
+        const nowIso = new Date().toISOString();
+        const filter = `id=eq.${byOpener.leadId}&state=in.(template_sent,handoff_sent)&handed_off_at=is.null`;
+        const full = await sbUpdate("waba_leads", filter, {
+          state: "handed_off",
+          handed_off_at: nowIso,
+          traveller_inbound_at: nowIso,
+          // The thread the engine now owns is the STAFF number's - that is the
+          // chat the traveller will actually be talking in.
+          thread_key: `${email}:${digits}`,
+        });
+        if (!full) {
+          await sbUpdate("waba_leads", filter, {
+            state: "handed_off",
+            handed_off_at: nowIso,
+            traveller_inbound_at: nowIso,
+          }).catch(() => false);
+        }
+      } catch {
+        /* the stamp is ledger truth, never the gate */
+      }
+      return true;
+    }
+  }
+  return false;
 }

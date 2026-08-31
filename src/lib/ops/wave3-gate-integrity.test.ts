@@ -233,8 +233,11 @@ describe("defect 3: the gate refuses to approve what it could not check", () => 
   });
 
   it("every activation gate goes through goldenGateBlocks (source pins)", () => {
+    // admin/graph/route.ts left this list by DELETION (Wave 7, pinned in
+    // dead-code.test.ts): it could persist a graph spec around
+    // saveVersionedSpec - i.e. around this very gate - and had zero consumers.
+    // Removing the door beats gating it.
     const gates = [
-      "src/app/api/admin/graph/route.ts",
       "src/app/api/admin/ops/rules/route.ts",
       "src/app/api/admin/ops/policy/route.ts",
       "src/app/api/admin/ops/review/route.ts",
@@ -574,7 +577,9 @@ describe("defect 11: the replayed context carries what live derives", () => {
       rfq: RFQ,
       floor: FLOOR,
     });
-    expect(r.turns[0].legalMoves).toContain("present");
+    // A complete deal goes to the shop for confirmation FIRST (step 7 -
+    // verify-recap); `present` is state-only and comes after the shop's yes.
+    expect(r.turns[0].legalMoves).toContain("verify-recap");
     expect(r.turns[0].legalMoves).not.toContain("bargain");
   });
 

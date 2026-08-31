@@ -49,25 +49,20 @@ describe("a dial may not promise what the engine will override", () => {
 });
 
 describe("the human delay got shorter, never shorter than the fleet gap", () => {
-  const loop = readCode("src/lib/agent-loop.ts");
-
-  it("close/answer replies think 6-15s, bargains 10-25s", () => {
-    expect(loop).toMatch(/6 \+ Math\.floor\(Math\.random\(\) \* 10\)/);
-    expect(loop).toMatch(/10 \+ Math\.floor\(Math\.random\(\) \* 16\)/);
+  it("the LIVE engine's thinking pause is bounded and budget-aware", () => {
+    // The legacy orchestrator's 6-15s / 10-25s think constants died with the
+    // legacy block (deleted - see "the legacy pipeline is gone" below). The
+    // live pause is SPTE's: bounded to 10s, and always leaving >=20s of the
+    // serverless budget so a pause can never cost the reply itself.
+    const live = readCode("src/lib/spte/live.ts");
+    expect(live).toMatch(/Math\.min\(10_000, remaining - 20_000\)/);
   });
 
-  it("the lower bound stays at or above the ~6s fleet gap", () => {
-    // Below the fleet gap the claim would just re-park the message, so the cut
-    // would buy nothing and only make the pacing less predictable.
-    const bounds = [...loop.matchAll(/(\d+) \+ Math\.floor\(Math\.random\(\) \* \d+\)/g)].map((m) =>
-      Number(m[1])
-    );
-    expect(bounds.length).toBeGreaterThan(0);
-    for (const low of bounds) expect(low).toBeGreaterThanOrEqual(6);
-  });
-
-  it("a strategist WAIT is still clamped so it cannot blow the ceiling", () => {
-    expect(loop).toMatch(/Math\.min\(strat\.waitSeconds, 90\)/);
+  it("a model-proposed WAIT is still clamped so it cannot blow the ceiling", () => {
+    // The legacy strategist's 90s clamp is gone with it; the live clamp is
+    // clampWaitMinutes (1-3 min band on a MODEL-proposed pause).
+    const live = readCode("src/lib/spte/live.ts");
+    expect(live).toMatch(/clampWaitMinutes\(outcome\.waitMinutes\)/);
   });
 
   it("the delay is SCHEDULING - every parked row is re-gated at drain time", () => {
@@ -80,18 +75,16 @@ describe("the human delay got shorter, never shorter than the fleet gap", () => 
 describe("every send site is claim-gated", () => {
   const loop = readCode("src/lib/agent-loop.ts");
 
-  it("the legacy direct-send branch claims before it sends", () => {
-    // guardOutbound's checks are read-then-act, so N concurrent turns for one
-    // sender all passed them together - this was the only send site with no
-    // atomic slot behind it, and a faster lane makes that race seconds wide.
-    const i = loop.indexOf("const claim = await claimForSend(");
-    const j = loop.indexOf("await opts.send(from, verdict.text)");
-    expect(i).toBeGreaterThan(0);
-    expect(j).toBeGreaterThan(i);
-  });
-
-  it("a failed send frees its message slot so the retry is not a self-duplicate", () => {
-    expect(loop).toMatch(/if \(!result\.ok\) await releaseSendClaim\(senderKey, from, verdict\.text\)/);
+  it("the legacy pipeline - the one send site with no atomic slot - is GONE", () => {
+    // The ~630-line legacy orchestrator was unreachable for every config
+    // except both-engines-off, and it carried its own divergent send path
+    // (`opts.send(from, verdict.text)`) with its own claim handling. Deleted:
+    // every reply now goes through the routed engines, whose sends run inside
+    // guardAndSend/drainOutbox - the claim-gated paths pinned elsewhere.
+    expect(loop).not.toContain("THE LEGACY ORCHESTRATOR PIPELINE");
+    expect(loop).not.toContain("opts.send(from, verdict.text)");
+    // Both engines off is said out loud, never answered by a third brain.
+    expect(loop).toContain('kind: "engine-disabled"');
   });
 });
 
@@ -202,11 +195,14 @@ describe("the speed claim is now a measurement", () => {
   });
 
   it("the engine stamps one event per composed turn, fire-and-forget", () => {
+    // The writer is the ROUTED path's stamp now (the legacy block's two call
+    // sites died with it): delivered maps sent / queued|held->parked /
+    // blocked|failed->send-failed, and a deliberate silent turn is unstamped.
     const loop = readCode("src/lib/agent-loop.ts");
     expect(loop).toMatch(/kind: "turn-latency"/);
-    expect(loop).toMatch(/outcome: "parked"/);
-    expect(loop).toMatch(/outcome: result\.ok \? "sent" : "send-failed"/);
     expect(loop).toMatch(/function stampTurnLatency\(/);
+    expect(loop).toMatch(/stampTurnLatency\(ctx\.sender, from, \{/);
+    expect(loop).toMatch(/d === "queued" \|\| d === "held" \? "parked" : "send-failed"/);
     expect(loop).toMatch(/void sbInsert\("agent_events"/);
   });
 });

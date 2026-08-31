@@ -1,8 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireManagement, setAdmin, adminEmails, isOwner } from "@/lib/session";
-import { listUsers, setUserStatus, deleteUser } from "@/lib/access";
-import { disconnectInstance } from "@/lib/evolution";
-import { sbDelete, sbSelect } from "@/lib/runtime-config";
+import { listUsers, setUserStatus } from "@/lib/access";
 
 /**
  * THE MANAGEMENT LIST SHIPPED EVERY PASSWORD HASH TO A BROWSER.
@@ -44,20 +42,41 @@ function publicUser(u: import("@/lib/access").UserRecord, role: string) {
   };
 }
 
-async function payload() {
-  const [admins, users] = await Promise.all([adminEmails(), listUsers()]);
+const USERS_PAGE = 200;
+
+async function payload(opts: { q?: string; offset?: number } = {}) {
+  const offset = Math.max(0, Math.round(opts.offset ?? 0));
+  const [admins, users, total] = await Promise.all([
+    adminEmails(),
+    // limit+1 answers hasMore without a second read.
+    listUsers({ q: opts.q, offset, limit: USERS_PAGE + 1 }),
+    // The same exact count the Analytics tile shows - the two tabs used to
+    // disagree (500-row window vs sbCountDark) about how many users exist.
+    (await import("@/lib/runtime-config")).sbCountDark("app_users", ""),
+  ]);
+  const page = users.slice(0, USERS_PAGE);
   return {
-    users: users.map((u) =>
+    users: page.map((u) =>
       publicUser(u, isOwner(u.email) ? "owner" : admins.includes(u.email) ? "admin" : "user")
     ),
     admins,
+    /** EVERY registered account (null = unreadable = unknown, never zero). */
+    total,
+    hasMore: users.length > USERS_PAGE,
+    nextOffset: offset + page.length,
   };
 }
 
-export async function GET() {
+export async function GET(req: Request) {
   const session = await requireManagement();
   if (!session) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  return NextResponse.json(await payload());
+  const url = new URL(req.url);
+  return NextResponse.json(
+    await payload({
+      q: url.searchParams.get("q") ?? undefined,
+      offset: Number(url.searchParams.get("offset")) || 0,
+    })
+  );
 }
 
 export async function POST(req: Request) {
@@ -70,52 +89,27 @@ export async function POST(req: Request) {
   if (action === "delete") {
     // Permanently erase the user: sever their WhatsApp link, delete their
     // account and their app data. The owner can never be erased.
+    //
+    // THE TABLE LIST LIVES IN THE REGISTRY NOW (src/lib/privacy/user-tables).
+    // The four-entry map this route used to carry purged bookings, searches,
+    // feedback and wa_sessions - and left the person's WhatsApp transcripts,
+    // threads, offers, consent rows and risk events in ~25 other tables while
+    // answering 200 "erased". The walker covers every registered table, kills
+    // their sessions first, and a schema-grep test refuses any new user-keyed
+    // table that ships without a registry decision.
     if (isOwner(String(email))) {
       return NextResponse.json({ error: "The owner cannot be erased." }, { status: 400 });
     }
     const target = String(email).toLowerCase();
-    await disconnectInstance(target); // logout + delete WhatsApp everywhere
-    // Purge the rows we key by their email so nothing about them remains.
-    //
-    // EACH TABLE NAMES THE USER DIFFERENTLY. bookings/searches use `user_email`,
-    // feedback uses `reporter_email`, only wa_sessions uses `email`. The old
-    // loop filtered `email=eq.` on all four, so three of the deletes hit a
-    // column that does not exist - PostgREST 400s, sbDelete swallows it to
-    // `false`, and the route returned 200 claiming an erasure that left the
-    // user's bookings, searches and feedback fully intact. An "erase" that
-    // silently keeps most of the data is worse than an honest failure.
-    const userColumn: Record<string, string> = {
-      bookings: "user_email",
-      searches: "user_email",
-      feedback: "reporter_email",
-      wa_sessions: "email",
-    };
-    // Feedback has children (replies + images) keyed by feedback_id, not email,
-    // so clear them first from the user's own feedback rows.
-    const ownFeedback = await sbSelect<{ id: number }>(
-      "feedback",
-      `select=id&reporter_email=eq.${encodeURIComponent(target)}&limit=1000`
-    ).catch(() => [] as { id: number }[]);
-    if (ownFeedback.length) {
-      const ids = ownFeedback.map((r) => r.id).join(",");
-      await sbDelete("feedback_replies", `feedback_id=in.(${ids})`).catch(() => false);
-      await sbDelete("feedback_images", `feedback_id=in.(${ids})`).catch(() => false);
-    }
-    const purge: Record<string, boolean> = {};
-    for (const [table, col] of Object.entries(userColumn)) {
-      purge[table] = await sbDelete(table, `${col}=eq.${encodeURIComponent(target)}`);
-    }
-    const userDeleted = await deleteUser(target);
-    const failed = Object.entries(purge)
-      .filter(([, ok]) => !ok)
-      .map(([t]) => t);
-    if (failed.length || !userDeleted) {
+    const { eraseUserData } = await import("@/lib/privacy/erase");
+    const result = await eraseUserData(target);
+    if (result.failed.length || !result.userDeleted) {
       // Report the truth: some rows could not be purged. The owner can retry.
       return NextResponse.json(
         {
           error: `Partial erase - could not purge: ${[
-            ...failed,
-            ...(userDeleted ? [] : ["app_users"]),
+            ...result.failed,
+            ...(result.userDeleted ? [] : ["app_users"]),
           ].join(", ")}. Retry, or check Supabase.`,
           ...(await payload()),
         },
@@ -150,7 +144,16 @@ export async function POST(req: Request) {
     if (isOwner(String(email)) && action === "demote") {
       return NextResponse.json({ error: "The owner cannot be demoted." }, { status: 400 });
     }
-    await setAdmin(String(email), action === "promote");
+    // Read-back-and-verify, exactly like the status branch below: a role
+    // change whose vault write failed must answer 500, not fall through to a
+    // success payload that repaints the old role as the new one.
+    const roleWrote = await setAdmin(String(email), action === "promote");
+    if (!roleWrote) {
+      return NextResponse.json(
+        { error: "The role change did not persist. Check Supabase and retry." },
+        { status: 500 }
+      );
+    }
   } else if (status === "active" || status === "blocked") {
     if (isOwner(String(email))) {
       return NextResponse.json({ error: "The owner cannot be blocked." }, { status: 400 });

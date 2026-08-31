@@ -253,6 +253,29 @@ export async function sendPushToUser(
       }
     })
   );
+  // THE FAILURE THAT WAS INVISIBLE. ops/vitals.pushBreadcrumbs and the health
+  // panel both count `push-failed`, and nothing ever wrote it - so the push
+  // failure rate was a structural 0% while every registered endpoint could be
+  // rejecting ("Alerts on", zero pushes). A send where NO device received the
+  // notification is a traveller who was not told something: one durable row,
+  // carrying the first rejection so the doctor can say why. Partial delivery
+  // (some endpoints ok) is not a failure - the phone buzzed.
+  if (out.attempted > 0 && out.delivered === 0) {
+    const firstErr = out.results.find((r) => !r.ok);
+    void sbInsert("agent_events", [
+      {
+        kind: "push-failed",
+        user_email: email,
+        vendor_id: "",
+        vendor_name: "",
+        detail: JSON.stringify({
+          attempted: out.attempted,
+          status: firstErr?.status ?? null,
+          error: firstErr?.error ?? null,
+        }).slice(0, 300),
+      },
+    ]).catch(() => {});
+  }
   return out;
 }
 

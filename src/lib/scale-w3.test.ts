@@ -56,9 +56,12 @@ describe("scale #5 - per-provider RPM budgeter", () => {
   });
 
   it("the chain skips a spent rung BEFORE the 429, but never the last rung", () => {
+    // Wave 8: the consume goes through the fleet-backed path (Redis when
+    // REDIS_URL is set, the in-process bucket otherwise) - the skip-the-spent
+    // and never-the-last-rung semantics are unchanged.
     const ai = readCode("src/lib/ai.ts");
-    expect(ai).toMatch(/const \{ tryConsume \} = await import\("\.\/ai-rpm"\)/);
-    expect(ai).toMatch(/if \(idx < list\.length - 1 && !tryConsume\(cfg\.name\)\)/);
+    expect(ai).toMatch(/const \{ tryConsume, DEFAULT_RPM \} = await import\("\.\/ai-rpm"\)/);
+    expect(ai).toMatch(/if \(idx < list\.length - 1 && !\(await tryConsumeFleet\(cfg\.name\)\)\)/);
   });
 });
 

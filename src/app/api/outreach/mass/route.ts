@@ -524,6 +524,67 @@ export async function POST(req: Request) {
     }
     alreadyQueued.add(digits);
 
+    // THE COMPANY WIRE (Wave 6) - same doctrine as the single Ask: the
+    // thread's immutable stamp first, TRANSPORT_MODE second, Evolution by
+    // default. Resolved PER SHOP because a thread handed off earlier stays on
+    // its wire whatever the mode now says. Placed ABOVE the introductions
+    // budget and the stagger on purpose: a company-wire lead spends neither
+    // the traveller's Evolution intro allowance nor an anti-ban stagger slot -
+    // the WABA governor + per-agency admission inside dispatchHandoff are its
+    // pacing. A WABA send/hold settles this shop here (the dispatcher wrote
+    // the anchor + `contacted` funnel stamp itself); a dry-run rehearsal, an
+    // explicit fallback and a servable refusal all fall through to the legacy
+    // lanes below.
+    {
+      const { resolveTransport } = await import("@/lib/wa/transports");
+      const resolved = await resolveTransport(session.email, digits).catch(() => null);
+      if (resolved && resolved.transport.kind === "waba") {
+        const { advanceThreadStage } = await import("@/lib/funnel/stages");
+        await advanceThreadStage(
+          { userEmail: session.email, toNumber: digits, vendorId: String(v.id), vendorName: v.name, transport: "waba" },
+          "selected",
+          "mass outreach included this shop"
+        ).catch(() => {});
+        const { dispatchHandoff } = await import("@/lib/waba/dispatch");
+        const { rfqLabels } = await import("@/lib/waba/render");
+        const labels = rfqLabels(settledRfq);
+        const out = await dispatchHandoff({
+          userEmail: session.email,
+          agencyNumber: digits,
+          agencyName: v.name || undefined,
+          sessionId: batchId,
+          vehicle: labels.vehicle,
+          dates: labels.dates,
+          freeformText: opener.text,
+          rfq: settledRfq ?? undefined,
+          vendorId: String(v.id),
+        });
+        const rehearsal = out.outcome === "sent" && out.reason === "dry-run";
+        if (out.outcome === "sent" && !rehearsal) {
+          results.push({ id: v.id, sent: true, text: out.preview });
+          continue;
+        }
+        if (out.outcome === "held") {
+          results.push({
+            id: v.id,
+            sent: false,
+            queued: true,
+            queuedReason: out.reason,
+            reason: "queued",
+          });
+          continue;
+        }
+        if (out.outcome === "refused" && out.reason === "suppressed") {
+          results.push({
+            id: v.id,
+            sent: false,
+            reason: "not-contactable - this shop asked not to be contacted",
+          });
+          continue;
+        }
+      }
+    }
+
     // BUDGET: a brand-new shop beyond today's introductions budget gets the
     // honest tomorrow-morning slot - told to the user, never a fake ETA.
     if (isNewIntro && newIntrosLeft <= 0) {
@@ -620,6 +681,18 @@ export async function POST(req: Request) {
       continue;
     }
 
+    // FUNNEL LEDGER: this shop made the batch - intent, not delivery. No
+    // restart flag (unlike the single Ask): a mass run may sweep shops already
+    // mid-conversation, and forward-only keeps their real stage.
+    {
+      const { advanceThreadStage } = await import("@/lib/funnel/stages");
+      await advanceThreadStage(
+        { userEmail: session.email, toNumber: digits, vendorId: String(v.id), vendorName: v.name, transport: "evolution" },
+        "selected",
+        "mass outreach included this shop"
+      ).catch(() => {});
+    }
+
     // Shop 1: the immediate, fully-guarded send.
     const guard = await guardOutbound({
       senderKey: session.email,
@@ -634,6 +707,16 @@ export async function POST(req: Request) {
       meta: rowMeta,
     });
     if (!guard.allow) {
+      // FUNNEL LEDGER: parked by the guard - queued, not contacted (the drain
+      // stamps `contacted` when the row delivers).
+      if (guard.queuedUntil) {
+        const { advanceThreadStage } = await import("@/lib/funnel/stages");
+        await advanceThreadStage(
+          { userEmail: session.email, toNumber: digits, vendorId: String(v.id), vendorName: v.name, transport: "evolution" },
+          "contact_queued",
+          `RFQ parked: ${(guard.reason ?? "guard hold").slice(0, 80)}`
+        ).catch(() => {});
+      }
       results.push({
         id: v.id,
         sent: false,
@@ -659,6 +742,15 @@ export async function POST(req: Request) {
           meta: { ...rowMeta, reason: claim.kind === "duplicate" ? "batch-spacing" : "human pacing gap" },
         },
       ]).catch(() => {});
+      // FUNNEL LEDGER: parked on the batch's pacing spacing.
+      {
+        const { advanceThreadStage } = await import("@/lib/funnel/stages");
+        await advanceThreadStage(
+          { userEmail: session.email, toNumber: digits, vendorId: String(v.id), vendorName: v.name, transport: "evolution" },
+          "contact_queued",
+          "RFQ parked: batch spacing"
+        ).catch(() => {});
+      }
       results.push({
         id: v.id,
         sent: false,
@@ -671,11 +763,13 @@ export async function POST(req: Request) {
     }
 
     let ok = false;
+    let ambiguous = false;
     let reason: string | undefined;
     let sentChatLid = "";
     if (personal) {
       const r = await sendFromUser(session.email, digits, guard.text);
       ok = r.ok;
+      ambiguous = Boolean(r.ambiguous);
       reason = r.error;
       sentChatLid = lidKey(r.chatJid);
       if (r.rateLimited) {
@@ -698,6 +792,8 @@ export async function POST(req: Request) {
           direction: "outbound",
           raw: {
             channel: personal ? "personal-wa" : "cloud-api",
+            // Which wire carried it (one vocabulary: evolution | cloud | waba).
+            transport: personal ? "evolution" : "cloud",
             ok: true,
             ...meta,
             // The chat's privacy identity, when the provider reported one -
@@ -707,9 +803,26 @@ export async function POST(req: Request) {
           },
         },
       ]);
-    } else {
+      // FUNNEL LEDGER: the RFQ reached the shop (TRUTH RULE row above).
+      {
+        const { advanceThreadStage } = await import("@/lib/funnel/stages");
+        await advanceThreadStage(
+          {
+            userEmail: session.email,
+            toNumber: digits,
+            vendorId: String(v.id),
+            vendorName: v.name,
+            transport: personal ? "evolution" : "cloud",
+          },
+          "contacted",
+          "RFQ delivered to the shop"
+        ).catch(() => {});
+      }
+    } else if (!ambiguous) {
       await releaseSendClaim(session.email, digits, guard.text).catch(() => {});
     }
+    // AMBIGUOUS (status-0 timeout): keep the claim - the intro may have landed,
+    // and releasing it would let the next mass run re-introduce the same shop.
     results.push({
       id: v.id,
       sent: ok,

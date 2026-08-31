@@ -124,6 +124,12 @@ export async function POST(req: Request) {
     one_way_dropoff: b.oneWayDropOff ? String(b.oneWayDropOff).slice(0, 120) : null,
     driver_age: Number.isFinite(Number(b.driverAge)) ? Math.floor(Number(b.driverAge)) : null,
     scheduled_tz: "shop-local", // scheduled_at is the shop's wall-clock, no offset
+    // The negotiation this money record came from (bookings.ts) - without it a
+    // booking could never be traced to its conversation.
+    thread_key: (await import("@/lib/bookings")).bookingThreadKey(
+      session.email,
+      typeof b.whatsapp === "string" ? b.whatsapp : null
+    ),
     // THE TRIP MUST OUTLIVE THE SEARCH THAT FOUND IT.
     //
     // The shop's number, where it is, and what the traveller saved all lived in
@@ -154,6 +160,25 @@ export async function POST(req: Request) {
     // moment. Same shape as the setPlan defect documented in access.ts:341;
     // this path never got the same treatment.
     if (!stored) stored = await sbInsert("bookings", [bookingBase]);
+  }
+
+  // FUNNEL LEDGER: a stored booking is the funnel reaching `booked`. The
+  // traveller committing to this shop is explicit availability evidence, so it
+  // may pull the thread out of out_of_stock. No-op when the sheet carried no
+  // shop number (the ledger needs the thread key).
+  if (stored) {
+    const { advanceThreadStage } = await import("@/lib/funnel/stages");
+    await advanceThreadStage(
+      {
+        userEmail: session.email,
+        toNumber: typeof b.whatsapp === "string" ? b.whatsapp : "",
+        vendorId: String(b.vendorId ?? "") || undefined,
+        vendorName: String(b.vendorName),
+      },
+      "booked",
+      "booking stored",
+      { overridesOutOfStock: true }
+    ).catch(() => {});
   }
 
   if (!stored && supabaseConfigured()) {
@@ -204,6 +229,44 @@ export async function GET() {
     );
   }
   return NextResponse.json({ bookings: rows });
+}
+
+// The traveller's own lifecycle taps (bookings.ts doctrine: the funnel never
+// asserts what nobody witnessed - so picked_up/completed are recorded HERE,
+// from the person who witnessed them). Body: { id, action } with action one of
+// picked_up | completed | cancelled (+ optional reason). Ownership and the
+// forward-only rules live in advanceBooking's atomic PATCH filter.
+export async function PATCH(req: Request) {
+  const session = await getSession();
+  if (!session) return NextResponse.json({ error: "Sign in first." }, { status: 401 });
+  const body = await req.json().catch(() => ({}));
+  const id = Number(body.id);
+  const action = String(body.action ?? "");
+  if (!Number.isFinite(id) || id <= 0) {
+    return NextResponse.json({ error: "id required" }, { status: 400 });
+  }
+  const { advanceBooking } = await import("@/lib/bookings");
+  const nowIso = new Date().toISOString();
+  let res;
+  if (action === "picked_up") {
+    res = await advanceBooking(id, session.email, "picked_up", "traveller tapped 'I picked it up'", {
+      picked_up_at: nowIso,
+    });
+  } else if (action === "completed") {
+    res = await advanceBooking(id, session.email, "completed", "traveller tapped 'Trip completed'", {
+      completed_at: nowIso,
+    });
+  } else if (action === "cancelled") {
+    res = await advanceBooking(id, session.email, "cancelled", "traveller cancelled", {
+      cancelled_at: nowIso,
+      cancel_reason: String(body.reason ?? "").slice(0, 200) || null,
+    });
+  } else {
+    return NextResponse.json({ error: "unknown action" }, { status: 400 });
+  }
+  // advanced:false is an honest state, not an error: the booking is already
+  // at/past this status (a double tap, or another device won the race).
+  return NextResponse.json({ ok: res.advanced, status: res.row?.status ?? null });
 }
 
 // Remove a past booking from the caller's own history (item #10). Strictly

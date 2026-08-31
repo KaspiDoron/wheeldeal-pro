@@ -25,6 +25,7 @@
 // whichever one runs SAYS SO, so this can never again be invisible.
 
 import type { GraphIO, GraphTurnInput } from "./graph/types";
+import type { GraphTurnResult } from "./graph/engine";
 import type { SpteLiveResult } from "./spte/live";
 
 /** How the turn entered the system. Stamped on telemetry so a wakeup-driven
@@ -36,6 +37,9 @@ export interface ThreadTurnOutcome {
   engine: "v3" | "graph" | "none";
   /** SPTE's own result, when SPTE ran. */
   spte?: SpteLiveResult;
+  /** The graph engine's result, when IT ran (user actions + failover) - what
+   *  runUserAction's callers read delivery state from. */
+  graph?: GraphTurnResult;
   /** Why SPTE did not run, when it did not. */
   fallbackReason?: string;
 }
@@ -56,6 +60,24 @@ export async function runThreadTurn(
   io: GraphIO,
   entry: TurnEntry = "inbound"
 ): Promise<ThreadTurnOutcome> {
+  // USER ACTIONS ARE DISPATCHED, NOT FAILED OVER. The two user-action nodes
+  // (pickup-consent, closing-message) exist only in the graph engine - SPTE
+  // has no event kind for them, and pushing one through it would read the
+  // action as an empty shop message and answer with silence: the traveller's
+  // closing message would simply never send. This branch is the routing
+  // authority SAYING that, in one place, instead of runUserAction quietly
+  // bypassing the authority altogether (the TurnEntry "user-action" had zero
+  // producers). When SPTE grows these moves, this branch is what moves.
+  if (input.event.kind === "user-consent-pickup" || input.event.kind === "user-close-deal") {
+    const { graphEngineEnabled, runGraphTurn } = await import("./graph/engine");
+    if (await graphEngineEnabled()) {
+      const graph = await runGraphTurn(input, io);
+      await recordGraphTurn(io, input, "user-action", "user-action nodes live in the graph engine");
+      return { engine: "graph", graph, fallbackReason: "user-action" };
+    }
+    return { engine: "none", fallbackReason: "graph engine (user-action owner) disabled" };
+  }
+
   const { engineV3Enabled } = await import("./spte");
   if (await engineV3Enabled()) {
     try {
@@ -79,9 +101,9 @@ export async function runThreadTurn(
         .catch(() => {});
       const { graphEngineEnabled, runGraphTurn } = await import("./graph/engine");
       if (await graphEngineEnabled()) {
-        await runGraphTurn(input, io);
+        const graph = await runGraphTurn(input, io);
         await recordGraphTurn(io, input, entry, `spte-failover: ${reason}`);
-        return { engine: "graph", fallbackReason: reason };
+        return { engine: "graph", graph, fallbackReason: reason };
       }
       return { engine: "none", fallbackReason: reason };
     }
@@ -89,9 +111,9 @@ export async function runThreadTurn(
 
   const { graphEngineEnabled, runGraphTurn } = await import("./graph/engine");
   if (await graphEngineEnabled()) {
-    await runGraphTurn(input, io);
+    const graph = await runGraphTurn(input, io);
     await recordGraphTurn(io, input, entry, "ENGINE_V3 is switched off");
-    return { engine: "graph", fallbackReason: "ENGINE_V3 off" };
+    return { engine: "graph", graph, fallbackReason: "ENGINE_V3 off" };
   }
   return { engine: "none", fallbackReason: "both engines disabled" };
 }

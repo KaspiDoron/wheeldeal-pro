@@ -473,3 +473,72 @@ describe("the model finally sees both sides of the conversation", () => {
     expect(pass).toMatch(/you must NOT ask for it again/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// THE PHASE FIX (Wave 0): the live engine now PERSISTS the deal-term fields, so
+// a thread whose price, deposit and handover the shop has stated leaves
+// "negotiating" instead of being pinned there forever. Before, SPTE wrote none
+// of depositType/fulfillment/rounds/presented, so derivePhase could only ever
+// return "opening" or "negotiating" on live traffic.
+// ---------------------------------------------------------------------------
+describe("the live turn persists deal-term fields so the phase can advance", () => {
+  it("price + deposit + delivery -> the saved thread reaches complete", async () => {
+    const { io, saved } = mockIo({ fields: { firmCount: 0, toneDegraded: false, rounds: 2 } });
+    await runSpteLiveTurn(
+      input({
+        event: {
+          kind: "inbound-text",
+          threadKey: "user@x.com:63999",
+          userEmail: "user@x.com",
+          toDigits: "63999",
+          shopMessage: "250/day, cash deposit, we deliver to your hotel",
+          images: [],
+          audios: [],
+        },
+        usablePrice: 250,
+        extraction: {
+          found: true,
+          matchesSpec: true,
+          confidence: "high",
+          depositType: "cash",
+          delivers: true,
+        },
+      }),
+      io
+    );
+    const last = saved[saved.length - 1];
+    expect(last).toBeTruthy();
+    expect(last.fields.depositType).toBe("cash");
+    expect(last.fields.fulfillment).toBe("delivery");
+    expect(last.fields.pricePerDay).toBe(250);
+    expect(last.phase).toBe("complete");
+  });
+
+  it("price + deposit only -> collecting_terms, not stuck at negotiating", async () => {
+    const { io, saved } = mockIo();
+    await runSpteLiveTurn(
+      input({
+        event: {
+          kind: "inbound-text",
+          threadKey: "user@x.com:63999",
+          userEmail: "user@x.com",
+          toDigits: "63999",
+          shopMessage: "ok 250 per day, passport as deposit",
+          images: [],
+          audios: [],
+        },
+        usablePrice: 250,
+        extraction: {
+          found: true,
+          matchesSpec: true,
+          confidence: "high",
+          depositType: "passport",
+        },
+      }),
+      io
+    );
+    const last = saved[saved.length - 1];
+    expect(last.fields.depositType).toBe("passport");
+    expect(last.phase).toBe("collecting_terms");
+  });
+});

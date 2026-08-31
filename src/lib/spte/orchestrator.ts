@@ -173,7 +173,7 @@ async function settleConfirmState(ctx: TurnContext): Promise<ThreadDigest> {
   const waiting = waitingOn(ctx);
   const text = (ctx.inbound.text ?? "").trim();
   if (!waiting || ctx.deterministic || ctx.event !== "shop-message" || !text) {
-    return advanceConfirmState(ctx.thread.digest, []);
+    return advanceConfirmState(ctx.thread.digest, [], ctx.nowMs);
   }
   const resolved: ConfirmSubject[] = [];
   try {
@@ -188,7 +188,7 @@ async function settleConfirmState(ctx: TurnContext): Promise<ThreadDigest> {
     // The read owns its own failures; this is the last net, and its answer is
     // "keep waiting" - the same thing an outage means.
   }
-  return advanceConfirmState(ctx.thread.digest, resolved);
+  return advanceConfirmState(ctx.thread.digest, resolved, ctx.nowMs);
 }
 
 /** What the resolution read needs to know beyond the two texts: what we asked

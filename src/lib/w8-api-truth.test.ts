@@ -167,10 +167,13 @@ describe("W8 B13: degradation is in the response shape, not inferred from silenc
 
 describe("W8 verification: already fixed by wave 0", () => {
   it("B10 - the user erase names each table's OWN email column", () => {
-    const route = readCode("src/app/api/admin/users/route.ts");
-    expect(route).toMatch(/bookings: "user_email"/);
-    expect(route).toMatch(/feedback: "reporter_email"/);
-    expect(route).toMatch(/wa_sessions: "email"/);
+    // W9: the per-route column map became the erasure registry; the same
+    // per-table truths hold there, and the route walks it via eraseUserData.
+    const registry = readCode("src/lib/privacy/user-tables.ts");
+    expect(registry).toMatch(/table: "bookings", column: "user_email"/);
+    expect(registry).toMatch(/table: "feedback", column: "reporter_email"/);
+    expect(registry).toMatch(/table: "wa_sessions", column: "email"/);
+    expect(readCode("src/app/api/admin/users/route.ts")).toMatch(/eraseUserData/);
   });
 
   it("B11 - a custom_id hint may bootstrap, never downgrade, never lower", () => {

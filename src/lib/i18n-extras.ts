@@ -298,4 +298,16 @@ export const I18N_EXTRAS: string[] = [
   // ...and the two states the queue viewer composes itself.
   "Sending now",
   "Sending shortly",
+
+  // src/app/api/activity/route.ts STAGE_TITLES - the SPTE moves' feed titles,
+  // rendered as t(title). The other titles in that map double as literals
+  // elsewhere; these six exist only in the computed map, and they were once
+  // hand-added to the generated catalogue file - which a regeneration then
+  // silently dropped. Declared here so the generator owns them like the rest.
+  "Nudged the shop to keep things moving",
+  "Double-checked a detail with the shop",
+  "Made sure it's the exact vehicle you asked for",
+  "Asked what separates the options",
+  "Asked when it's back in stock",
+  "Recapped the deal for the shop to confirm",
 ];

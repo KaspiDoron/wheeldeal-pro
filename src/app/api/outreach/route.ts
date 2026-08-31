@@ -427,6 +427,98 @@ async function handlePost(req: Request) {
     }
   }
 
+  // FUNNEL LEDGER: the traveller explicitly asked THIS shop - intent, not
+  // delivery (delivery stamps `contacted` below / in the drain). restart:true
+  // because a fresh Ask on a shop from an earlier hunt genuinely restarts the
+  // funnel; the ledger still refuses to resurrect a hard terminal. Stamped
+  // AFTER the admission checks so a refused request records nothing, and
+  // BEFORE the guard so a queued send still shows the shop as selected.
+  if (kind === "rfq") {
+    const { advanceThreadStage } = await import("@/lib/funnel/stages");
+    await advanceThreadStage(
+      { userEmail: session.email, toNumber: digits, vendorId, vendorName, transport: "evolution" },
+      "selected",
+      "traveller asked this shop for a price",
+      { restart: true }
+    ).catch(() => {});
+  }
+
+  // THE COMPANY WIRE (Wave 6). resolveTransport says which wire carries this
+  // thread's FIRST contact: the thread's own stamp first (immutable), the
+  // owner's TRANSPORT_MODE second, Evolution by default. Only a cold RFQ may
+  // ride the WABA lead handoff - bargains and customs continue on the thread's
+  // existing wire, and the reply leg of a handed-off thread is still the
+  // traveller's own WhatsApp (the handoff's whole point is that the shop
+  // messages the traveller). This sits ABOVE guardOutbound/claimForSend on
+  // purpose: those govern the traveller's number, and a company-wire send is
+  // governed by the WABA governor + admission inside dispatchHandoff instead.
+  if (kind === "rfq") {
+    const { resolveTransport } = await import("@/lib/wa/transports");
+    const resolved = await resolveTransport(session.email, digits).catch(() => null);
+    if (resolved && resolved.transport.kind === "waba") {
+      const { dispatchHandoff } = await import("@/lib/waba/dispatch");
+      const { rfqLabels } = await import("@/lib/waba/render");
+      const labels = rfqLabels(settledRfq);
+      const out = await dispatchHandoff({
+        userEmail: session.email,
+        agencyNumber: digits,
+        agencyName: vendorName || undefined,
+        sessionId: body.campaign ? String(body.campaign) : undefined,
+        vehicle: labels.vehicle,
+        dates: labels.dates,
+        freeformText: outboundText,
+        rfq: settledRfq ?? undefined,
+        vendorId: vendorId || undefined,
+      });
+      // A DRY RUN rehearses the WABA funnel without contacting anyone - the
+      // traveller's real enquiry must still go out, so a rehearsal falls
+      // through to the legacy lane below (as do an explicit fallback-legacy
+      // and any refusal the traveller's own number can still serve).
+      const rehearsal = out.outcome === "sent" && out.reason === "dry-run";
+      if (out.outcome === "sent" && !rehearsal) {
+        // The truthful anchor row + the `contacted` funnel stamp were written
+        // inside the dispatcher; nothing here needs to double-record them.
+        return NextResponse.json({
+          allowed: true,
+          sent: true,
+          configured: true,
+          channel: "waba",
+          phone: to,
+          logged: true,
+          note: out.userMessage,
+          notice,
+        });
+      }
+      if (out.outcome === "held") {
+        // Contactable on the company wire, just not right now - the lead
+        // flushes free the moment the agency answers anyone. Queued, not
+        // failed; the move window stays spent (a queued move is a move).
+        return NextResponse.json({
+          allowed: true,
+          sent: false,
+          configured: true,
+          channel: "waba",
+          queued: true,
+          queuedReason: out.reason,
+          error: out.userMessage,
+          notice,
+        });
+      }
+      if (out.outcome === "refused" && out.reason === "suppressed") {
+        // No lane may contact this shop (fleet-wide opt-out). Say so here
+        // rather than letting the legacy guard repeat it with less context.
+        await releaseMove();
+        return NextResponse.json({
+          allowed: true,
+          sent: false,
+          suppressed: true,
+          error: "This shop asked not to be contacted - your agent will leave it alone.",
+        });
+      }
+      // fallback-legacy / other refusals / dry-run: the traveller's own wire.
+    }
+  }
+
   const { guardOutbound, afterSend } = await import("@/lib/wa-guard");
   const guard = await guardOutbound({
     senderKey: session.email,
@@ -460,6 +552,16 @@ async function handlePost(req: Request) {
   if (!guard.allow) {
     // A refusal with nothing queued means no move happened - give it back.
     if (!guard.queuedUntil) await releaseMove();
+    // FUNNEL LEDGER: the guard parked the RFQ - the shop is queued, not
+    // contacted (the drain stamps `contacted` when the row actually delivers).
+    if (guard.queuedUntil && kind === "rfq") {
+      const { advanceThreadStage } = await import("@/lib/funnel/stages");
+      await advanceThreadStage(
+        { userEmail: session.email, toNumber: digits, vendorId, vendorName, transport: "evolution" },
+        "contact_queued",
+        `RFQ parked: ${(guard.reason ?? "guard hold").slice(0, 80)}`
+      ).catch(() => {});
+    }
     const halted =
       (guard.reason ?? "").startsWith("engagement-halt") ||
       (guard.reason ?? "").startsWith("rfq-dedup");
@@ -496,6 +598,8 @@ async function handlePost(req: Request) {
     unconfirmed?: boolean;
     messageId?: string;
     chatJid?: string;
+    /** status-0 timeout - may have landed; keep the claim, never blind-retry. */
+    ambiguous?: boolean;
   } = {
     channel: "none",
     ok: false,
@@ -553,6 +657,15 @@ async function handlePost(req: Request) {
           },
         },
       ]).catch(() => {});
+      // FUNNEL LEDGER: parked on a pacing/sync hold - queued, not contacted.
+      if (kind === "rfq") {
+        const { advanceThreadStage } = await import("@/lib/funnel/stages");
+        await advanceThreadStage(
+          { userEmail: session.email, toNumber: digits, vendorId, vendorName, transport: "evolution" },
+          "contact_queued",
+          claim.kind === "pacing" ? "RFQ parked: human pacing gap" : "RFQ parked: sync-retry"
+        ).catch(() => {});
+      }
       return NextResponse.json({
         allowed: true,
         sent: false,
@@ -583,6 +696,7 @@ async function handlePost(req: Request) {
       unconfirmed: r.unconfirmed,
       messageId: r.messageId,
       chatJid: r.chatJid,
+      ambiguous: r.ambiguous,
     };
     if (r.rateLimited) {
       const { releaseSendClaim } = await import("@/lib/wa-guard");
@@ -619,13 +733,16 @@ async function handlePost(req: Request) {
   }
   if (result.ok) {
     await afterSend(session.email, digits);
-  } else {
+  } else if (!result.ambiguous) {
     // Failed send: release the idempotency claim so the user's retry tap is
     // not swallowed as a "duplicate" of the failure.
     const { releaseSendClaim } = await import("@/lib/wa-guard");
     await releaseSendClaim(session.email, digits, guardedMessage).catch(() => {});
     await releaseMove();
   }
+  // AMBIGUOUS (status-0 timeout): the message may already be on the shop's
+  // phone. Keep the idempotency claim and do NOT release the move - a retry
+  // that duplicated a delivered intro is exactly what this guards against.
 
   // TRUTH RULE: the outbound whatsapp_messages row is the record every
   // surface (thread peek, activity feed, deals dashboard, contacted counts)
@@ -643,7 +760,7 @@ async function handlePost(req: Request) {
     // message the shop had already received, and tapping again was the natural
     // response. The row is important, but it is not the send: record the loss
     // and answer honestly instead.
-    await sbInsert("whatsapp_messages", [
+    const wroteLog = await sbInsert("whatsapp_messages", [
       {
         // Provider id -> the webhook echo-check matches by id, never by body.
         wa_message_id: (result as { messageId?: string }).messageId ?? null,
@@ -653,6 +770,8 @@ async function handlePost(req: Request) {
         direction: "outbound",
         raw: {
           channel: result.channel,
+          // Which wire carried it (one vocabulary: evolution | cloud | waba).
+          transport: result.channel === "cloud-api" ? "cloud" : "evolution",
           sender: session.email,
           ok: true,
           // false when Evolution accepted the request but returned no delivery
@@ -674,26 +793,46 @@ async function handlePost(req: Request) {
           ...(lidKey(result.chatJid) ? { lid: lidKey(result.chatJid) } : {}),
         },
       },
-    ]).catch(async (e) => {
+    ]);
+    // sbInsert RETURNS false on failure - it never rejects, so the old .catch
+    // was dead code and `logged` reported true even when the row was lost.
+    // Check the boolean: the message left WhatsApp but our record of it did not
+    // reach the DB, so the reply may later die as `no-rfq-thread`.
+    if (!wroteLog) {
       logged = false;
       await sbInsert("agent_events", [
         {
           kind: "outbound-log-failed",
+          user_email: session.email,
+          to_number: digits,
           vendor_id: vendorId,
           vendor_name: vendorName,
           detail: JSON.stringify({
             email: session.email,
             channel: result.channel,
-            error: e instanceof Error ? e.message : String(e),
           }).slice(0, 800),
         },
       ]).catch(() => {});
-    });
+    }
+    // FUNNEL LEDGER: the message reached the shop (the TRUTH RULE row above is
+    // the evidence) - an RFQ is the contact, a bargain is the negotiation.
+    if (kind === "rfq" || kind === "bargain") {
+      const { advanceThreadStage } = await import("@/lib/funnel/stages");
+      await advanceThreadStage(
+        { userEmail: session.email, toNumber: digits, vendorId, vendorName, transport: "evolution" },
+        kind === "rfq" ? "contacted" : "negotiating",
+        kind === "rfq" ? "RFQ delivered to the shop" : "traveller-sent bargain delivered"
+      ).catch(() => {});
+    }
   } else {
-    // Keep the failure observable without polluting the "sent" record.
+    // Keep the failure observable without polluting the "sent" record. Stamp the
+    // join columns so the trail (messagePath) and the per-user safety signals
+    // can actually find it.
     await sbInsert("agent_events", [
       {
         kind: "send-failed",
+        user_email: session.email,
+        to_number: digits,
         vendor_id: vendorId,
         vendor_name: vendorName,
         detail: JSON.stringify({

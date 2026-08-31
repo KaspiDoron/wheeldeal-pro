@@ -4,7 +4,7 @@
 // code is confirmed. Durable in Supabase so it survives serverless restarts.
 
 import "server-only";
-import { createHash, randomInt } from "crypto";
+import { createHash, createHmac, randomInt } from "crypto";
 import {
   sbSelect,
   sbInsert,
@@ -29,7 +29,14 @@ export interface PendingSignup {
 }
 
 function hashCode(email: string, code: string): string {
-  return createHash("sha256").update(`${email.toLowerCase()}:${code}`).digest("hex");
+  // HMAC under SESSION_SECRET, not a bare sha256. A 6-digit code has only a
+  // million shapes, so anyone who can READ email_verifications could brute an
+  // unkeyed hash offline in milliseconds and finish someone else's signup.
+  // With the server secret in the key, a leaked row alone proves nothing.
+  // (The 256-bit reset tokens below stay plain sha256 - guessing a preimage
+  // there is not a real path.)
+  const key = process.env.SESSION_SECRET || "dev-insecure-secret-change-me";
+  return createHmac("sha256", key).update(`${email.toLowerCase()}:${code}`).digest("hex");
 }
 
 // In-memory fallback when Supabase is not configured (dev only).
@@ -167,4 +174,123 @@ async function clearRow(email: string): Promise<void> {
 /** Discard a pending verification (e.g. after too many wrong-code attempts). */
 export async function clearEmailVerification(email: string): Promise<void> {
   await clearRow(email.toLowerCase());
+}
+
+// ---- Password reset tokens ---------------------------------------------------
+//
+// A reset REQUEST must not change anything. The old flow overwrote the real
+// password with a temporary one at request time, which handed anyone who knew
+// an email address a lockout button (rate-limited, but still a lockout button)
+// - and once a password change started revoking sessions, it would have signed
+// the victim out of every device too. Token flow: the request only stores a
+// hash and emails a link; the password changes ONLY when the link's token is
+// redeemed, which proves control of the inbox.
+//
+// Rows share email_verifications, namespaced under `reset:<email>` so a
+// pending signup and a pending reset can never collide. Only the sha256 of the
+// token is stored - a database read cannot mint a working link.
+
+const RESET_TTL_MS = 30 * 60_000; // reset links live 30 minutes
+
+function resetKey(email: string): string {
+  return `reset:${email.toLowerCase()}`;
+}
+
+function hashResetToken(token: string): string {
+  return createHash("sha256").update(`reset:${token}`).digest("hex");
+}
+
+/**
+ * Create a reset token for an EXISTING account and email the link. The caller
+ * has already decided the account exists and handled enumeration concerns.
+ */
+export async function startPasswordReset(
+  emailRaw: string
+): Promise<{ ok: boolean; error?: string; cooldown?: boolean }> {
+  const email = emailRaw.toLowerCase();
+
+  const existing = await readRow(resetKey(email));
+  if (existing && Date.now() - existing.sentAt < RESEND_GAP_MS) {
+    return { ok: false, cooldown: true, error: "Please wait a few seconds before requesting another link." };
+  }
+
+  const { randomBytes } = await import("crypto");
+  const token = randomBytes(32).toString("base64url");
+  await writeRow(resetKey(email), {
+    codeHash: hashResetToken(token),
+    payload: "",
+    exp: Date.now() + RESET_TTL_MS,
+    sentAt: Date.now(),
+  });
+
+  const { resolveSiteOrigin } = await import("./site");
+  const origin = await resolveSiteOrigin();
+  const link = `${origin}/login?reset=${token}`;
+  const res = await sendEmail({
+    to: [email],
+    subject: "Reset your WheelDeal password",
+    html: `<div style="font-family:system-ui,Arial,sans-serif;max-width:420px;margin:auto">
+      <h2 style="color:#2f6fed">Reset your password</h2>
+      <p>Tap the button below to choose a new WheelDeal password. Your current
+      password keeps working until you do.</p>
+      <p style="text-align:center;margin:24px 0">
+        <a href="${link}" style="background:#2f6fed;color:#fff;font-weight:800;padding:14px 26px;border-radius:14px;text-decoration:none;display:inline-block">Choose a new password</a>
+      </p>
+      <p style="color:#6b7280;font-size:13px">This link expires in 30 minutes and works once.
+      If you did not request it, ignore this email - nothing changes.</p>
+    </div>`,
+  });
+  if (!res.sent) {
+    // The stored hash is harmless on its own (it expires, and no email carried
+    // the token), but do not leave a live token nobody can ever receive.
+    await clearRow(resetKey(email)).catch(() => undefined);
+    return {
+      ok: false,
+      error:
+        res.reason === "unconfigured"
+          ? "Email sending isn't configured yet (the owner must add an email key in Admin -> Keys). Your current password is unchanged - ask the app owner to reset it."
+          : `The reset email could not be sent (${res.error ?? "email error"}). Your current password is unchanged - try again in a minute.`,
+    };
+  }
+  return { ok: true };
+}
+
+/**
+ * Redeem a reset token: returns the account email exactly once, clearing the
+ * row. The caller sets the new password and signs the person in.
+ */
+export async function redeemPasswordReset(
+  token: string
+): Promise<{ ok: boolean; email?: string; error?: string }> {
+  const trimmed = String(token ?? "").trim();
+  if (!trimmed) return { ok: false, error: "This reset link is incomplete - request a new one." };
+  const hash = hashResetToken(trimmed);
+
+  let email: string | null = null;
+  let exp = 0;
+  if (supabaseConfigured()) {
+    const rows = await sbSelect<{ email: string; expires_at: string }>(
+      "email_verifications",
+      `select=email,expires_at&code_hash=eq.${encodeURIComponent(hash)}&limit=1`
+    );
+    const r = rows[0];
+    if (r?.email?.startsWith("reset:")) {
+      email = r.email.slice("reset:".length);
+      exp = Date.parse(r.expires_at);
+    }
+  } else {
+    for (const [key, row] of memStore()) {
+      if (key.startsWith("reset:") && row.codeHash === hash) {
+        email = key.slice("reset:".length);
+        exp = row.exp;
+        break;
+      }
+    }
+  }
+  if (!email) return { ok: false, error: "This reset link is invalid or was already used - request a new one." };
+  await clearRow(resetKey(email));
+  if (Date.now() > exp) {
+    return { ok: false, error: "This reset link expired - request a new one." };
+  }
+  return { ok: true, email };
 }

@@ -106,6 +106,19 @@ export function mergeComprehension(
 export const CONFIRM_WAIT_TURNS = 3;
 
 /**
+ * ...AND THE SECOND BOUND, IN WALL-CLOCK TIME.
+ *
+ * The turn bound only advances when a turn happens, and a shop that never
+ * replies causes no turns - so a confirm-question the shop ignored froze a
+ * priced thread FOREVER (the card said "double-checking with the shop"
+ * indefinitely). The live path stamps `pending[].at` when the confirm is
+ * delivered and arms one tick; any turn that sees this much wall time elapsed
+ * releases the wait exactly as the turn bound would - with the note that the
+ * shop never answered, never a claim that they confirmed.
+ */
+export const CONFIRM_WAIT_MS = 45 * 60_000;
+
+/**
  * ...AND HOW LONG A DOUBT MAY SIT UNASKED.
  *
  * A flagged subject blocks the fact from reading as known, so a doubt the engine
@@ -148,6 +161,13 @@ export function persistableDigest(d: ThreadDigest): Partial<ThreadDigest> {
     // The once-ever price-watch bound (owner report 5 #9). Durable or it is not
     // a bound at all - an in-memory flag would re-arm on every cold start.
     ...(d.priceWatchArmed ? { priceWatchArmed: true } : {}),
+    // Step 7-8 state: the recap latch + its clocks, and the silent-but-owing
+    // re-entry bound. Durable for the same reason as priceWatchArmed.
+    ...(d.recapSent ? { recapSent: true } : {}),
+    ...(typeof d.recapSentAt === "number" ? { recapSentAt: d.recapSentAt } : {}),
+    ...(typeof d.recapConfirmedAt === "number" ? { recapConfirmedAt: d.recapConfirmedAt } : {}),
+    ...(d.recapAmended ? { recapAmended: true } : {}),
+    ...(d.oweWatchArmed ? { oweWatchArmed: true } : {}),
     // THE MODEL'S READING OF THE THREAD (A4). Same argument as `pending` above,
     // one layer up: a stance, a refusal to go lower and a stated deposit are not
     // derivable from history by anything but the regexes that could not read
@@ -234,6 +254,11 @@ export function digestFromStored(stored: unknown): ThreadDigest {
     // ABSENT means not armed, so a row written before this field existed reads
     // as "no watch yet" rather than as a watch that already happened.
     priceWatchArmed: s.priceWatchArmed === true ? true : undefined,
+    recapSent: s.recapSent === true ? true : undefined,
+    recapSentAt: typeof s.recapSentAt === "number" ? s.recapSentAt : undefined,
+    recapConfirmedAt: typeof s.recapConfirmedAt === "number" ? s.recapConfirmedAt : undefined,
+    recapAmended: s.recapAmended === true ? true : undefined,
+    oweWatchArmed: s.oweWatchArmed === true ? true : undefined,
     // A ROW WRITTEN BEFORE `pending` EXISTED still knows it was waiting on
     // something - `awaitingConfirmation` is the card's mirror of exactly that -
     // so it is migrated forward rather than dropped. Threads mid-question at
@@ -266,6 +291,7 @@ function pendingFromStored(stored: unknown): PendingConfirm[] | undefined {
       // it holds the thread rather than letting an unconfirmed reading through.
       state: p.state === "open" ? "open" : "waiting",
       turns: typeof p.turns === "number" && p.turns >= 0 ? Math.floor(p.turns) : 0,
+      ...(typeof p.at === "number" ? { at: p.at } : {}),
     });
   }
   return out.length ? out : undefined;
@@ -288,7 +314,9 @@ function pendingFromStored(stored: unknown): PendingConfirm[] | undefined {
  */
 export function advanceConfirmState(
   d: ThreadDigest,
-  resolved: ConfirmSubject[] = []
+  resolved: ConfirmSubject[] = [],
+  /** Wall clock for the second bound. Absent on replays - pure turn arithmetic. */
+  nowMs?: number
 ): ThreadDigest {
   const pending = d.pending ?? [];
   if (!pending.length) return d;
@@ -298,7 +326,14 @@ export function advanceConfirmState(
     if (resolved.includes(p.subject)) continue;
     const turns = p.turns + 1;
     const bound = p.state === "waiting" ? CONFIRM_WAIT_TURNS : CONFIRM_OPEN_TURNS;
-    if (turns > bound) {
+    // The wall-clock bound (see CONFIRM_WAIT_MS): a shop that never replies
+    // causes no turns, so without this the wait never expired at all.
+    const clockExpired =
+      p.state === "waiting" &&
+      typeof nowMs === "number" &&
+      typeof p.at === "number" &&
+      nowMs - p.at > CONFIRM_WAIT_MS;
+    if (turns > bound || clockExpired) {
       // NOT "they confirmed it" - "we never found out". The distinction is the
       // whole point: the thread is released so it cannot deadlock, and the note
       // is what stops a later surface presenting the unconfirmed reading as the
@@ -318,6 +353,70 @@ export function advanceConfirmState(
       ? { subject: waiting.subject, question: waiting.question }
       : null,
   };
+}
+
+/**
+ * THE LOST-RACE UNION (graph/state.ts saveThreadState). When an inbound turn
+ * and a tick turn race on the optimistic version, the loser's re-merge used to
+ * keep only six counters and take `...winner.fields` for everything else -
+ * dropping the loser's WHOLE digest: the standing quote, the pending confirms,
+ * the model's durable comprehension, the once-flags. The tick turn wins the
+ * version; the inbound turn's freshly-read "deposit stated: 3000 cash"
+ * vanishes and the next turn re-asks.
+ *
+ * Union rules by what a wrong answer costs (mergeComprehension's own logic,
+ * one level up): facts union (capped), counters max, latches OR, the quote and
+ * states prefer OURS (the losing write just processed the newest event),
+ * pending doubts union by subject preferring ours.
+ */
+export function mergeStoredDigests(winnerRaw: unknown, oursRaw: unknown): Partial<ThreadDigest> {
+  const w = digestFromStored(winnerRaw);
+  const o = digestFromStored(oursRaw);
+  const facts = [...w.facts];
+  for (const f of o.facts) {
+    if (!facts.some((x) => x.toLowerCase() === f.toLowerCase())) facts.push(f);
+  }
+  const pending: PendingConfirm[] = [...(o.pending ?? [])];
+  for (const p of w.pending ?? []) {
+    if (!pending.some((x) => x.subject === p.subject)) pending.push(p);
+  }
+  const waiting = pending.find((p) => p.state === "waiting");
+  const comp: DurableComprehension | undefined =
+    w.comprehension || o.comprehension
+      ? {
+          ...(w.comprehension ?? {}),
+          ...(o.comprehension ?? {}),
+          // Events accumulate and latches only go true, whoever holds them.
+          ...(Math.max(w.comprehension?.firmTurns ?? 0, o.comprehension?.firmTurns ?? 0) > 0
+            ? { firmTurns: Math.max(w.comprehension?.firmTurns ?? 0, o.comprehension?.firmTurns ?? 0) }
+            : {}),
+          ...(w.comprehension?.depositStated || o.comprehension?.depositStated
+            ? { depositStated: true }
+            : {}),
+          ...(w.comprehension?.handoverCostKnown || o.comprehension?.handoverCostKnown
+            ? { handoverCostKnown: true }
+            : {}),
+          ...(w.comprehension?.closed || o.comprehension?.closed ? { closed: true } : {}),
+        }
+      : undefined;
+  return persistableDigest({
+    facts: facts.slice(Math.max(0, facts.length - MAX_FACTS)),
+    quotedPricePerDay: o.quotedPricePerDay ?? w.quotedPricePerDay,
+    round: Math.max(w.round, o.round),
+    tone: o.tone ?? w.tone,
+    comprehension: comp,
+    confirmAsked: [...new Set([...(w.confirmAsked ?? []), ...(o.confirmAsked ?? [])])],
+    awaitingConfirmation: waiting
+      ? { subject: waiting.subject, question: waiting.question }
+      : null,
+    pending: pending.length ? pending : undefined,
+    priceWatchArmed: w.priceWatchArmed || o.priceWatchArmed || undefined,
+    oweWatchArmed: w.oweWatchArmed || o.oweWatchArmed || undefined,
+    recapSent: w.recapSent || o.recapSent || undefined,
+    recapSentAt: o.recapSentAt ?? w.recapSentAt,
+    recapConfirmedAt: o.recapConfirmedAt ?? w.recapConfirmedAt,
+    recapAmended: w.recapAmended || o.recapAmended || undefined,
+  });
 }
 
 /**
@@ -454,5 +553,16 @@ export function mergeDigest(
     confirmAsked,
     awaitingConfirmation,
     pending: pending.length ? pending : undefined,
+    // Step 7-8 state, carried - and the once-per-thread recap latch, set HERE
+    // (deterministically, so golden replays see it) rather than on the wall
+    // clock the live path stamps beside it.
+    ...(prev.recapSent || artifact.move === "verify-recap" ? { recapSent: true } : {}),
+    ...(typeof prev.recapSentAt === "number" ? { recapSentAt: prev.recapSentAt } : {}),
+    ...(typeof prev.recapConfirmedAt === "number"
+      ? { recapConfirmedAt: prev.recapConfirmedAt }
+      : {}),
+    ...(prev.recapAmended ? { recapAmended: true } : {}),
+    ...(prev.oweWatchArmed ? { oweWatchArmed: true } : {}),
+    ...(prev.priceWatchArmed ? { priceWatchArmed: true } : {}),
   };
 }

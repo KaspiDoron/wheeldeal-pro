@@ -15,7 +15,15 @@ interface DealMemoryRow {
   duration_days: number | null;
 }
 
-/** Bank a won deal so future sessions learn from it. Called on deal close. */
+/** Bank a won deal so future sessions learn from it. Called on deal close.
+ *
+ * W9: `userEmail` decides the `insights_ok` stamp - whether this row may feed
+ * COMMERCIAL aggregate datasets - from the person's `commercial_insights`
+ * consent at the moment of writing. The row itself stays user-free (that is
+ * deal_memory's whole shape); the stamp is how a consent decision survives
+ * into a store that cannot be filtered by person afterwards. The in-product
+ * prior (dealPrior) reads every row regardless: bargaining with the market's
+ * own history is the product working, not a data sale. */
 export async function rememberDeal(args: {
   regionKey: string;
   rfq: StructuredRFQ;
@@ -23,19 +31,36 @@ export async function rememberDeal(args: {
   pricePerDay: number;
   listPrice?: number;
   tactic?: string;
+  userEmail?: string;
 }): Promise<void> {
-  await sbInsert("deal_memory", [
-    {
-      region_key: args.regionKey,
-      vehicle_key: vehicleKeyFor(args.rfq),
-      currency: args.currency,
-      price_per_day: Math.round(args.pricePerDay),
-      list_price: args.listPrice ? Math.round(args.listPrice) : null,
-      duration_days: args.rfq.durationDays,
-      tactic: args.tactic ?? null,
-      source: "deal",
-    },
-  ]).catch(() => {});
+  let insightsOk = false;
+  if (args.userEmail) {
+    try {
+      const { consentFor } = await import("../consent");
+      insightsOk = await consentFor(args.userEmail, "commercial_insights");
+    } catch {
+      insightsOk = false; // consent you cannot read is consent you do not have
+    }
+  }
+  const row = {
+    region_key: args.regionKey,
+    vehicle_key: vehicleKeyFor(args.rfq),
+    currency: args.currency,
+    price_per_day: Math.round(args.pricePerDay),
+    list_price: args.listPrice ? Math.round(args.listPrice) : null,
+    duration_days: args.rfq.durationDays,
+    tactic: args.tactic ?? null,
+    source: "deal",
+  };
+  const landed = await sbInsert("deal_memory", [{ ...row, insights_ok: insightsOk }]).catch(
+    () => false
+  );
+  // Pre-migration fallback: a database without the column 400s the whole
+  // insert, and losing the learning row to a pending migration would be the
+  // worse trade. The legacy shape has no stamp, so it can never feed the
+  // commercial rollup (which reads insights_ok=is.true only) - the fail
+  // direction protects the person, not the dataset.
+  if (!landed) await sbInsert("deal_memory", [row]).catch(() => {});
 }
 
 /**

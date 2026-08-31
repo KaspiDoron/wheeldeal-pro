@@ -1,4 +1,5 @@
 import { outboxToKeyPatch } from "../wa/outbox-columns";
+import type { SendResult } from "../wa/transport";
 import { finishBeforeResponse } from "../after";
 // The digraph execution engine - one serverless invocation per event.
 //
@@ -1564,7 +1565,7 @@ export type LiveSend = (
    * batch starve its own negotiation.
    */
   lane?: "intro" | "reply"
-) => Promise<{ ok: boolean; error?: string; unconfirmed?: boolean }>;
+) => Promise<SendResult>;
 
 export function liveGraphIO(send: LiveSend): GraphIO {
   return {
@@ -1993,7 +1994,26 @@ export function liveGraphIO(send: LiveSend): GraphIO {
       // shops never serialize on each other); a cold intro keeps per-sender.
       const sendKind = (meta as { kind?: string } | undefined)?.kind;
       const isReplySend = sendKind !== "rfq" && sendKind !== "custom";
-      const claim = await claimForSend(senderKey, toNumber, verdict.text, true, isReplySend);
+      let claim = await claimForSend(senderKey, toNumber, verdict.text, true, isReplySend);
+      // WAIT, DON'T RE-PARK: the lane a REPLY loses frees in seconds (the
+      // claim says exactly when), and this turn is already in-request with
+      // its own deadline - sleeping to the edge and re-claiming ONCE delivers
+      // the reply now instead of parking it 20-40s out and paying the next
+      // drain's whole pipeline. One wait, bounded to a single lane window;
+      // cold intros never wait (their minute-scale holds are the anti-ban
+      // point, not an artefact).
+      if (
+        !claim.ok &&
+        claim.kind === "pacing" &&
+        isReplySend &&
+        typeof claim.retryAtMs === "number"
+      ) {
+        const waitMs = claim.retryAtMs - Date.now();
+        if (waitMs > 0 && waitMs <= 8_000) {
+          await new Promise((res) => setTimeout(res, waitMs + 120 + Math.random() * 380));
+          claim = await claimForSend(senderKey, toNumber, verdict.text, true, isReplySend);
+        }
+      }
       if (!claim.ok) {
         if (claim.kind === "duplicate") {
           return {
@@ -2010,16 +2030,21 @@ export function liveGraphIO(send: LiveSend): GraphIO {
         const notBefore = isReplySend
           ? new Date(Date.now() + 20_000 + Math.round(Math.random() * 20_000)).toISOString()
           : jitteredHold(Date.now(), 1, 2);
-        await sbInsert("wa_outbox", [
-          {
-            sender_key: senderKey,
-            to_number: toNumber,
-            ...(await outboxToKeyPatch(toNumber)),
-            body: verdict.text,
-            not_before: notBefore,
-            meta: { ...meta, reason: claim.kind === "pacing" ? "human pacing gap" : "sync-retry" },
-          },
-        ]).catch(() => {});
+        // parkOutboxOnce, NOT a raw insert: the partial unique index rejects a
+        // second pending auto row for this (shop, kind), and the bare insert
+        // swallowed that 409 while the caller reported "queued" - a reply that
+        // then never existed anywhere. The park helper dedups against the
+        // existing row, arms the drain, and reports failure durably.
+        const { parkOutboxOnce } = await import("../wa/park");
+        await parkOutboxOnce({
+          senderKey,
+          toNumber,
+          body: verdict.text,
+          notBeforeMs: Date.parse(notBefore),
+          meta: { ...meta, reason: claim.kind === "pacing" ? "human pacing gap" : "sync-retry" },
+          // The text already went through guardOutbound's humanize pass.
+          alreadyHumanized: true,
+        }).catch(() => {});
         return {
           delivered: "queued",
           detail: claim.kind === "pacing" ? "held for human pacing" : "held - retrying sync",
@@ -2031,13 +2056,17 @@ export function liveGraphIO(send: LiveSend): GraphIO {
       // treated exactly like a failed send: release the idempotency claim and
       // re-queue. Without this the claim leaked and the identical reply was then
       // refused as a `duplicate` for the whole claim-GC horizon (audit DEFECT 4).
-      let result: { ok: boolean; error?: string; unconfirmed?: boolean };
+      let result: SendResult;
       try {
         result = await send(senderKey, toNumber, verdict.text);
       } catch (e) {
         result = { ok: false, error: e instanceof Error ? e.message : "send threw" };
       }
-      if (!result.ok) await releaseSendClaim(senderKey, toNumber, verdict.text).catch(() => {});
+      // Keep the claim on an AMBIGUOUS failure - it may have landed, and
+      // releasing it lets a duplicate follow (OR11 H2.2, now honoured on this
+      // path too, not only in the drain).
+      if (!result.ok && !result.ambiguous)
+        await releaseSendClaim(senderKey, toNumber, verdict.text).catch(() => {});
       if (result.ok) {
         await afterSend(senderKey, toNumber);
         await sbInsert("whatsapp_messages", [
@@ -2177,7 +2206,12 @@ export async function drainGraphWakeups(
     // The heartbeat still calls this with no scope - draining everyone is a
     // worker's job, not a poll's.
     const ownerFilter = opts?.userEmail
-      ? `&thread_key=like.${encodeURIComponent(`${opts.userEmail}:*`)}`
+      ? // LIKE-ESCAPED: '_' in an email is a single-char wildcard, so
+        // "a_b@x.com" scoped-drained "aXb@x.com"'s wakeups too - a cross-user
+        // reach the exact-match purges were already fixed for.
+        `&thread_key=like.${encodeURIComponent(
+          `${opts.userEmail.replace(/([\\%_])/g, "\\$1")}:*`
+        )}`
       : "";
     const due = await sbSelect<WakeupRowDb>(
       "graph_wakeups",
@@ -2222,6 +2256,26 @@ export async function drainGraphWakeups(
         if (row.kind === "tick") {
           const input = await buildTurnFromThread(row.thread_key, "tick");
           if (input) {
+            // PER-THREAD MUTUAL EXCLUSION - the same lock the inbound path
+            // takes (agent-loop claimThreadTurn). Without it a tick and an
+            // inbound reply on the SAME thread genuinely raced: two composes,
+            // two sends, and the lost-race state merge dropping one side's
+            // digest - the exact double-send class the turn lock was built to
+            // stop, reachable through the one entry point that skipped it.
+            // A lost claim re-parks the wakeup ~90s out (no retry burned -
+            // the sibling turn IS the thread advancing).
+            const sep = row.thread_key.lastIndexOf(":");
+            const lockOwner = sep > 0 ? row.thread_key.slice(0, sep) : "";
+            const lockDigits = sep > 0 ? row.thread_key.slice(sep + 1) : row.thread_key;
+            const { claimThreadTurn, releaseThreadTurn } = await import("../wa/turn-lock");
+            const turnClaimedAt = Date.now();
+            const turn = await claimThreadTurn(lockOwner, lockDigits, turnClaimedAt);
+            if (turn === "lost") {
+              await sbUpdate("graph_wakeups", `id=eq.${row.id}`, {
+                not_before: new Date(Date.now() + 90_000).toISOString(),
+              }).catch(() => {});
+              return;
+            }
             // THE SAME BRAIN THE INBOUND PATH USES. This drain used to call
             // runGraphTurn directly, so every scheduled follow-up - the quiet-
             // thread return, the strategic wait - ran the engine that has none
@@ -2237,9 +2291,20 @@ export async function drainGraphWakeups(
             // hunt with forty threads keeps composing forever. `input.ctx.sender`
             // is the same identity the inbound turn uses.
             const { runWithAiBudget } = await import("../ai-budget");
-            await runWithAiBudget(input.ctx.sender ?? "", () =>
-              runThreadTurn(input, liveGraphIO(send), "wakeup")
-            );
+            try {
+              const routed = await runWithAiBudget(input.ctx.sender ?? "", () =>
+                runThreadTurn(input, liveGraphIO(send), "wakeup")
+              );
+              // A tick that sent nothing gives the thread back early, exactly
+              // like the inbound path - a silent wakeup must not freeze the
+              // shop's next message for the rest of the window.
+              if (routed.spte?.delivered === "silent" || routed.engine === "none") {
+                await releaseThreadTurn(lockOwner, lockDigits, turnClaimedAt).catch(() => {});
+              }
+            } catch (e) {
+              await releaseThreadTurn(lockOwner, lockDigits, turnClaimedAt).catch(() => {});
+              throw e;
+            }
             ran++;
           }
           // input === null -> the thread was cancelled / taken over / closed:
@@ -2291,7 +2356,20 @@ export async function drainGraphWakeups(
       // SUCCESS (or a dead/cancelled thread that yielded no input): the follow-up
       // is done, so retire the leased row. A mid-run death never reaches here,
       // which is the whole point - the row survives to be reclaimed.
-      await sbDelete("graph_wakeups", `id=eq.${row.id}`).catch(() => {});
+      //
+      // RETRIED, because a delete that quietly fails leaves a COMPLETED turn's
+      // lease to elapse and re-fire it - a duplicate follow-up message to a
+      // real shop. One retry; if the store still refuses, park the row far
+      // out with a done marker instead of leaving a live time bomb.
+      const retired =
+        (await sbDelete("graph_wakeups", `id=eq.${row.id}`).catch(() => false)) ||
+        (await sbDelete("graph_wakeups", `id=eq.${row.id}`).catch(() => false));
+      if (!retired) {
+        await sbUpdate("graph_wakeups", `id=eq.${row.id}`, {
+          not_before: new Date(Date.now() + 365 * 24 * 3600_000).toISOString(),
+          payload: { ...(row.payload ?? {}), done: true },
+        }).catch(() => {});
+      }
     };
     // Bounded pool: at most CONCURRENCY composes in flight at once.
     const CONCURRENCY = 6;
@@ -2542,5 +2620,26 @@ export async function runUserAction(args: {
   // User actions send promptly - the traveller is watching the screen.
   input.humanDelay = false;
   input.shopOpenNow = args.shopOpenNow;
-  return runGraphTurn(input, liveGraphIO(args.send));
+  // THE SAME PER-THREAD LOCK EVERY OTHER ENTRY TAKES. A user close racing an
+  // agent compose on the same thread was the one remaining interleave. The
+  // traveller is watching, so a lost claim WAITS one beat and retries rather
+  // than refusing; if the sibling still holds it, proceed - the send guard's
+  // per-recipient pacing serializes the wire, and a traveller's deliberate
+  // action outranks an automated turn.
+  {
+    const { claimThreadTurn } = await import("../wa/turn-lock");
+    const claim = await claimThreadTurn(args.userEmail, args.toDigits);
+    if (claim === "lost") {
+      await new Promise((r) => setTimeout(r, 3_000));
+      await claimThreadTurn(args.userEmail, args.toDigits);
+    }
+  }
+  // THROUGH THE ROUTING AUTHORITY, like every other entry point. engine-route
+  // dispatches user-action kinds to the graph engine deliberately (its nodes
+  // own them) - the point is that the dispatch is SAID in one place, not that
+  // this call bypasses it. The declared TurnEntry "user-action" finally has
+  // its producer.
+  const { runThreadTurn } = await import("../engine-route");
+  const out = await runThreadTurn(input, liveGraphIO(args.send), "user-action");
+  return out.graph ?? null;
 }

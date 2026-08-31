@@ -280,4 +280,14 @@ describe("the traveller is never told 'All good' from a reading we did not get",
     // state there would have been a compile error, which is the point.
     expect(readCode("src/lib/progress.ts")).toMatch(/\| "unknown"/);
   });
+
+  it("the 'Sent - reply lands here' status is a muted chip, not a green CTA", () => {
+    const card = readCode("src/components/VendorCard.tsx");
+    // askDone (and queued) get the muted, non-interactive treatment; only a
+    // live "Ask for price" wears bg-savings. The green-button trap is gone.
+    expect(card).toMatch(/\(queuedActive \|\| askDone\) && rfqState !== "sending"/);
+    expect(card).toMatch(/cursor-default bg-card2 text-soft/);
+    // Once a reply has landed the passive label stops promising one.
+    expect(card).toMatch(/vendor\.lastInboundAt \? t\("Reply received"\)/);
+  });
 });

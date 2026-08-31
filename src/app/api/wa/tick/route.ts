@@ -19,13 +19,17 @@ import { sbSelect, sbInsertClaim, sbDelete } from "@/lib/runtime-config";
 // The activity polls + external ping cron remain independent backstops.
 
 const MAX_HOPS = 40; // ~30-40 min of autonomous progression per kick
-const IN_CALL_BUDGET_MS = 45_000; // stay well inside maxDuration=60
+// Stay well inside Cloud Run's --timeout 90 (the REAL ceiling; `export const
+// maxDuration` is a Vercel-only hint that does nothing on standalone Next -
+// deploy-gcp.yml says so and this comment used to claim the inert guard).
+const IN_CALL_BUDGET_MS = 45_000;
 const CHAIN_HORIZON_MS = 10 * 60_000; // chain only for work due soon
 
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const expected = await webhookToken();
-  if (!expected || url.searchParams.get("token") !== expected) {
+  const { tokenMatches } = await import("@/lib/wa/webhook-token");
+  if (!expected || !tokenMatches(url.searchParams.get("token"), expected)) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
   const hop = Math.max(0, Number(url.searchParams.get("hop")) || 0);
