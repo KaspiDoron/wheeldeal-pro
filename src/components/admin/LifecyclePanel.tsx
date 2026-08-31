@@ -25,6 +25,12 @@ interface Stall {
   label: string;
   stuck: number;
 }
+interface StallBasis {
+  minEngaged: number;
+  minReplies: number;
+  /** Accounts the gate does not apply to at all - owner and TEST_MODE testers. */
+  exempt: number;
+}
 interface Report {
   generatedAt: number;
   stages: Stage[];
@@ -33,8 +39,10 @@ interface Report {
     last7d: number | null;
     medianHours: number | null;
     p90Hours: number | null;
+    sampleN: number | null;
   };
   stalls: Stall[] | null;
+  stallBasis: StallBasis | null;
   holdout: {
     size: number | null;
     converted: number | null;
@@ -88,6 +96,10 @@ export function LifecyclePanel() {
   // is noise dressed as evidence. Below the floor the panel shows the fraction
   // and says so, rather than printing a percentage nobody should act on.
   const MIN_ARM = 20;
+  // Quantiles need a distribution. Under this many unlocked accounts a median
+  // and a p90 are the same one or two data points wearing statistical clothes.
+  const MIN_WARM_SAMPLE = 5;
+  const thinSample = d.warm.sampleN !== null && d.warm.sampleN < MIN_WARM_SAMPLE;
   const rate = (num: number | null, den: number | null) =>
     num === null || den === null || den === 0 ? null : num / den;
 
@@ -168,16 +180,20 @@ export function LifecyclePanel() {
         <div className="text-[13px] font-extrabold text-strong">Time to unlock</div>
         <div className="mt-2 grid grid-cols-2 gap-2">
           {[
-            { k: "Warmed up", v: d.warm.total as number | null, s: "" },
-            { k: "Last 7 days", v: d.warm.last7d, s: "" },
-            { k: "Median", v: d.warm.medianHours, s: "h" },
-            { k: "p90", v: d.warm.p90Hours, s: "h" },
+            { k: "Warmed up", v: d.warm.total as number | null, s: "", q: false },
+            { k: "Last 7 days", v: d.warm.last7d, s: "", q: false },
+            { k: "Median", v: d.warm.medianHours, s: "h", q: true },
+            { k: "p90", v: d.warm.p90Hours, s: "h", q: true },
           ].map((x) => (
             <div key={x.k} className="rounded-xl bg-card2 p-2">
               <div className="text-[10px] font-bold uppercase tracking-wide text-faint">{x.k}</div>
               <div className="text-[16px] font-extrabold text-strong">
                 {x.s === "h" ? (
-                  hours(x.v) ?? <span className="text-faint">&mdash;</span>
+                  thinSample && x.q ? (
+                    <span className="text-faint">&mdash;</span>
+                  ) : (
+                    hours(x.v) ?? <span className="text-faint">&mdash;</span>
+                  )
                 ) : (
                   <Num v={x.v} />
                 )}
@@ -185,6 +201,17 @@ export function LifecyclePanel() {
             </div>
           ))}
         </div>
+        {/* A MEDIAN AND A p90 THAT ARE THE SAME NUMBER CAME FROM ONE SAMPLE.
+            Production printed "42d / 42d" off n=1 and it read as a settled
+            fact about the gate. Below the floor the quantiles are withheld and
+            the sample size is named instead - the honest version of "we do not
+            know yet". */}
+        {d.warm.sampleN !== null && thinSample && (
+          <p className="mt-1.5 text-[11px] font-bold text-warn">
+            Only {d.warm.sampleN} account{d.warm.sampleN === 1 ? " has" : "s have"} unlocked so
+            far - too few to quote a median or a p90.
+          </p>
+        )}
         <p className="mt-1.5 text-[11px] font-bold text-soft">
           If p90 is longer than a typical trip, the gate is too tight - loosen a threshold
           in Keys.
@@ -197,6 +224,21 @@ export function LifecyclePanel() {
           the threshold is wrong. */}
       <div className="surface rounded-blob p-3">
         <div className="text-[13px] font-extrabold text-strong">Where people stall</div>
+        {/* The buckets are measured against the LIVE gate, and gate-exempt
+            accounts are named rather than counted as stuck - they were sitting
+            in "Has not connected WhatsApp" forever because the gate never
+            stamps them, turning the beta roster into an onboarding problem. */}
+        {d.stallBasis && (
+          <p className="mt-0.5 text-[11px] text-faint">
+            Measured against the gate as configured now: {d.stallBasis.minEngaged} shops
+            reached, {d.stallBasis.minReplies} repl
+            {d.stallBasis.minReplies === 1 ? "y" : "ies"}.
+            {d.stallBasis.exempt > 0 &&
+              ` ${d.stallBasis.exempt} account${
+                d.stallBasis.exempt === 1 ? " is" : "s are"
+              } exempt (owner, testers) and not counted below.`}
+          </p>
+        )}
         {d.stalls === null ? (
           <p className="mt-1 text-[12px] font-bold text-faint">
             &mdash; could not be read.

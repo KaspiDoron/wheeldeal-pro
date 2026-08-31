@@ -52,6 +52,15 @@ function ownerEmailLocal(): string {
   return (process.env.OWNER_EMAIL || "kaspidoron@gmail.com").trim().toLowerCase();
 }
 
+/**
+ * The owner's address, normalised. Exported for surfaces that must EXCLUDE the
+ * owner from a population - the monetization panel's stall buckets, where an
+ * account the warm-up gate does not apply to is not a stalled account.
+ */
+export function ownerEmail(): string {
+  return ownerEmailLocal();
+}
+
 /** The gate is ON unless explicitly disabled - safe by default for the beta. */
 export function betaLockEnabled(): boolean {
   return (process.env.BETA_LOCK ?? "on").trim().toLowerCase() !== "off";

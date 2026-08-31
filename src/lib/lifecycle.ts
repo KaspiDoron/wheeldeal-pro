@@ -54,6 +54,12 @@ export interface StallTerm {
   stuck: number;
 }
 
+/** The gate's live thresholds, so the stall buckets and the gate card agree. */
+export interface StallThresholds {
+  minEngaged: number;
+  minReplies: number;
+}
+
 export interface LifecycleReport {
   generatedAt: number;
   stages: FunnelStage[];
@@ -63,9 +69,29 @@ export interface LifecycleReport {
     /** Hours from signup to unlock. The number that says if the gate is right. */
     medianHours: Maybe<number>;
     p90Hours: Maybe<number>;
+    /**
+     * How many accounts those two quantiles were computed FROM.
+     *
+     * Production printed "median 42d / p90 42d" off a single warmed account.
+     * Two identical numbers from n=1 is not a distribution, and the panel has
+     * no way to know that unless the report says so.
+     */
+    sampleN: Maybe<number>;
   };
   /** Where the non-warm population is stuck, by first unmet term. */
   stalls: Maybe<StallTerm[]>;
+  /**
+   * The thresholds the stall buckets were measured against, and how many
+   * accounts the gate does not apply to at all.
+   *
+   * The buckets used to hard-code `< 3` and `< 1` while the card directly
+   * above them printed the OWNER-CONFIGURED numbers - so loosening the gate
+   * silently stopped the two screens from describing the same rule. And
+   * gate-exempt accounts (the owner, TEST_MODE testers) are never stamped
+   * `warmed_up_at`, so they sat in "Has not connected WhatsApp" forever and
+   * inflated the first bucket with people who were never gated.
+   */
+  stallBasis: Maybe<StallThresholds & { exempt: number }>;
   holdout: {
     size: Maybe<number>;
     converted: Maybe<number>;
@@ -115,7 +141,7 @@ function quantile(sorted: number[], q: number): number {
 export async function lifecycleReport(): Promise<LifecycleReport> {
   const degraded: string[] = [];
   const now = Date.now();
-  const weekAgo = new Date(now - 7 * 864e5).toISOString();
+  const weekAgoMs = now - 7 * 864e5;
 
   // Five bounded reads. Each answers one stage of the funnel; none of them
   // fans out per user.
@@ -138,9 +164,13 @@ export async function lifecycleReport(): Promise<LifecycleReport> {
       degraded,
       "searches"
     ),
+    // `to_tail`/`to_number` come back so shops can be DE-DUPLICATED the way the
+    // gate itself does (warmup.ts engagement()): one shop contacted on two
+    // rows is one shop, and counting rows made the stall buckets disagree with
+    // the very gate they explain.
     rows(
       "wa_recipient_state",
-      "select=sender_key,first_reply_at&first_intro_at=not.is.null&limit=20000",
+      "select=sender_key,to_tail,to_number,first_reply_at&first_intro_at=not.is.null&limit=20000",
       degraded,
       "shop engagement"
     ),
@@ -172,10 +202,27 @@ export async function lifecycleReport(): Promise<LifecycleReport> {
   // behind them (invites and testers), which is genuinely useful - it is the
   // size of the free-riding cohort.
 
+  // EVERY NUMERATOR MUST LIVE INSIDE THE DENOMINATOR.
+  //
+  // wa_sessions, searches and wa_recipient_state all outlive the account that
+  // wrote them - an erased or deleted traveller leaves rows behind (erasure
+  // walks the registry, but a hard-deleted or legacy row need not have been
+  // walked). Those orphans counted in the numerator of a ratio whose
+  // denominator is app_users, which is a second, quieter way to print a
+  // percentage above 100. Intersect once, here, and every stage below inherits
+  // it.
+  const signupEmails = new Set(
+    (users ?? []).map((u) => String(u.email ?? "").trim().toLowerCase()).filter(Boolean)
+  );
+  // When the signup read itself is dark there is nothing to intersect against;
+  // the stages that depend on it are already null.
+  const ofSignups = (email: string) => users === null || signupEmails.has(email);
+
   const linkedSet = new Set(
     (linked ?? [])
       .filter((r) => r.status === "open" || r.status === "connected")
-      .map((r) => String(r.email ?? "").toLowerCase())
+      .map((r) => String(r.email ?? "").trim().toLowerCase())
+      .filter((e) => e && ofSignups(e))
   );
   // Same discriminator the gate and the restore use: opening the request panel
   // is not running a hunt, and counting it here would report a funnel stage
@@ -183,17 +230,28 @@ export async function lifecycleReport(): Promise<LifecycleReport> {
   const searchers = new Set(
     (searches ?? [])
       .filter((r) => isRealHunt(r.source as string | null))
-      .map((r) => String(r.user_email ?? "").toLowerCase())
+      .map((r) => String(r.user_email ?? "").trim().toLowerCase())
+      .filter((e) => e && ofSignups(e))
   );
 
-  const reachedBy = new Map<string, number>();
-  const repliedBy = new Map<string, number>();
+  // DISTINCT SHOPS, not rows - `to_tail` is the same canonical key the gate
+  // uses, with the raw number as the fallback legacy rows need.
+  const reachedShops = new Map<string, Set<string>>();
+  const repliedShops = new Map<string, Set<string>>();
   for (const r of engaged ?? []) {
-    const k = String(r.sender_key ?? "").toLowerCase();
-    if (!k) continue;
-    reachedBy.set(k, (reachedBy.get(k) ?? 0) + 1);
-    if (r.first_reply_at) repliedBy.set(k, (repliedBy.get(k) ?? 0) + 1);
+    const k = String(r.sender_key ?? "").trim().toLowerCase();
+    if (!k || !ofSignups(k)) continue;
+    const shop = String(r.to_tail ?? "") || String(r.to_number ?? "");
+    if (!shop) continue;
+    if (!reachedShops.has(k)) reachedShops.set(k, new Set());
+    reachedShops.get(k)!.add(shop);
+    if (r.first_reply_at) {
+      if (!repliedShops.has(k)) repliedShops.set(k, new Set());
+      repliedShops.get(k)!.add(shop);
+    }
   }
+  const reachedBy = new Map([...reachedShops].map(([k, v]) => [k, v.size]));
+  const repliedBy = new Map([...repliedShops].map(([k, v]) => [k, v.size]));
 
   const signups = users === null ? null : users.length;
   const nLinked = linked === null ? null : linkedSet.size;
@@ -250,17 +308,23 @@ export async function lifecycleReport(): Promise<LifecycleReport> {
   let medianHours: Maybe<number> = null;
   let p90Hours: Maybe<number> = null;
   let warmLast7d: Maybe<number> = null;
+  let warmSampleN: Maybe<number> = null;
   if (users !== null) {
     const durations: number[] = [];
     let recent = 0;
     for (const u of users) {
       const at = u.warmed_up_at ? Date.parse(String(u.warmed_up_at)) : NaN;
       if (!Number.isFinite(at)) continue;
-      if (String(u.warmed_up_at) >= weekAgo) recent += 1;
+      // Epoch, not a STRING comparison. The parsed value is already in hand,
+      // and lexical ordering only happens to work while every row carries the
+      // identical ISO shape - one row written with an offset or without
+      // milliseconds and the "last 7 days" count is quietly wrong.
+      if (at >= weekAgoMs) recent += 1;
       const from = u.added_at ? Date.parse(String(u.added_at)) : NaN;
       if (Number.isFinite(from) && at >= from) durations.push((at - from) / 3600_000);
     }
     warmLast7d = recent;
+    warmSampleN = durations.length;
     if (durations.length) {
       durations.sort((a, b) => a - b);
       medianHours = Math.round(quantile(durations, 0.5) * 10) / 10;
@@ -277,20 +341,47 @@ export async function lifecycleReport(): Promise<LifecycleReport> {
   // "linked" is an onboarding problem, mass failure on "reached" means the
   // threshold is wrong.
   let stalls: Maybe<StallTerm[]> = null;
+  let stallBasis: LifecycleReport["stallBasis"] = null;
   if (users !== null && linked !== null && searches !== null && engaged !== null) {
+    // THE BUCKETS MUST MEASURE THE GATE THAT IS ACTUALLY RUNNING.
+    //
+    // These were hard-coded `< 3` and `< 1` while the card directly above them
+    // printed the owner-configured WARMUP_MIN_ENGAGED / WARMUP_MIN_REPLIES, so
+    // the moment the owner loosened the gate from Keys the two halves of one
+    // screen described different rules and the chart pointed at the wrong work.
+    const { warmupThresholds } = await import("./warmup");
+    const th = await warmupThresholds();
+    // Gate-EXEMPT accounts are not stalled - the gate does not apply to them.
+    // The owner and every TEST_MODE tester ride warm without ever being
+    // stamped `warmed_up_at` (warmup.ts allWarm({ exempt: true })), so they
+    // sat permanently in "Has not connected WhatsApp" and made an onboarding
+    // problem out of the beta roster.
+    const { isTestUser, ownerEmail } = await import("./allowlist");
+    const owner = ownerEmail();
     const buckets: Record<string, number> = { linked: 0, searches: 0, engaged: 0, replies: 0 };
+    let exempt = 0;
     for (const u of users) {
       if (u.warmed_up_at) continue;
-      const e = String(u.email ?? "").toLowerCase();
+      const e = String(u.email ?? "").trim().toLowerCase();
+      if (!e) continue;
+      if (e === owner || (await isTestUser(e))) {
+        exempt += 1;
+        continue;
+      }
       if (!linkedSet.has(e)) buckets.linked += 1;
       else if (!searchers.has(e)) buckets.searches += 1;
-      else if ((reachedBy.get(e) ?? 0) < 3) buckets.engaged += 1;
-      else if ((repliedBy.get(e) ?? 0) < 1) buckets.replies += 1;
+      else if ((reachedBy.get(e) ?? 0) < th.minEngaged) buckets.engaged += 1;
+      else if ((repliedBy.get(e) ?? 0) < th.minReplies) buckets.replies += 1;
     }
+    stallBasis = { minEngaged: th.minEngaged, minReplies: th.minReplies, exempt };
     stalls = [
       { id: "linked", label: "Has not connected WhatsApp", stuck: buckets.linked },
       { id: "searches", label: "Connected, never searched", stuck: buckets.searches },
-      { id: "engaged", label: "Searched, too few shops reached", stuck: buckets.engaged },
+      {
+        id: "engaged",
+        label: `Searched, fewer than ${th.minEngaged} shops reached`,
+        stuck: buckets.engaged,
+      },
       { id: "replies", label: "Reached shops, none replied yet", stuck: buckets.replies },
     ];
   }
@@ -304,6 +395,12 @@ export async function lifecycleReport(): Promise<LifecycleReport> {
     gatedSize: null,
     gatedConverted: null,
   };
+  // The arms are only comparable on the thing the holdout exists to measure -
+  // whether the gate changes CONVERSION. That means money, not entitlement:
+  // reading app_users.plan here repeated the Paid-6 lie verbatim, and since
+  // every invitee is pinned to a paid tier at login it would have shown both
+  // arms converting at ~100% forever. When the payment trail is unreadable the
+  // converted counts stay DARK; the arm SIZES are still real and still shown.
   if (users !== null) {
     const { cohortDecision, WARMUP_HOLDOUT } = await import("./cohort");
     let hSize = 0;
@@ -313,7 +410,7 @@ export async function lifecycleReport(): Promise<LifecycleReport> {
     for (const u of users) {
       const email = String(u.email ?? "");
       if (!email) continue;
-      const isPaid = u.plan === "pro" || u.plan === "business" || u.plan === "ultra";
+      const isPaid = paidEmails.has(email.trim().toLowerCase());
       const d = await cohortDecision(WARMUP_HOLDOUT, email);
       if (d.member) {
         hSize += 1;
@@ -323,14 +420,20 @@ export async function lifecycleReport(): Promise<LifecycleReport> {
         if (isPaid) gPaid += 1;
       }
     }
-    holdout = { size: hSize, converted: hPaid, gatedSize: gSize, gatedConverted: gPaid };
+    holdout = {
+      size: hSize,
+      converted: activations === null ? null : hPaid,
+      gatedSize: gSize,
+      gatedConverted: activations === null ? null : gPaid,
+    };
   }
 
   return {
     generatedAt: now,
     stages,
-    warm: { total: nWarm, last7d: warmLast7d, medianHours, p90Hours },
+    warm: { total: nWarm, last7d: warmLast7d, medianHours, p90Hours, sampleN: warmSampleN },
     stalls,
+    stallBasis,
     holdout,
     degraded,
   };

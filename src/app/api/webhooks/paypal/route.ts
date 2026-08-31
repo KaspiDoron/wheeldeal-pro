@@ -6,6 +6,7 @@ import {
   markSubscriptionState,
   SUSPENDED_KIND,
   RESUMED_KIND,
+  ACTIVATION_KIND,
 } from "@/lib/billing/subscription-link";
 import { effectForEvent, clearsSuspension } from "@/lib/billing/suspension";
 import { setPlan, normalizePlan, type PlanId } from "@/lib/access";
@@ -231,6 +232,38 @@ export async function POST(req: Request) {
         console.error(`[paypal] setPlan failed for ${email} -> ${tier}; asking PayPal to retry`);
         return NextResponse.json({ error: "grant failed" }, { status: 503 });
       }
+      // THE MONEY TRAIL HAS TO NAME THE PAYER.
+      //
+      // This branch is the redirect checkout where the traveller never returns
+      // to the app, so the webhook is the ONLY thing that applies what they
+      // paid for. It wrote `setPlan` and a billing_events row - and
+      // billing_events has no user_email column at all (schema.sql), so a
+      // genuine paying customer left no attributable record anywhere and the
+      // monetization panel counted them as COMPED. Write the same
+      // subscription-activated row the returning-traveller path writes; it is
+      // the one record in this system that means money changed hands AND names
+      // the person, and both the funnel and the reconcile sweep read it.
+      //
+      // `verified` distinguishes it honestly: this grant was authenticated as
+      // a PayPal webhook and its tier came from PayPal's own plan id, but a
+      // hint-driven one was attributed from a custom_id rather than a link the
+      // traveller proved.
+      await sbInsert("agent_events", [
+        {
+          kind: ACTIVATION_KIND,
+          user_email: email,
+          vendor_id: "",
+          vendor_name: "",
+          detail: JSON.stringify({
+            subscriptionId: subscriptionId || null,
+            planId: planId || null,
+            tier,
+            source: "paypal-webhook",
+            hintDriven,
+            eventId: String(body?.id ?? "") || null,
+          }).slice(0, 800),
+        },
+      ]).catch(() => {});
       // A hint-driven grant is worth seeing on its own: it is the one plan
       // change in this app with no verified link behind it.
       if (hintDriven) {
