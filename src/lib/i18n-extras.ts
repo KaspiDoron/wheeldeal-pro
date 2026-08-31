@@ -265,6 +265,14 @@ export const I18N_EXTRAS: string[] = [
   "Checking this shop's thread failed once - it is retried automatically.",
   "A reply couldn't be answered because your records were briefly unreadable - it retries automatically.",
   "A reply couldn't be processed automatically.",
+  // W12a: the funnel ledger finally reaches the card, so the card can say
+  // "they answered" without claiming a price is being pinned down.
+  "Replied",
+  "The shop answered - your agent is reading their reply.",
+  "This shop said no. Nothing further is being asked here.",
+  "Nothing available here right now - your agent asked when one is back.",
+  "Shop said no",
+  "None available now",
   "A duplicate of a message this shop already received was skipped.",
   "This shop already got your request in the last day, so a repeat was skipped.",
   "This shop hasn't answered earlier messages, so a repeat wasn't sent - this protects your WhatsApp number.",

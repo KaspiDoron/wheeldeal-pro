@@ -163,6 +163,10 @@ function VendorCardInner({
   // !offer) and the queue panel; the local latch releases via the effect above
   // once the server clears queuedUntil (delivered or removed).
   const queuedActive = rfqState === "queued" || Boolean(vendor.queuedUntil && !vendor.offer);
+  // The shop has ANSWERED and the answer closes this card: a decline, or
+  // nothing available today. Both are states, not calls to action - a live
+  // green "Ask for price" over them is the same trap the queued chip fixed.
+  const cardTerminal = vendor.stage === "declined" || vendor.stage === "out-of-stock";
   const [galleryOpen, setGalleryOpen] = useState(false);
   // The substitution choice. `altBusy` is a plain in-flight latch: this posts a
   // decision, and a double tap would be a second decision on a choice that is
@@ -1104,14 +1108,26 @@ function VendorCardInner({
                   received) - the copy reported the missing offer object, not
                   the conversation. Say where this thread actually is. */}
               {t(
-                vendor.stage === "negotiating" || vendor.stage === "counter-offer"
-                  ? "The shop replied - your agent is pinning the exact price down. It lands here the moment it's stated."
-                  : vendor.stage === "rfq-sent" ||
-                      vendor.stage === "awaiting-response" ||
-                      vendor.stage === "sending" ||
-                      askDone
-                    ? "Price asked - the shop's reply lands here."
-                    : "No price yet - we first ask the shop. Real prices come only from its reply."
+                vendor.stage === "declined"
+                  ? "This shop said no. Nothing further is being asked here."
+                  : vendor.stage === "out-of-stock"
+                    ? "Nothing available here right now - your agent asked when one is back."
+                    : vendor.stage === "negotiating" || vendor.stage === "counter-offer"
+                      ? "The shop replied - your agent is pinning the exact price down. It lands here the moment it's stated."
+                      : // REPLIED IS NOT NEGOTIATING. This line claimed a price
+                        // was being pinned down over a shop that had said
+                        // "hello" - the caption the owner photographed - because
+                        // any inbound promoted the card to `negotiating`. The
+                        // ledger draws the line on whether the reply carried an
+                        // actionable fact; the copy now respects it.
+                        vendor.stage === "replied"
+                        ? "The shop answered - your agent is reading their reply."
+                        : vendor.stage === "rfq-sent" ||
+                            vendor.stage === "awaiting-response" ||
+                            vendor.stage === "sending" ||
+                            askDone
+                          ? "Price asked - the shop's reply lands here."
+                          : "No price yet - we first ask the shop. Real prices come only from its reply."
               )}
             </div>
             {plan === "free" && (
@@ -1126,10 +1142,21 @@ function VendorCardInner({
                 // A message that is sending OR already queued/sent can NEVER be
                 // re-fired: queuedActive must gate the button (a queued row is
                 // committed - tapping again would enqueue a duplicate).
-                disabled={!waConnected || rfqState === "sending" || askDone || queuedActive}
-                aria-disabled={!waConnected || rfqState === "sending" || askDone || queuedActive}
+                //
+                // TERMINAL IS TERMINAL TOO (the green-button trap's remainder).
+                // A declined or out-of-stock card kept a LIVE green "Ask for
+                // price" over copy explaining nothing had been asked - the shop
+                // had answered and said no. Tapping it re-asks a shop that
+                // already refused, which is both a wasted send on a rate-limited
+                // personal number and a message the traveller did not intend.
+                disabled={
+                  !waConnected || rfqState === "sending" || askDone || queuedActive || cardTerminal
+                }
+                aria-disabled={
+                  !waConnected || rfqState === "sending" || askDone || queuedActive || cardTerminal
+                }
                 className={`btn w-full rounded-2xl py-2.5 text-[13px] font-extrabold ${
-                  (queuedActive || askDone) && rfqState !== "sending"
+                  (queuedActive || askDone || cardTerminal) && rfqState !== "sending"
                     ? // Queued AND "sent, waiting for a reply" are both STATUSES,
                       // not calls to action: a muted, clearly non-interactive
                       // chip, never the green primary. "Sent - reply lands here"
@@ -1143,6 +1170,8 @@ function VendorCardInner({
               >
                 {rfqState === "sending" ? (
                   <LoadingDots light label={t("Sending")} />
+                ) : cardTerminal ? (
+                  vendor.stage === "declined" ? t("Shop said no") : t("None available now")
                 ) : queuedActive ? (
                   // Queued is queued - it must NEVER read as "Sent", even
                   // after a remount (queuedActive derives from server state),

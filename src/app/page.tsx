@@ -15,6 +15,10 @@ import type {
   OutreachReply,
 } from "@/lib/types";
 import { offerForOption } from "@/lib/offer-options";
+import {
+  trackerStageForLedger,
+  LEDGER_TERMINAL_CARD_STAGES,
+} from "@/lib/client/ledger-stage";
 import { vehicleLabel } from "@/lib/labels";
 import { Icon } from "@/components/icons";
 import { Filters, DEFAULT_FILTERS, type FilterState } from "@/components/Filters";
@@ -1216,6 +1220,18 @@ export default function Home() {
       // never stays stuck in the "queued message" visual (split-brain fix).
       const vendorStates: Record<string, "messaged" | "active" | "offer"> =
         d.vendorStates && typeof d.vendorStates === "object" ? d.vendorStates : {};
+      // THE FUNNEL LEDGER, WHICH THIS SURFACE HAD NEVER READ.
+      //
+      // /api/activity has served `vendorStages` - the durable, evidence-based
+      // `negotiation_threads.stage` written by advanceThreadStage - since the
+      // ledger shipped, and grep found every reader of it inside the producing
+      // route. Meanwhile the card kept deriving its stage from `vendorStates`,
+      // whose "active" fires on ANY stored inbound: a greeting, a sticker, even
+      // an `extract` trace. That is owner problem 2 in one line - the ledger
+      // knows the difference between `replied` and `understood` and the card
+      // was not asking. Where the ledger has an opinion it WINS.
+      const vendorStages: Record<string, { stage?: unknown }> =
+        d.vendorStages && typeof d.vendorStages === "object" ? d.vendorStages : {};
       const lastByVendor: Record<
         string,
         {
@@ -1447,10 +1463,22 @@ export default function Home() {
           // Mirror the authoritative DB state onto the card's stage (forward
           // only) so a messaged / actively-negotiating shop shows the right
           // status regardless of soft filters or feed truncation.
+          // The ledger first; the legacy rollup only where the ledger is silent
+          // (a thread with no stage row yet, or one still pre-contact, where the
+          // card models sending/rfq-sent with better resolution than the poll).
+          const ledgerStage = trackerStageForLedger(
+            typeof vendorStages[base.id]?.stage === "string"
+              ? (vendorStages[base.id].stage as string)
+              : null
+          );
           const dbState = vendorStates[base.id];
-          if (dbState) {
-            const target = stageForState(dbState);
-            if (canAdvance(base.stage, target)) base = { ...base, stage: target };
+          const target = ledgerStage ?? (dbState ? stageForState(dbState) : null);
+          if (target) {
+            // A lateral claim (declined / out of stock / unreachable) is not an
+            // advance and must land even when it moves the card backwards - it
+            // is the ledger refusing to keep pretending.
+            if (LEDGER_TERMINAL_CARD_STAGES.has(target)) base = { ...base, stage: target };
+            else if (canAdvance(base.stage, target)) base = { ...base, stage: target };
           }
           // THE SHOP'S OWN LAST WORDS. /api/activity has always returned this
           // and nothing consumed it, which is why the panel could file a shop
