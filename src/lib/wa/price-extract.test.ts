@@ -338,3 +338,77 @@ describe("the bare-number rescue survives burst coalescing (owner report 5)", ()
     expect(extractRentalDailyPrice(burst, { durationDays: 3 })).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// W12b: THE PHANTOM TABLE.
+//
+// Two regression tests used to pin the two literal strings the field reported,
+// and an audit defeated both by moving one word: "minimum 3 days rental 500
+// deposit" was caught, "Minimum RENTAL 3 days 500 deposit" divided to 167/day.
+// A guard that only holds for one word order is not a guard, so the cases are a
+// TABLE of permutations now - and the executed evidence from that audit is in
+// it, every phantom it found included.
+// ---------------------------------------------------------------------------
+
+describe("a division only happens when the dividend is really rent", () => {
+  const opts = { durationDays: 4, localCurrency: "THB" } as const;
+  const perDay = (text: string) =>
+    extractQuotedPrices(text, opts as never).allOffers.map((o) => o.pricePerDay);
+
+  it("EXECUTED: a qualifying MINIMUM is not a total, in any word order", () => {
+    for (const text of [
+      "minimum 3 days rental 500 deposit",
+      "Minimum rental 3 days 500 deposit",
+      "Minimum of 3 days 500 deposit required",
+      "we rent from 3 days, 500 deposit",
+      "at least 3 days and 500 deposit",
+    ]) {
+      expect(perDay(text), text).toEqual([]);
+    }
+  });
+
+  it("EXECUTED: a charge word AFTER the amount disqualifies it, like one before", () => {
+    // The clause check only looked at the 28 chars BEFORE the amount, so
+    // "3000 baht deposit" - the way people actually write it - divided.
+    expect(perDay("Booking requires 2 days 3000 baht deposit and passport")).toEqual([]);
+    expect(perDay("2 days, deposit 3000 baht")).toEqual([]);
+  });
+
+  it("EXECUTED: a clock time and a percentage are not rental totals", () => {
+    for (const text of [
+      "We are open 7 days 9am to 6pm",
+      "Sorry we are closed. Reopen in 2 days at 9",
+      "Hi! This is an automated message. We will get back to you in 2 days 100%",
+      "open 7 days until 8pm",
+    ]) {
+      expect(perDay(text), text).toEqual([]);
+    }
+  });
+
+  it("EXECUTED: a REAL package total still divides - the guards are not a blanket", () => {
+    expect(perDay("1500 for 5 days")).toEqual([300]);
+    // The shop's OWN span divides its own total: 1250 over the 5 days it
+    // named, not over the 4 the traveller asked for.
+    expect(perDay("5 days 1250 total")).toContain(250);
+    expect(perDay("3 days 900")).toContain(300);
+  });
+});
+
+describe("a date range is not a cheaper price tier", () => {
+  const opts = { durationDays: 4, localCurrency: "THB" } as const;
+  const perDay = (text: string) =>
+    extractQuotedPrices(text, opts as never).allOffers.map((o) => o.pricePerDay);
+
+  it("EXECUTED: 'available 27 to 1, 250 per day' quotes 250 and nothing else", () => {
+    // The alternation walker harvested the shop's START DATE as a tier, and
+    // since the menu picks the CHEAPEST row, 27 became the shop's best price.
+    expect(perDay("available 27 to 1, 250 per day")).toEqual([250]);
+  });
+
+  it("EXECUTED: a genuine two-tier quote is untouched", () => {
+    // The guard needs BOTH a day-of-month range AND an order-of-magnitude gap,
+    // so real alternations - which are never 10x apart - still read.
+    expect(perDay("250 or 300 per day").sort((a, b) => a - b)).toEqual([250, 300]);
+    expect(perDay("200 and 250 per day").sort((a, b) => a - b)).toEqual([200, 250]);
+  });
+});

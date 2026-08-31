@@ -1245,8 +1245,40 @@ export async function processVendorReply(opts: {
   // divides into a plausible daily price over the rental length, it was a
   // total: divide it. (The extraction prompt now rules this too; this is the
   // arithmetic backstop for when the model slips.)
-  const floor = await floorPriceFor(ctx.region || undefined, rfq);
+  // THE FLOOR MUST BE RESOLVED THROUGH THE SAME CHAIN AS THE CURRENCY.
+  //
+  // Wave 3 taught the currency to fall back from the free-text region to the
+  // SHOP'S PHONE PREFIX, because `currencyForRegion` returns null for every
+  // realistic geocoder label - "Ao Nang", "Krabi", "Canggu", "Siargao", raw
+  // coordinates. The floor lookup was left on region-only, so the two disagreed
+  // exactly where the owner reported the problem: for a +66 shop in "Ao Nang,
+  // Krabi" the price of record resolved THB while the floor resolved USD, the
+  // currencies did not match, and that single null silently switched OFF the
+  // total-vs-per-day divide, the implausible-price rail AND the credible-floor
+  // clamp, and sent floorPrice: undefined into the engine. Every safety net on
+  // this path was dark for the precise regions that motivated it.
+  const floorRegion = ctx.region || _countryForShop(from) || undefined;
+  const floor = await floorPriceFor(floorRegion, rfq);
   let floorSameCur = floor && floor.currency === cur ? floor : null;
+  if (floor && !floorSameCur) {
+    // Still mismatched: say so rather than going quiet. A dark net that nobody
+    // can see is how this survived a whole wave.
+    void sbInsert("agent_events", [
+      {
+        kind: "floor-currency-mismatch",
+        user_email: ctx.sender ?? null,
+        to_number: from,
+        vendor_id: ctx.vendorId ?? "",
+        vendor_name: ctx.vendorName ?? "",
+        detail: JSON.stringify({
+          region: floorRegion ?? null,
+          floorCurrency: floor.currency,
+          priceCurrency: cur,
+          note: "price sanity nets are inert for this thread",
+        }).slice(0, 400),
+      },
+    ]).catch(() => {});
+  }
   if (usablePrice && rfq.durationDays > 1 && floorSameCur) {
     const typical = floorSameCur.typical ?? Math.round(floorSameCur.floor * 1.6);
     const perDayIfTotal = Math.round(usablePrice / rfq.durationDays);
@@ -1326,9 +1358,49 @@ export async function processVendorReply(opts: {
   //   - the price is DERIVED        -> the total is in the text (priceBasisDays)
   //   - the number (or number x days) is verbatim in the shop's reply
   //   - the number is in the recent conversation (a proposal the shop agreed to)
-  if (usablePrice && extractText && images.length === 0 && priceBasisDays === undefined) {
+  //
+  // THREE OF THOSE EXEMPTIONS USED TO EXCUSE THE PHANTOMS THEMSELVES.
+  //
+  // `images.length === 0` excused any reply with a photo attached - INCLUDING
+  // one whose vision read failed, where agents.ts falls back to reading the
+  // CAPTION with the same phantom-prone text extractor. A storefront photo
+  // captioned "We are open 7 days 9am to 6pm" produced a price with the rail
+  // structurally unreachable. A photo only excuses grounding when the photo was
+  // actually read.
+  //
+  // `priceBasisDays === undefined` excused every DIVISION - which is the exact
+  // class the Wave-0 phantom guards exist for. "Minimum rental 3 days 500
+  // deposit" divides to 167/day; "Reopen in 2 days at 9" to 5/day; "back to you
+  // in 2 days 100%" to 50/day. In every one of those the dividend is a deposit,
+  // a clock time or a percent - and grounding would have caught it, if it ran.
+  // The DIVIDEND is what must be grounded for a derived price.
+  const photoWasRead =
+    images.length > 0 && extraction.imageRead?.seen === true && !extraction.imageRead?.modelFailure;
+  if (usablePrice && extractText && !photoWasRead) {
     const { isPriceGrounded } = await import("./wa/price-grounding");
-    if (!isPriceGrounded(usablePrice, rfq.durationDays, [extractText, history])) {
+    // The shop's words and OUR words are different evidence, and the window
+    // renders both. A figure we proposed grounds a price only when the shop's
+    // current message agrees with it - see wa/price-grounding.
+    const inboundBodies = mine
+      .filter((m) => m.direction !== "outbound")
+      .slice(0, 40)
+      .map((m) => m.body ?? "");
+    const outboundBodies = mine
+      .filter((m) => m.direction === "outbound")
+      .slice(0, 40)
+      .map((m) => m.body ?? "");
+    // A DERIVED price is grounded through its dividend: the total the shop
+    // actually stated, not the per-day figure we computed from it.
+    const groundPrice =
+      priceBasisDays && priceBasisDays > 0 ? usablePrice * priceBasisDays : usablePrice;
+    const groundDays = priceBasisDays && priceBasisDays > 0 ? 1 : rfq.durationDays;
+    if (
+      !isPriceGrounded(groundPrice, groundDays, {
+        shopText: extractText,
+        shopHistory: inboundBodies,
+        ourHistory: outboundBodies,
+      })
+    ) {
       await sbInsert("agent_events", [
         {
           kind: "price-ungrounded",

@@ -142,8 +142,13 @@ const PRICE_TOTAL_REV = new RegExp(
 // "2500 altogether") - the shop already knows how many days we asked for, so it
 // quotes the trip. Divided by the RFQ duration. Requires the explicit total word
 // so a bare number is never mistaken for a trip price.
+// Amount-then-word ("1250 total") OR word-then-amount ("total 1250"). Only the
+// first spelling was matched, so a shop that leads with the word - which is how
+// it reads in most of the languages this app meets in translation - had its
+// stated total dropped entirely.
 const PRICE_TOTAL_WORD = new RegExp(
-  `(?:${CUR_LEAD})?\\s*${NUM}\\s*(?:${CUR_TRAIL})?\\s*(?:in\\s+)?(?:total|altogether|all together|all in|in all|for everything|for the whole|for all)\\b`,
+  `(?:(?:${CUR_LEAD})?\\s*${NUM}\\s*(?:${CUR_TRAIL})?\\s*(?:in\\s+)?(?:total|altogether|all together|all in|in all|for everything|for the whole|for all)\\b` +
+    `|(?:total|altogether|all in|in all|in total)\\s*(?:is|:|=)?\\s*(?:${CUR_LEAD})?\\s*${NUM}(?:\\s*(?:${CUR_TRAIL}))?)`,
   "i"
 );
 // A MONTHLY quote ("4000 per month", "4000/month", "monthly 4000") - the format
@@ -180,7 +185,15 @@ const URL_RX = /\b(?:https?:\/\/|www\.)\S+/gi;
 // A QUALIFYING DURATION is not a rate. "Discounted Rates for Rentals of 8 Days
 // or More" is a condition on the prices that follow, and it was being read as an
 // 8-per-day offer. The tell is the words around the day token, never the amount.
-const DURATION_BEFORE = /\b(?:rentals?\s+of|minimum|min\.?|at\s+least|more\s+than|over|from)\s*$/i;
+// WORD ORDER DEFEATED THIS. The cue had to sit IMMEDIATELY before the day
+// token (`\s*$`), so "minimum 3 days rental 500 deposit" was caught and
+// "Minimum RENTAL 3 days 500 deposit" - the same sentence, one word moved -
+// divided to 167/day. The cue anywhere in the 24-char window is the same
+// claim; only the intervening words changed. `\s*$` becomes a short tolerance
+// for those words, still tight enough that a cue from a previous clause cannot
+// reach across.
+const DURATION_BEFORE =
+  /\b(?:rentals?\s+of|minimum|min\.?|at\s+least|more\s+than|over|from)\b(?:\s+\w+){0,3}\s*$/i;
 const DURATION_AFTER = /^\s*(?:or\s+(?:more|longer|above|up)|\+|and\s+(?:up|above|over)|plus)\b/i;
 
 // A LEADING "N/Days" (or "N Days:") is a HEADER naming which duration the row
@@ -191,13 +204,26 @@ const DURATION_AFTER = /^\s*(?:or\s+(?:more|longer|above|up)|\+|and\s+(?:up|abov
 // poisoned the explicit-daily contradiction check.
 const DURATION_HEADER = /^\s*\d{1,2}\s*(?:\/\s*)?days?\b/i;
 
+/** How many price-scale amounts appear after `from` - one quote, or a table. */
+function amountsAfter(line: string, from: number): number {
+  const tail = line.slice(from);
+  return (tail.match(/\d[\d.,]*/g) ?? []).filter((n) => parseAmount(n) > 0).length;
+}
+
 /**
  * Is the amount at `index` part of a duration CONDITION rather than a price?
  * Pure so the judgement is unit-tested instead of inferred from a transcript.
  */
 export function isDurationConditionAt(line: string, index: number, matched: string): boolean {
   const header = line.match(DURATION_HEADER);
-  if (header && index < header[0].length) return true;
+  // A HEADER PRICES A ROW; A TOTAL PRICES ONE THING. "4/Days 110cc 220 125cc
+  // 270" is a menu header naming the duration its several prices are for. "3
+  // days 900" is a shop quoting one package - and this guard swallowed it,
+  // dropping the shop's real total on the floor. The tell is how many amounts
+  // follow: one is a quote, several is a table.
+  if (header && index < header[0].length && amountsAfter(line, header[0].length) !== 1) {
+    return true;
+  }
   const before = line.slice(Math.max(0, index - 24), index);
   if (DURATION_BEFORE.test(before)) return true;
   const after = line.slice(index + matched.length, index + matched.length + 24);
@@ -365,10 +391,38 @@ const MODEL_TAIL =
 const CC_HEAD = /^\s*(?:cc\b|ccs\b)/i;
 
 /**
+ * The rental span the SHOP named on this line, if any ("5 days 1250 total").
+ *
+ * Only a plain day count counts - a month or a week is a different unit with
+ * its own reader, and a bare number is not a span.
+ */
+function spanNamedIn(line: string): number | undefined {
+  const m = line.match(/\b(\d{1,3})\s*(?:-|to)?\s*days?\b/i);
+  if (!m) return undefined;
+  const n = parseInt(m[1], 10);
+  return Number.isFinite(n) && n > 1 && n <= 365 ? n : undefined;
+}
+
+/**
  * Amounts to the LEFT of `idx` that share its unit through an alternation.
  * Returns them with their own index in `line` so callers keep locality.
  */
-function alternatesBefore(line: string, idx: number): Array<{ amount: number; index: number }> {
+/**
+ * Is this "alternate" really a day-of-month from a date range?
+ *
+ * 1-31 AND at least an order of magnitude below the priced amount. Both halves
+ * matter: 1-31 alone would reject a genuine "20 or 25 dollars" pair, and the
+ * ratio alone would reject nothing in a currency where 27 is a real price.
+ */
+function isDayOfMonthAlternate(amount: number, priced: number): boolean {
+  return amount >= 1 && amount <= 31 && priced >= amount * 10;
+}
+
+function alternatesBefore(
+  line: string,
+  idx: number,
+  base = 0
+): Array<{ amount: number; index: number }> {
   const out: Array<{ amount: number; index: number }> = [];
   let cursor = idx;
   for (let i = 0; i < MAX_ALTERNATES; i++) {
@@ -382,6 +436,14 @@ function alternatesBefore(line: string, idx: number): Array<{ amount: number; in
     // A model/brand number or a cc figure is not a price tier.
     if (MODEL_TAIL.test(line.slice(Math.max(0, at - 20), at))) break;
     if (CC_HEAD.test(line.slice(at + String(m[1]).length))) break;
+    // A DATE RANGE IS NOT A PRICE ALTERNATION. "available 27 to 1, 250 per
+    // day" is the shop stating when the vehicle is free, and this walked left
+    // from the real 250 and harvested the 27 as a cheaper tier - which then
+    // won BEST PRICE, because cheapest wins. The tell is scale: a
+    // day-of-month sits in 1-31 and is an order of magnitude below the
+    // amount it is supposedly competing with. A genuine two-tier quote
+    // ("250 or 300") is nowhere near 10x apart.
+    if (isDayOfMonthAlternate(amount, base)) break;
     out.push({ amount, index: at });
     cursor = at;
   }
@@ -689,7 +751,7 @@ export function extractQuotedPrices(
         index: at,
       });
       // Numbers joined to this one by "and / or / ," share its per-day unit.
-      for (const alt of alternatesBefore(line, at)) {
+      for (const alt of alternatesBefore(line, at, amt)) {
         if (alt.amount === days) continue;
         hits.push({
           pricePerDay: alt.amount,
@@ -709,25 +771,36 @@ export function extractQuotedPrices(
     const totalWord = days > 1 ? line.match(PRICE_TOTAL_WORD) : null;
     if (totalWord) {
       const at = amountIndex(line, totalWord, 1);
+      // THE SHOP'S OWN SPAN DIVIDES THE SHOP'S OWN TOTAL.
+      //
+      // "5 days 1250 total" from a traveller asking for 4 divided 1250 by FOUR
+      // and quoted 313/day - a number the shop never offered, for a package it
+      // never priced. When the shop names the span in the same breath as the
+      // total, that span is the divisor; the traveller's duration is only the
+      // fallback for a bare "1250 total".
+      const statedSpan = spanNamedIn(line);
+      const span = statedSpan ?? days;
       const amounts = [
         { amount: parseAmount(totalWord[1]), index: at },
-        ...alternatesBefore(line, at),
+        ...alternatesBefore(line, at, parseAmount(totalWord[1])),
       ];
       let took = false;
       for (const a of amounts) {
-        if (!(a.amount > days)) continue;
-        if (contradictsExplicitDaily(Math.round(a.amount / days))) continue;
+        if (!(a.amount > span)) continue;
+        if (contradictsExplicitDaily(Math.round(a.amount / span))) continue;
         hits.push({
-          pricePerDay: Math.round(a.amount / days),
+          pricePerDay: Math.round(a.amount / span),
           currency: currencyIn(line) ?? opts.localCurrency,
           line: rawLine,
           classMatch: cls ? cls === wantClass : undefined,
           listPrice: isListPriceAt(line, a.index),
           index: a.index,
-          // A trip total divided over the rental we asked for. Derived, and it
-          // says so - but the span IS the traveller's own rental, so nothing
-          // downstream has to discount it as a mismatched package.
-          derivedFromDays: days > 1 ? days : undefined,
+          // A trip total divided over a span. When the shop named that span it
+          // is theirs (a package that may not match the traveller's dates);
+          // otherwise it is the traveller's own rental. Either way it is
+          // DERIVED and says so, so the like-for-like guard can discount a
+          // mismatched package downstream.
+          derivedFromDays: span > 1 ? span : undefined,
         });
         took = true;
       }
@@ -755,11 +828,36 @@ export function extractQuotedPrices(
       // insurance / fine / bond clause is that charge, never the rental total.
       // Both are read as a total by the raw arithmetic, so guard the division.
       const subjectBefore = line.slice(Math.max(0, amtAt - 28), amtAt);
+      const amtLen = String(Math.round(whole)).length;
+      // BOTH SIDES. This looked only at the 28 chars BEFORE the amount, so
+      // "500 deposit" - the charge word trailing its number, which is how
+      // people actually write it - sailed through and divided to 167/day.
+      // graph/guardrails' DEPOSIT_CTX has always checked both sides; this is
+      // the same vocabulary, finally symmetric.
+      const subjectAfter = line.slice(amtAt + amtLen, amtAt + amtLen + 16);
+      const CHARGE_WORDS =
+        /\b(?:deposit|deposits|down\s?payment|collateral|security|bond|insurance|excess|fine|fines|penalty|penalties|fee|fees|charge|surcharge)\b/i;
       const inChargeClause =
         /\b(?:deposit|deposits|down\s?payment|collateral|security|bond|insurance|excess|fine|fines|penalty|penalties|fee|fees|charge|surcharge)\b[^\d]{0,12}$/i.test(
           subjectBefore
-        );
-      if (isDurationConditionAt(line, dayAt, total[0]) || inChargeClause) continue;
+        ) || CHARGE_WORDS.test(subjectAfter);
+      // A CLOCK TIME OR A PERCENTAGE IS NOT A RENTAL TOTAL. "Reopen in 2 days
+      // at 9" divided to 5/day; "back to you in 2 days 100%" to 50/day. The
+      // tell is the token glued to the dividend, and nothing was reading it.
+      const notMoneyTail = /^\s*(?:am|pm|%|:|h\b|hrs?\b|o'?clock\b)/i.test(subjectAfter);
+      // ...and the same tell on the other side. "Reopen in 2 days AT 9" has
+      // nothing after the 9 to give it away; the preposition before it is what
+      // makes it a clock. A price is never introduced by "at" in this shape -
+      // "at 250 per day" carries its unit, and that path is the rate scanner's,
+      // not this division's.
+      const clockCueBefore = /\b(?:at|until|till|til|before|after|from)\s*$/i.test(subjectBefore);
+      if (
+        isDurationConditionAt(line, dayAt, total[0]) ||
+        inChargeClause ||
+        notMoneyTail ||
+        clockCueBefore
+      )
+        continue;
       const afterAmount = line.slice(amtAt + String(Math.round(whole)).length, amtAt + 24);
       const markedPerDay = /^\s*(?:baht|thb|php|pesos?|[a-z]{1,3}\.?)?\s*(?:\/|per\b|a\b|each\b|-)?\s*day/i.test(
         afterAmount
