@@ -2625,7 +2625,7 @@ export async function buildTurnFromThread(
   // currency. The shared chain prefers what the thread already resolved, then
   // the region, then the shop's phone prefix, and leaves it UNDEFINED rather
   // than inventing dollars.
-  const { resolveLocalCurrency } = await import("../currency");
+  const { resolveLocalCurrency } = await import("../local-currency");
   const cur = await resolveLocalCurrency({
     stored: storedCurrency,
     region: ctx.region,

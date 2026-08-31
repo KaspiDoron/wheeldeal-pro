@@ -92,25 +92,50 @@ Signed off when the owner has spot-checked each in the product.
 
 | # | Problem | Status | Where |
 |---|---|---|---|
-| 1 | Currency (bt/baht/bath -> USD, mixed display) | Fixed | W0 token map + ISO whitelist; W3 single-source, no-USD resolution chain |
-| 2 | Greetings advancing to "pinning the price" | Fixed | W1/W4 replied-vs-understood split on the evidence ledger |
+| 1 | Currency (bt/baht/bath -> USD, mixed display) | Fixed | W0 token map + ISO whitelist; W3 no-USD chain; W12c `resolveLocalCurrency` on EVERY path (the tick path was still resolving USD and overwriting the thread), and a shared word like "peso"/"dollar"/"rupee" can no longer overrule the shop's own country |
+| 2 | Greetings advancing to "pinning the price" | Fixed | W1 split the ledger correctly and it had NO READERS for two waves; W12a wires it to the card and adds the `replied` stage the vocabulary lacked |
 | 3 | Broken syntax ("27 to 1 the is 1250") | Fixed | W12e `wa/shop-date-range.ts` - the reader this row credited for a wave before it existed. A stated range is two facts: those digits are not money, and the total beside them divides by THAT span |
-| 4 | Hallucinated prices on template replies | Fixed | W0 phantom guards; W3 ungrounded-price rail |
-| 5 | Native-language price + promo ignored | Fixed | W3 native word tables, gloss-first, promo entities |
-| 6 | Substitute vehicle shown as requested | Fixed | W3 trigger union + Similar tag; W4 alternativeOffer on the card |
+| 4 | Hallucinated prices on template replies | Fixed | W0 phantom guards; W3 rail; W12b the rail's own exemptions were excusing the phantom classes it was built for (every division, and any reply with a photo even when vision failed), grounding accepted numbers WE typed, and `/api/replies` re-invented a price the writer had already dropped |
+| 5 | Native-language price + promo ignored | Partly | W12c: native day/week/month and money words plus magnitude suffixes (150k, 70rb) - recall went 0/14 to 13/13 on real Thai, Vietnamese and Indonesian phrasings. W12g closes the gloss dead band that left Indonesian/Malay/Vietnamese/Spanish untranslated. NOT done: a promo/discount entity - there is still no PromotionTerms in the codebase |
+| 6 | Substitute vehicle shown as requested | Fixed | W3 trigger union; W4 alternativeOffer on the card; W12d the verdict reaches the price label and the ranking (a substitute could win BEST PRICE), the pause fires on the union rather than the pre-union signal, and the read sees the gloss, the transcript and the OCR text |
 | 7 | Green-button trap | Fixed | W0 muted-chip + "Reply received" |
 | 8 | Silent blank UI on no-price reply | Fixed | W4 facts pass + replyUnparsed state + recovery actions |
 | 9 | Free-text date/duration duplication | Fixed | W12e `request-window-conflict.ts` - this row credited "W4 conflict chips" and no such surface existed. The typed window is now a chip and is stripped from the accessories, so one message states one rental |
 | 10 | Consent data layer / monetization | Fixed | W9d opt-in kinds, product_events projection, k>=20 rollup, legal rewrite |
-| 11 | 7 shops stall | Fixed | W0 webhook scoping; W8 wait-not-repark + per-sender budgets |
+| 11 | 7 shops stall | Fixed | W0 webhook scoping; W8 mechanism; W12h - the Wave-8 centrepiece was INERT (it advertised a retry instant the straddle guard then refused) and it LEAKED probe rows that later read as previous sends. Proven by an executed 7-shop burst, not a source grep |
 | 12 | Language-setting enforcement | Fixed | W2 gloss-bound reads; W4 toggle reachability |
 | 13 | Every message type analyzed | Fixed | W3 catalog/poll branches; W5 media handling |
 | 14 | ONE engine, graph as failover | Fixed | W0 field persistence; W2 live judge/ladder, steps 7-9, legacy deleted |
 | 15 | Management audit + architecture toggle | Fixed | W6 Architecture card; W7 honesty/egress/delivery-trail |
 | 16 | Template/catalog mining + follow-up | Fixed | W3 ladder provenance + covered tiers |
-| 17 | UI data speed | Fixed | W0 waiting predicate; W4 enqueue-first outreach |
-| 18 | Strict vehicle matching / Similar tag | Fixed | W3 trigger union + digit fold |
+| 17 | UI data speed | Partly - see below | W0 waiting predicate; W12g the turn wall clock and the duplicate send-hold. NOT done: enqueue-first outreach. This row credited it to W4 and no such change exists - the mass tap still blocks on an all-shop opener pre-pass and a live send |
+| 18 | Strict vehicle matching / Similar tag | Fixed | W3 trigger union + digit fold; W12d the verdict finally reaches the label, the ranking and the thread pause, and the SIMILAR VEHICLE tag this row credited now exists |
 | WBA | Company-WABA handoff + toggle | Built; needs owner go-live actions (section 3) | W5 contract; W6 anchor, dispatch, opt-in, suppression, card |
+
+### What the December audits found still open
+
+Recorded here rather than quietly closed, because a reconciliation table
+that only lists wins is the thing this section exists to stop being.
+
+- **Enqueue-first outreach (problem 17).** The mass tap still blocks on an
+  all-shop opener pre-pass, ~200 sequential round trips and a live send.
+  Row 17 credited this to Wave 4 and no such change was ever made.
+- **A promo / discount entity (problem 5).** Native prices read now; a
+  "free helmet" or "10% off for a week" is still only an English regex
+  behind a two-confirmation gate.
+- **The graph failover has no cite-the-rival or beat-not-match rail.**
+  Its ladder target is clamped below the rival now (W12f), but the rails
+  themselves live only in SPTE, so a failover turn can cite leverage
+  without the composition guarantees the primary engine has.
+- **Six Evolution/Baileys subtypes are dropped with no turn**, and the
+  "catalog/poll branches" credited under problem 13 are labels in
+  `waMediaKind`, not readers in `waMessageText`.
+- **`missedCallReply()` puts hardcoded English on the wire** in a thread
+  the agent otherwise conducts in the local language.
+- **A third search stamp.** A reply now files its offer under the search
+  its own earlier rounds used (W12f); round ONE of a thread whose first
+  reply arrives after a new hunt began still takes the newest search.
+  Closing it needs a search id stamped on the thread at RFQ time.
 
 **Known deliberate deferrals** (each with its reason recorded at the site):
 normalizeEvolutionEvents extraction; per-instance webhook token derivation
