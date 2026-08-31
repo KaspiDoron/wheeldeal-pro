@@ -426,6 +426,16 @@ function buildPrompt(ctx: TurnContext): { system: string; user: string } {
     `THIS SHOP so far:\n${digest}\n\n` +
     `RECENT MESSAGES:\n${tail || "(none yet)"}\n\n` +
     `SHOP JUST SAID: ${ctx.inbound.text || "(nothing - a scheduled follow-up)"}\n` +
+    // THEIR WORDS, AND WHAT THEY MEAN. The translation is computed on the
+    // critical path for every non-English inbound, stamped on the row and
+    // threaded through the engine - and the model writing the reply never saw
+    // it. It negotiated against raw local-language text while the English sat
+    // one field away. Rendered as a SECOND line rather than a replacement: the
+    // shop's own numbers and model names are in their message verbatim, and a
+    // translation is the only place a digit can quietly change.
+    (ctx.inbound.english && ctx.inbound.english !== ctx.inbound.text
+      ? `IN ENGLISH: ${ctx.inbound.english}\n`
+      : "") +
     // WHAT THEY SENT, not only what they typed. `imageSummary` has always been
     // computed and never reached the model, so a shop that answered with four
     // price boards looked to the LLM like a shop that said nothing.
@@ -610,6 +620,27 @@ export function templateFor(ctx: TurnContext, move: MoveKind): string | undefine
       const known = v.pricePerDay ?? v.sheetPricePerDay;
       if (known) {
         return `${thanks} Just to confirm - is ${known}${v.currency ? " " + v.currency : ""}/day the best you can do for ${nDays(days)}? 🙂`.trim();
+      }
+      // ANSWER THE QUESTION THEY ASKED.
+      //
+      // This move is chosen BECAUSE the shop asked something, and the fallback
+      // then asked for a price - so on a provider outage the agent's reply to
+      // "how many days?" was "what's your best price per day?". A human would
+      // answer first. The two questions shops actually ask that we can answer
+      // from the RFQ without a model are the dates and the vehicle, so answer
+      // those and put the price ask second, where it belongs.
+      const asked = v.acts?.ask;
+      if (asked === "vehicle-choice" || asked === "substantive") {
+        // The two things a shop asks that we can answer from the RFQ without a
+        // model are WHICH BIKE and HOW LONG - and between them they cover most
+        // real questions ("what bike do you want?", "how many days?", "when do
+        // you need it?"). Stating both answers either, and reads naturally
+        // whichever was meant.
+        const rfq = ctx.session.rfq;
+        const cc = rfq.engineSizeCc;
+        const tx = rfq.transmission && rfq.transmission !== "any" ? ` ${rfq.transmission}` : "";
+        const spec = `${cc ? `${cc}cc ` : ""}${rfq.vehicleClass}${tx}`.trim();
+        return `${thanks} I'm after a ${spec} for ${nDays(days)}. What would your best price per day be?`.trim();
       }
       return `${thanks} What would your best price per day be for ${nDays(days)}?`.trim();
     case "deposit-probe":

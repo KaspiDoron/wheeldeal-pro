@@ -693,11 +693,28 @@ export async function translateToEnglish(text: string): Promise<string | null> {
   const t = (text || "").trim();
   if (!t) return null;
   const letters = t.replace(/[^\p{L}]/gu, "");
-  const ascii = letters.replace(/[^A-Za-z]/g, "");
-  // Same bar as looksEnglish (LATIN_DOMINANT): anything the adaptation logic
-  // does NOT read as Latin-dominant gets a gloss. The old 0.7 left a 0.7-0.9
-  // dead band - mixed/diacritic-heavy replies with no adaptation AND no gloss.
-  if (!letters || ascii.length / letters.length >= LATIN_DOMINANT) return null;
+  if (!letters) return null;
+  // "NEEDS A GLOSS" IS NOT "IS NOT LATIN SCRIPT".
+  //
+  // This gated on Latin-dominance, so Indonesian, Malay, unaccented Vietnamese,
+  // Filipino and Spanish - all ~100% ASCII - were never translated. The comment
+  // above claimed the dead band was closed; it had only been MOVED, from
+  // 0.7-0.9 to everything-Latin. And the consequence was not cosmetic: every
+  // deterministic detector downstream (classifyActs, shopAskedQuestion,
+  // shopAskedLocation, shopAskedLicense) is English-only regex reading
+  // `gloss ?? raw`, so with no gloss they all returned false. An Indonesian
+  // shop asking "how many days, can I deliver to your hotel?" produced
+  // askedQuestion=false, which means `answer` was not even a LEGAL move, and
+  // the agent replied by asking for a price again.
+  //
+  // The right question is the one looksEnglish already answers: does this carry
+  // English function words? If not, gloss it - whatever script it is in.
+  if (looksEnglish(t)) return null;
+  // A one- or two-word reply ("ok", "500 bos") has nothing to translate and
+  // would burn a provider call per turn; looksEnglish already refuses those on
+  // word count, so exclude them explicitly rather than glossing every "ok".
+  const words = t.split(/\s+/).filter((w) => /[\p{L}]{2,}/u.test(w));
+  if (words.length < 3) return null;
   const out = await chat(
     [
       {
@@ -1620,13 +1637,37 @@ export async function arbitratePriceBasis(input: {
  * targeted pass, explicitly bounded, is the whole mechanism.
  */
 const VISION_REREAD_BUDGET_MS = 14_000;
+/**
+ * The most the PRIMARY board read may take when the caller supplies a turn
+ * clock. ai.ts's own ceiling is 45s, which is the whole request budget on a
+ * route that also has to run media retries, a possible re-read and the SPTE
+ * turn afterwards.
+ */
+const VISION_TOTAL_BUDGET_CAP_MS = 30_000;
+/**
+ * The re-read is a SECOND full vision call and it fires exactly on the slow
+ * cases (nothing found, parse failed, truncated). Below this much remaining
+ * turn it is the difference between a late answer and no answer at all, so it
+ * stands down and leaves the recovery to the vision worker and the sweep.
+ */
+const VISION_REREAD_MIN_LEFT_MS = 26_000;
 
 export async function extractOffer(
   rfq: StructuredRFQ,
   text: string,
   images: { mime: string; base64: string }[] = [],
   history?: string,
-  region?: string
+  region?: string,
+  /**
+   * The wall clock left for the WHOLE turn, not for this call.
+   *
+   * The vision budgets here (45s read + a 14s failure-class re-read) were
+   * absolute, so on the production route - where images run INLINE, the vision
+   * offload being worker-only - they summed with the media retries and the
+   * SPTE turn past Cloud Run's 90s ceiling. A kill there costs a 10-minute
+   * claim lease, so the shop's photo simply goes unanswered.
+   */
+  msLeft?: () => number
 ): Promise<ExtractedOffer> {
   const { readImages } = await import("./ai");
   // Full spec INCLUDING car details - "car" alone can never be verified
@@ -1932,7 +1973,15 @@ export async function extractOffer(
     try {
       // The extractor's whole contract is a JSON row set - ask the provider
       // for JSON rather than fishing it back out of prose or a half-fence.
-      read = await readImages(system, text || "See attached price list.", images, { json: true });
+      // The primary read gets what the TURN has left, capped at its own budget
+      // and floored so a late arrival still gets one honest attempt.
+      const visionBudget = msLeft
+        ? Math.max(8_000, Math.min(VISION_TOTAL_BUDGET_CAP_MS, msLeft() - 20_000))
+        : undefined;
+      read = await readImages(system, text || "See attached price list.", images, {
+        json: true,
+        ...(visionBudget ? { budgetMs: visionBudget } : {}),
+      });
     } catch (e) {
       read = {
         ok: false,
@@ -1982,6 +2031,8 @@ export async function extractOffer(
     // second full ladder.
     const regionReRead = async (): Promise<ExtractedOffer | null> => {
       try {
+        // Not worth the request's life. See VISION_REREAD_MIN_LEFT_MS.
+        if (msLeft && msLeft() < VISION_REREAD_MIN_LEFT_MS) return null;
         const focused = await readImages(
           system +
             " SECOND PASS - THE FIRST READ CAME BACK UNUSABLE. Work the board in " +

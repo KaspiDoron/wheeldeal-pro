@@ -61,8 +61,22 @@ line unless you write down why.
 - [ ] The 18-problem reconciliation below reviewed and signed.
 
 **Behavior under load**
-- [ ] Staged 7-shop burst: first reply < 10s, all seven < 90s (Wave 8's
-      target; `hammer-queue.mjs` assists).
+- [ ] Staged 7-shop burst: first reply 15-25s, all seven inside ~60s
+      (`hammer-queue.mjs` assists).
+
+      THE OLD LINE SAID "< 10s" AND THE CODE CANNOT DO IT - deliberately.
+      Roughly 11s of the wait is intentional anti-bot behaviour: SPTE's human
+      pause (up to 10s, and it self-cancels when the turn was already slow) plus
+      the Poisson send gap (~1.3s mean). Instant replies are the single
+      strongest bot tell this product has, so the delay is the feature. On top
+      of that sit the real costs - extraction, comprehension, one composer pass,
+      the rails, the guard and the claims - which is where p50 lands at ~15-20s.
+      A gate the product must fail to be safe is not a gate.
+
+      The seven-shop figure is the FLEET GAP doing its job: replies take turns
+      at ~6s each by design, so the seventh is ~36s out by construction. What
+      Wave 8 was really about, and what this line now tests, is that none of
+      them re-parks for minutes waiting on the next drain.
 - [ ] Health panel all green with live checks run; heartbeat beating;
       guard counters readable.
 - [ ] Golden suite green on the live baseline (Admin -> Ops -> replay).

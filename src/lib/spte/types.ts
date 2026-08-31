@@ -458,7 +458,21 @@ export interface TurnContext {
    *  arithmetic - determinism is the property the golden gate needs. */
   nowMs?: number;
   tail: Array<{ dir: "in" | "out"; text: string; at: string }>;
-  inbound: { text: string; verified: VerifiedExtraction };
+  inbound: {
+    text: string;
+    /**
+     * The English gloss of `text`, when the shop wrote in another language.
+     *
+     * COMPUTED ON THE CRITICAL PATH AND NEVER SHOWN TO THE COMPOSER. The app
+     * pays up to 8s per turn for this translation, stamps it on the message
+     * row and threads it through the engine - and it reached only the
+     * comprehension pass and the regex detectors. The model that actually
+     * writes the reply was negotiating against raw Indonesian while the English
+     * sat one field away.
+     */
+    english?: string;
+    verified: VerifiedExtraction;
+  };
   /** The ONLY moves the single pass may choose from (policy rails output). */
   legalMoves: MoveKind[];
   /** The ONE location disclosure gate (resolveShareableLocation). Composed from

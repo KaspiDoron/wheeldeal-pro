@@ -2859,9 +2859,26 @@ export async function sendFromUser(
     // re-POSTing it would risk a duplicate message (a velocity/uniformity ban
     // signal). Ambiguous timeouts propagate as {ok:false} and the drain's
     // transient re-queue handles recovery.
+    // THE SAME THEATRE, PAID TWICE.
+    //
+    // Evolution honours `delay` by HOLDING the send server-side for 1.2-4.5s.
+    // We have already performed the composing presence locally by this point -
+    // on the fast path a burst plus a ~1.2s wait, on the slow path the full
+    // simulation - so the server hold adds that much again to every reply for
+    // theatre the shop has already seen. On the reply lane, where the whole
+    // point is answering fast, it was pure latency: it sits on top of SPTE's
+    // 10s human pause and the Poisson gap.
+    //
+    // Kept on the SLOW path, which is the cold-intro lane: there the extra hold
+    // is part of a deliberately unhurried first contact and costs nobody a
+    // faster answer.
     const r = await evo(email, `/message/sendText/${instance}`, {
       method: "POST",
-      body: JSON.stringify({ number, text: message, delay: typingDelayForLength(message.length) }),
+      body: JSON.stringify({
+        number,
+        text: message,
+        ...(fast ? {} : { delay: typingDelayForLength(message.length) }),
+      }),
     });
     // ONLY a host that rejected the v2 BODY SHAPE can be helped by the v1 body.
     //

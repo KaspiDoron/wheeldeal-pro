@@ -264,6 +264,24 @@ export async function processVendorReply(opts: {
   // that delay even started - was never recorded. This stamps the real number
   // at each terminal point so the doctor can show p50/p95 instead of a promise.
   const turnStartedAt = Date.now();
+  // ONE WALL CLOCK FOR THE WHOLE TURN.
+  //
+  // Every stage had its OWN budget and they summed past the request ceiling. An
+  // image turn on the Next route (the production path - the vision offload is
+  // worker-only) runs media retries 0+2s+5s, then readImages at 45s, then a
+  // failure-class re-read at 14s that fires precisely on the SLOW cases, and
+  // only THEN starts the SPTE turn with a fresh 45s. 7+45+14+45 = 111s against
+  // Cloud Run's --timeout 90.
+  //
+  // What a kill costs is the real problem: the inbound claim is a 10-MINUTE
+  // lease, so the shop's photo goes unanswered until the dead-turn sweep
+  // reaches that sender. A slow reply became a lost one.
+  //
+  // 72s leaves headroom under 90 for the response itself and for the drain the
+  // route runs after. Every downstream budget is now min(its own, what's left).
+  const TURN_WALL_MS = 72_000;
+  const turnDeadlineAt = turnStartedAt + TURN_WALL_MS;
+  const msLeft = () => Math.max(0, turnDeadlineAt - Date.now());
   let text = opts.text.trim();
   const images = opts.images ?? [];
   const transcript = opts.transcript ?? null;
@@ -832,7 +850,8 @@ export async function processVendorReply(opts: {
       extractText || "(the shop sent a price-list photo)",
       images,
       history,
-      ctx.region || undefined
+      ctx.region || undefined,
+      msLeft
     ));
   // NOTE: evaluated lazily (a getter-style function, not a const) because the
   // vehicle gate + thread-confirmation blocks below may still upgrade or
@@ -2265,7 +2284,10 @@ export async function processVendorReply(opts: {
     },
     humanDelay: Boolean(opts.humanDelay && ctx.sender),
     transcript: opts.transcript ?? null,
-    deadlineAt: Date.now() + 45_000,
+    // The SPTE turn gets what the media and extraction stages LEFT, never a
+    // fresh 45s on top of them. A floor of 12s so a turn that arrives late
+    // still composes something rather than dying with nothing to show.
+    deadlineAt: Date.now() + Math.max(12_000, Math.min(45_000, msLeft())),
   };
   const io = liveGraphIO(opts.send);
 
