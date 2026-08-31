@@ -191,10 +191,12 @@ export async function GET(req: Request) {
     // PayPal billing.
     (async (): Promise<ServiceHealth> => {
       const { getConfig } = await import("@/lib/runtime-config");
-      const [id, secret, env] = await Promise.all([
+      const [id, secret, env, planPro, planUltra] = await Promise.all([
         getConfig("PAYPAL_CLIENT_ID"),
         getConfig("PAYPAL_CLIENT_SECRET"),
         getConfig("PAYPAL_ENV"),
+        getConfig("PAYPAL_PLAN_PRO"),
+        getConfig("PAYPAL_PLAN_ULTRA"),
       ]);
       if (!id || !secret) {
         return { id: "billing", label: "PayPal (billing)", status: "off", latencyMs: null, detail: "Not configured - plans stay free." };
@@ -213,6 +215,26 @@ export async function GET(req: Request) {
         });
         return res.ok;
       });
+      // VALID CREDENTIALS ARE NOT A WORKING CHECKOUT. The plan ids are what
+      // tierForPaypalPlan matches an approved subscription against, so with
+      // one missing the tile read HEALTHY right up until a real traveller
+      // reached checkout and it failed - the exact shape of failure this panel
+      // exists to catch before a customer does.
+      const missingPlans = [
+        planPro?.trim() ? null : "PAYPAL_PLAN_PRO",
+        planUltra?.trim() ? null : "PAYPAL_PLAN_ULTRA",
+      ].filter(Boolean) as string[];
+      if (r.out === true && missingPlans.length) {
+        return {
+          id: "billing",
+          label: "PayPal (billing)",
+          status: "degraded",
+          latencyMs: r.ms,
+          detail: `Credentials valid, but ${missingPlans.join(" and ")} ${
+            missingPlans.length === 1 ? "is" : "are"
+          } not set - a real checkout for that tier cannot complete.`,
+        };
+      }
       return {
         id: "billing",
         label: "PayPal (billing)",

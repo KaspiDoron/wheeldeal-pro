@@ -775,9 +775,26 @@ export async function GET(req: Request) {
         result = { ok: false, detail: "A Google App Password is 16 characters (spaces are ignored). Generate one at myaccount.google.com/apppasswords." };
         break;
       }
-      result = gu
-        ? { ok: true, detail: "Format OK (16 chars). Live SMTP is verified on the first email sent." }
-        : { ok: false, detail: "Set GMAIL_USER (your Gmail address) as well." };
+      if (!gu) {
+        result = { ok: false, detail: "Set GMAIL_USER (your Gmail address) as well." };
+        break;
+      }
+      // A LIVE AUTH, not a character count. This said "Format OK (16 chars)"
+      // and deferred the real answer to "the first email sent" - which is a
+      // traveller's signup code. A revoked App Password is exactly 16
+      // characters, so the one failure that matters passed the test and
+      // surfaced as a person unable to receive their code. emailLiveProbe
+      // opens the real SMTP session and AUTHs without sending anything, so
+      // this is safe to press repeatedly; it already backs the Health tile.
+      const { emailLiveProbe } = await import("@/lib/email");
+      const probes = await emailLiveProbe();
+      const gmail = probes.find((x) => x.provider === "gmail");
+      result = gmail?.live
+        ? { ok: true, detail: gmail.detail }
+        : {
+            ok: false,
+            detail: gmail?.detail ?? "The live SMTP check could not be run.",
+          };
       break;
     }
     case "EVOLUTION_PROXY": {

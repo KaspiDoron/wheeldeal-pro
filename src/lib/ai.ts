@@ -1817,7 +1817,12 @@ export async function chatGrounded(
   const key = await getConfig("GEMINI_TOKEN");
   if (!key) return null;
   // 2.5-flash supports the google_search tool; lite is the higher-quota fallback.
-  const models = [GEMINI_MODEL, "gemini-flash-latest", "gemini-flash-lite-latest"];
+  // GEMINI_MODEL is itself "gemini-flash-latest", so listing the literal too
+  // retried a 429 or 404 on the SAME id before ever reaching lite - one dead
+  // rung on exactly the failures this ladder exists for. Full flash stays the
+  // lead here (unlike the text row): grounding needs the google_search tool
+  // more than it needs the last second of latency.
+  const models = [GEMINI_MODEL, "gemini-flash-lite-latest"];
   for (const model of models) {
     try {
       const res = await fetchWithTimeout(

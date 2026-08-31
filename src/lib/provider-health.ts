@@ -49,7 +49,15 @@ export function providerFailureKind(detail: string | null | undefined): Provider
   // free allowance for it is spent - the key is fine and the free fallback
   // model answers. Telling the owner to "check the account has credit" for
   // a product they run on free tiers was wrong twice over.
-  if (/\b402\b|payment.?required/.test(d)) return "paywalled";
+  //
+  // A TIER-GATED MODEL IS THE SAME STORY WITH A DIFFERENT STATUS CODE. Mistral
+  // answers a free Experiment key asking for the large line with 403
+  // `tier_not_allowed` - "this model is not available in your subscription
+  // tier". The key is valid; the MODEL is not free. Falling through to the 403
+  // branch below told the owner to "paste a working token" for a token that
+  // works, and once a tier-gated primary is rescued by its free sibling it
+  // would paint a benign, self-healing rung amber "FAILED - fix it".
+  if (/\b402\b|payment.?required|tier_not_allowed|subscription tier/.test(d)) return "paywalled";
   // Quota EXHAUSTED is an owner problem even though it often arrives as a 429.
   if (/insufficient_quota|quota exceeded|billing/.test(d)) return "auth";
   if (/\b401\b|\b403\b|unauthorized|forbidden|invalid api key|invalid_api_key|api key not valid/.test(d))
