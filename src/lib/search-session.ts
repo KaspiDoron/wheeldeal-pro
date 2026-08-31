@@ -88,8 +88,17 @@ export async function cheapestRivalQuoteFor(
       excludeVendorId: args.vendorId,
       belowPrice: args.belowPrice,
     });
-    // The hot cache stores quoted daily rates only, so a hit is by construction
-    // not package arithmetic.
+    // THAT COMMENT WAS FALSE, and it was load-bearing.
+    //
+    // It claimed the cache "stores quoted daily rates only, so a hit is by
+    // construction not package arithmetic" - while agent-loop wrote every
+    // usablePrice into it unconditionally, package divisions included. So a
+    // 500-for-3-days quoted at 167/day was citable to a one-day traveller
+    // through the hot path, which returns BEFORE the Postgres filters that
+    // exist to catch exactly that. The write now refuses (and evicts) a basis
+    // the rental does not cover, so the claim is finally true by construction
+    // rather than by assertion - and the basis travels with the pick so the
+    // caller can still see it is derived.
     if (cached != null) return { pricePerDay: cached };
   }
 

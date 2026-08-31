@@ -540,6 +540,18 @@ export interface GraphIO {
     currency: string;
     vehicleKey: string;
     belowPrice: number;
+    /**
+     * The traveller's rental length.
+     *
+     * WITHOUT IT EVERY PACKAGE-DERIVED RIVAL IS SILENTLY DROPPED, even when the
+     * rental fully covers the package: cheapestRivalQuoteFor keeps a derived
+     * rate only when `durationDays >= quote_basis_days`, and an undefined
+     * duration can never satisfy that. So the graph engine - the failover, and
+     * the path every user action takes - lost real leverage it was entitled to
+     * cite, silently, in exactly the case (a longer rental) where package
+     * pricing is most common.
+     */
+    durationDays?: number;
   }): Promise<number | undefined>;
   /**
    * `vehicleKey` scopes the session's other quotes to the SAME vehicle. Without
@@ -550,7 +562,19 @@ export interface GraphIO {
   sessionTable(
     userEmail: string,
     thisVendorId?: string,
-    vehicleKey?: string | null
+    vehicleKey?: string | null,
+    /**
+     * The traveller's own spec, for the BOARD-PHOTO rescue inside.
+     *
+     * A photographed price board is tiered: its "15-29 days" column is not
+     * available to a 5-day traveller, and its 160cc row is not the 125cc they
+     * asked for. The card path already picks the right cell (pickBoardPrice);
+     * the RIVAL path used cheapestQuotable, which filters only crossed-out
+     * rows - so the cheapest long-stay tier became cross-thread leverage and
+     * the rails then REQUIRED the draft to cite it. Without these two numbers
+     * the rescue cannot tell which cell applies.
+     */
+    spec?: { engineSizeCc?: number; durationDays?: number }
   ): Promise<SessionShopRow[]>;
   insertWakeup(row: WakeupRow): Promise<void>;
   clearWakeups(threadKey: string, kind?: string): Promise<void>;

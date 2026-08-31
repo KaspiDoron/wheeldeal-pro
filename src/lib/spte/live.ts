@@ -325,7 +325,10 @@ async function buildSession(
     // SAME VEHICLE. A quote for a different machine is not a rival, and citing
     // one at a shop is an argument we made up.
     const rows = await io
-      .sessionTable(email, thisVendor, vehicleKeyFor(input.rfq))
+      .sessionTable(email, thisVendor, vehicleKeyFor(input.rfq), {
+        engineSizeCc: input.rfq.engineSizeCc,
+        durationDays: input.rfq.durationDays,
+      })
       .catch(() => []);
     // WHICH CURRENCY IS THIS SESSION IN? Comparing across currencies without FX
     // would invent leverage, so the filter below is strict equality - but when
@@ -1689,7 +1692,10 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
       const newLow = tc.inbound.verified.pricePerDay;
       if (typeof newLow === "number" && newLow > 0) {
         const rows = await io
-          .sessionTable(input.ctx.sender, input.ctx.vendorId ?? "", vehicleKeyFor(input.rfq))
+          .sessionTable(input.ctx.sender, input.ctx.vendorId ?? "", vehicleKeyFor(input.rfq), {
+            engineSizeCc: input.rfq.engineSizeCc,
+            durationDays: input.rfq.durationDays,
+          })
           .catch(() => []);
         const { planSiblingRebargain } = await import("../negotiation/rebargain");
         const { threadKeyFor } = await import("../graph/state");

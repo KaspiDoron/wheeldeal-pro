@@ -555,6 +555,9 @@ export async function runGraphTurn(
           currency: input.currency,
           vehicleKey: vehicleKeyFor(input.rfq),
           belowPrice: f.pricePerDay!,
+          // Omitted, so every package-derived rival was dropped even when this
+          // rental covers the package - see the type's note.
+          durationDays: input.rfq.durationDays,
         })
         .catch(() => undefined);
     }
@@ -632,6 +635,12 @@ export async function runGraphTurn(
         });
     }
     let choice: DirectorChoice;
+    // SCOPE THE SESSION TABLE TO THE SAME MACHINE. This call passed no vehicle
+    // key at all, so the director's rival board could hold a price for a
+    // different machine entirely - a 150cc quoted in another thread, cited at a
+    // shop that quoted a 125cc. Leverage has to compare like with like.
+    const { vehicleKeyFor: sessionVehicleKeyFor } = await import("../market");
+    const sessionVehicleKey = sessionVehicleKeyFor(input.rfq);
     if (nodeOn("director")) {
       choice = await runDirector({
         input,
@@ -640,7 +649,12 @@ export async function runGraphTurn(
         legal,
         session:
           input.ctx.sender && io.llmAllowed
-            ? await io.sessionTable(input.ctx.sender, input.ctx.vendorId).catch(() => [])
+            ? await io
+                .sessionTable(input.ctx.sender, input.ctx.vendorId, sessionVehicleKey, {
+                  engineSizeCc: input.rfq.engineSizeCc,
+                  durationDays: input.rfq.durationDays,
+                })
+                .catch(() => [])
             : [],
         settings: spec.settings,
         instructions: nodesById.get("director")?.instructions ?? "",
@@ -1571,16 +1585,39 @@ export function liveGraphIO(send: LiveSend): GraphIO {
   return {
     loadState: loadThreadState,
     saveState: saveThreadState,
-    async cheapestRival({ userEmail, vendorId, currency, vehicleKey, belowPrice }) {
+    async cheapestRival({ userEmail, vendorId, currency, vehicleKey, belowPrice, durationDays }) {
       // REAL session boundary (latest search, 18h-clamped) + the shared pure
       // predicate - the same function the playground filters through, so
       // owner tests exercise production selection logic byte-for-byte.
       const { cheapestRivalFor } = await import("../search-session");
-      return cheapestRivalFor(userEmail, { vendorId, currency, vehicleKey, belowPrice });
+      return cheapestRivalFor(userEmail, {
+        vendorId,
+        currency,
+        vehicleKey,
+        belowPrice,
+        durationDays,
+      });
     },
-    async sessionTable(userEmail, thisVendorId, vehicleKey) {
-      const { sessionSinceIso } = await import("../search-session");
+    async sessionTable(userEmail, thisVendorId, vehicleKey, spec) {
+      const { sessionSinceIso, currentSession } = await import("../search-session");
       const since = await sessionSinceIso(userEmail);
+      // SCOPED BY SEARCH, NOT ONLY BY CLOCK.
+      //
+      // This filtered on user + vehicle + an 18h window and nothing else, while
+      // the sibling rival path enforces an exact `search_id` and calls that
+      // scoping "leak-proof where the 18h time window is not". Two hunts for
+      // the same vehicle class in different cities inside 18h therefore
+      // cross-contaminated the PRIMARY engine's leverage - a Krabi price cited
+      // at a Canggu shop. `search_id` has been on the offers table the whole
+      // time and this read ignored it.
+      //
+      // Null-tolerant: rows written before the column was populated have no id
+      // and must not vanish from a running hunt's board.
+      const session = await currentSession(userEmail).catch(() => null);
+      const sameSearch =
+        session?.id != null
+          ? `&or=(search_id.eq.${encodeURIComponent(String(session.id))},search_id.is.null)`
+          : "";
       // SAME VEHICLE OR IT IS NOT A RIVAL. Without this predicate a quote for a
       // different machine - another search inside the same window - could be
       // cited at a shop as a competing price for THIS one. Leverage has to
@@ -1614,7 +1651,7 @@ export function liveGraphIO(send: LiveSend): GraphIO {
         userEmail
       )}&simulated=eq.false&created_at=gte.${encodeURIComponent(
         since
-      )}${sameVehicle}&order=created_at.desc&limit=200`;
+      )}${sameVehicle}${sameSearch}&order=created_at.desc&limit=200`;
       const strictOffers = await sbSelectStrict<OfferRow>(
         "offers",
         `select=vendor_id,vendor_name,price_per_day,currency,duration_days,quote_basis_days${offerWhere}`
@@ -1768,7 +1805,7 @@ export function liveGraphIO(send: LiveSend): GraphIO {
           // negotiation a number nobody could book, and moved their floor to
           // match it. Only the panel honoured the flag; the two places that
           // turn a reading into a NUMBER did not (this one and /api/replies).
-          const { cheapestQuotable } = await import("../media/reading");
+          const { pickBoardPrice } = await import("../media/reading");
           const readRows = await sbSelect<{
             from_number: string | null;
             raw: {
@@ -1792,9 +1829,23 @@ export function liveGraphIO(send: LiveSend): GraphIO {
                 // ...and a message whose ONLY rows are struck out must not
                 // claim this shop, or the newest such message shadows an older
                 // one that really did carry a quotable board.
-                cheapestQuotable(m.raw?.reading?.prices) !== null
+                pickBoardPrice(
+                  m.raw?.reading?.prices,
+                  spec?.engineSizeCc ?? 0,
+                  spec?.durationDays ?? 0
+                ) !== null
             );
-            const cheapest = cheapestQuotable(read?.raw?.reading?.prices);
+            // THE SAME CELL THE CARD SHOWS. cheapestQuotable filters only
+            // crossed-out rows, so the cheapest LONG-STAY tier - a column a
+            // short traveller cannot buy - became this shop's rival price, and
+            // the cite-the-rival rail then obliged the agent to name it at
+            // another shop. Leverage has to compare like with like or it is
+            // fiction, and a tier the traveller cannot book is fiction.
+            const cheapest = pickBoardPrice(
+              read?.raw?.reading?.prices,
+              spec?.engineSizeCc ?? 0,
+              spec?.durationDays ?? 0
+            );
             if (cheapest && typeof cheapest.pricePerDay === "number" && cheapest.pricePerDay > 0) {
               rows.set(r.vendorId, {
                 ...r,

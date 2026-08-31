@@ -1631,13 +1631,47 @@ export async function processVendorReply(opts: {
       delivers,
     };
     // Session attribution for exact rival grouping (analytics + deals).
+    // THE THREAD'S OWN SEARCH, NOT THE NEWEST ONE.
+    //
+    // This read `searches` newest-first at REPLY time, so a shop answering an
+    // hour after the traveller started a second hunt filed its offer under the
+    // NEW search - and cross-shop leverage is scoped by search_id. A Krabi
+    // scooter price could therefore be cited at a Canggu shop, wearing the new
+    // hunt's id. The thread knows which search it belongs to; ask it first and
+    // fall back to newest-first only for threads written before the stamp
+    // existed.
     let searchId: number | null = null;
     if (ctx.sender) {
-      const s = await sbSelect<{ id: number }>(
-        "searches",
-        `select=id&user_email=eq.${encodeURIComponent(ctx.sender)}&order=created_at.desc&limit=1`
-      ).catch(() => []);
-      searchId = s[0]?.id ?? null;
+      // THE SEARCH THIS THREAD BELONGS TO, when the thread can tell us.
+      //
+      // This read `searches` newest-first at REPLY time, so a shop answering
+      // after the traveller had started a SECOND hunt filed its offer under the
+      // new search - and cross-shop leverage is scoped by search_id, so a Krabi
+      // price could then be cited at a Canggu shop wearing the new hunt's id.
+      // An earlier round of this same thread already carries the right id;
+      // reuse it rather than re-deriving one from the clock.
+      //
+      // Round one still falls back to newest-first, which is correct unless the
+      // very first reply arrives after a new hunt began - the residual case,
+      // and the one a search stamp on the thread itself would close.
+      if (ctx.vendorId) {
+        const prior = await sbSelect<{ search_id: number | null }>(
+          "offers",
+          `select=search_id&user_email=eq.${encodeURIComponent(
+            ctx.sender
+          )}&vendor_id=eq.${encodeURIComponent(
+            ctx.vendorId
+          )}&search_id=not.is.null&order=created_at.asc&limit=1`
+        ).catch(() => []);
+        searchId = prior[0]?.search_id ?? null;
+      }
+      if (searchId == null) {
+        const s = await sbSelect<{ id: number }>(
+          "searches",
+          `select=id&user_email=eq.${encodeURIComponent(ctx.sender)}&order=created_at.desc&limit=1`
+        ).catch(() => []);
+        searchId = s[0]?.id ?? null;
+      }
     }
     // THE GUARD THAT WAS DECLARED, READ, AND NEVER WRITTEN (owner report 5 #2).
     //
@@ -1701,6 +1735,24 @@ export async function processVendorReply(opts: {
     // session aggregates (lowest-rival ZSET + OFFERS IN / BARGAINED HSET) and
     // publish the delta for the SSE stream. REDIS_URL-gated no-op when unset;
     // never throws; Postgres above remains the source of truth.
+    // A SHOP THAT SAID NO IS NOT LEVERAGE. Nothing ever evicted from this
+    // cache, so a declined or out-of-stock shop stayed a citable rival for the
+    // whole TTL - and the hot path short-circuits the Postgres query whose
+    // dead-phase filter would have excluded it. The agent could tell one shop
+    // to beat a price from a shop that had already refused to rent.
+    if (
+      searchId != null &&
+      ctx.vendorId &&
+      (extraction.shopDeclined === true || extraction.shopUnavailable === true)
+    ) {
+      const { dropSessionOffer } = await import("./rival-cache");
+      await dropSessionOffer({
+        searchId,
+        vendorId: ctx.vendorId,
+        vehicleKey,
+        currency: cur,
+      }).catch(() => {});
+    }
     if (searchId != null) {
       const { recordSessionOffer } = await import("./rival-cache");
       await recordSessionOffer({
@@ -1712,6 +1764,11 @@ export async function processVendorReply(opts: {
         // First write pins the list anchor; later rounds only lower the score.
         listPricePerDay: usablePrice,
         durationDays: rfq.durationDays ?? 1,
+        // The Postgres row two blocks up already refuses to publish a package
+        // rate the traveller's rental does not cover. This write did not carry
+        // the basis at all, so the hot path - which SHORT-CIRCUITS Postgres -
+        // could cite exactly the number the slow path had rejected.
+        priceBasisDays: priceBasisDays,
       }).catch(() => {});
     }
   }

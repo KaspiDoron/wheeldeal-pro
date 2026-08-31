@@ -34,6 +34,7 @@ export type RedisLike = {
   decr(key: string): Promise<number>;
   zadd(key: string, score: string, member: string): Promise<unknown>;
   zrange(key: string, start: number, stop: number, withScores?: "WITHSCORES"): Promise<string[]>;
+  zrem(key: string, ...members: string[]): Promise<unknown>;
   zremrangebyrank(key: string, start: number, stop: number): Promise<unknown>;
   zremrangebyscore(key: string, min: string | number, max: string | number): Promise<unknown>;
   zcard(key: string): Promise<number>;
@@ -142,7 +143,10 @@ export async function redisDiagnostics(): Promise<{
   }
 }
 
-const TTL_S = 24 * 3600;
+// 18h, matching search-session's STALE_CAP_MS EXACTLY. At 24h the cache
+// outlived the window the Postgres path considers current, so a rival that
+// Postgres had aged out was still citable from Redis for six more hours.
+const TTL_S = 18 * 3600;
 
 // ---------------------------------------------------------------------------
 // Key schema - pure builders, exported for tests and the packages re-export.
@@ -176,6 +180,20 @@ export interface SessionOfferWrite {
   /** The FIRST quote - savings anchor. Only set on the first write per vendor. */
   listPricePerDay: number;
   durationDays: number;
+  /**
+   * The span this price was DERIVED over, when it was derived at all.
+   *
+   * THE CACHE MUST NOT HOLD WHAT POSTGRES REFUSES TO AUTHORIZE. The Postgres
+   * rival path deliberately stores `effective_daily_rate: packageApplies ?
+   * price : null` alongside `quote_basis_days`, so a 500-for-3-days package is
+   * never cited at 167/day to a traveller renting one day. This write had no
+   * such field and a comment asserting - wrongly - that a cache hit "is by
+   * construction not package arithmetic". It was: agent-loop wrote every
+   * usablePrice here unconditionally, so the exact wrong-number class the
+   * Postgres filters exist for came straight back through the hot path, which
+   * short-circuits them.
+   */
+  priceBasisDays?: number;
 }
 
 export interface SessionEventPayload {
@@ -212,6 +230,17 @@ export async function recordSessionOffer(w: SessionOfferWrite): Promise<void> {
   try {
     const oKey = offersKey(w.searchId, w.vehicleKey, w.currency);
     const lKey = listPriceKey(w.searchId, w.vehicleKey, w.currency);
+    // A PACKAGE RATE IS NOT A CITABLE RIVAL unless the traveller's own rental
+    // covers the package. Same rule the Postgres path applies; it simply had no
+    // way to reach here before. A basis the rental does not cover is EVICTED
+    // rather than skipped, so a price that was citable and stopped being so
+    // cannot linger for the TTL.
+    const basis = w.priceBasisDays ?? 0;
+    const packageApplies = basis <= 1 || (w.durationDays > 0 && w.durationDays >= basis);
+    if (!packageApplies) {
+      await r.zrem(oKey, w.vendorId).catch(() => {});
+      return;
+    }
     await r.zadd(oKey, String(w.pricePerDay), w.vendorId);
     // List price = FIRST quote only (NX semantics via manual exists check on
     // the hash field is racy; HSETNX isn't in our minimal type - read+set is
@@ -294,6 +323,31 @@ export async function cheapestCachedRival(q: CachedRivalQuery): Promise<number |
     return null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Drop a shop from the citable-rival set for one session.
+ *
+ * NOTHING EVICTED FROM THIS CACHE BEFORE. A shop that declined, went out of
+ * stock, was suppressed fleet-wide or whose thread died stayed a citable rival
+ * for the whole TTL - so the agent could tell a shop to beat a price from a
+ * shop that had already refused to rent. The Postgres path filters dead phases;
+ * the hot path, which short-circuits it, had no way to know.
+ */
+export async function dropSessionOffer(q: {
+  searchId: string | number;
+  vendorId: string;
+  vehicleKey: string;
+  currency: string;
+}): Promise<void> {
+  const r = await cacheClient();
+  if (!r) return;
+  try {
+    await r.zrem(offersKey(q.searchId, q.vehicleKey, q.currency), q.vendorId);
+  } catch {
+    // The cache is never the source of truth; a failed eviction only means the
+    // Postgres path stays authoritative for this shop, which is the safe side.
   }
 }
 
