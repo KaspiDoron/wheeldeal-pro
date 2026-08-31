@@ -887,7 +887,13 @@ async function persistThreadOutcome(args: {
     }
     if (typeof input.usablePrice === "number" && input.usablePrice > 0) {
       fields.pricePerDay = input.usablePrice;
-      fields.currency = input.currency;
+      // A RESOLVED CURRENCY IS NEVER OVERWRITTEN BY A GUESS. The tick and
+      // user-action paths used to resolve USD for any region the geocoder
+      // labelled without a country token ("Ao Nang", "Canggu", raw coords), and
+      // this line then wrote that USD over the correct value the inbound path
+      // had already established from the shop's phone prefix. One tick was
+      // enough to turn a THB thread into a dollar thread for good.
+      if (input.currency) fields.currency = input.currency;
       // Provenance travels with the number (owner report 6 C3): without it,
       // the thread row wins the sessionTable merge and a divided package
       // per-day re-enters every sibling as a quoted daily rate.

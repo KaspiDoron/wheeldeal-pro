@@ -2594,14 +2594,18 @@ export async function buildTurnFromThread(
   // vendor. `extraction` stays null: that really is "no new information", and
   // conflating the two is what produced the bug.
   let threadPrice: number | undefined;
+  let storedCurrency: string | null = null;
   if (ctx.sender && ctx.vendorId) {
-    const priced = await sbSelect<{ price_per_day: number | string | null }>(
+    const priced = await sbSelect<{ price_per_day: number | string | null; currency?: string | null }>(
       "offers",
-      `select=price_per_day&user_email=eq.${encodeURIComponent(ctx.sender)}` +
+      // `currency` rides along - the row's own resolved currency is the
+      // strongest evidence there is, and this read ignored it.
+      `select=price_per_day,currency&user_email=eq.${encodeURIComponent(ctx.sender)}` +
         `&vendor_id=eq.${encodeURIComponent(ctx.vendorId)}` +
         `&order=created_at.desc&limit=1`
     ).catch(() => []);
     const n = Number(priced[0]?.price_per_day);
+    storedCurrency = (priced[0]?.currency as string | undefined) ?? null;
     // A missing or unreadable offer leaves it undefined - the state this code
     // had unconditionally, so the failure direction is exactly today's
     // behaviour rather than a worse one.
@@ -2610,10 +2614,26 @@ export async function buildTurnFromThread(
 
   const rfq = resolved.rfq; // non-null: guarded by `if (!resolved.rfq) return null`
   const { floorPriceFor } = await import("../market");
-  const { currencyForRegion } = await import("../agents");
-  const cur = currencyForRegion(ctx.region || undefined) || "USD";
-  const floor = await floorPriceFor(ctx.region || undefined, rfq).catch(() => null);
-  const floorSameCur = floor && floor.currency === cur ? floor : null;
+  // NOT `currencyForRegion(region) || "USD"`.
+  //
+  // currencyForRegion returns null for every label the geocoder actually
+  // produces - "Ao Nang", "Krabi", "Canggu", "Da Nang", "Siargao", a raw
+  // "8.0000, 98.0000" - so this resolved USD on the tick and user-action paths.
+  // That USD then became SPTE's session currency, went into the prompt the
+  // model composes from ("they have already quoted 250 USD/day"), went out on
+  // the WIRE in the next bargain, and OVERWROTE the thread's correct stored
+  // currency. The shared chain prefers what the thread already resolved, then
+  // the region, then the shop's phone prefix, and leaves it UNDEFINED rather
+  // than inventing dollars.
+  const { resolveLocalCurrency } = await import("../currency");
+  const cur = await resolveLocalCurrency({
+    stored: storedCurrency,
+    region: ctx.region,
+    shopDigits: toDigits,
+  });
+  const floorRegion = ctx.region || undefined;
+  const floor = await floorPriceFor(floorRegion, rfq).catch(() => null);
+  const floorSameCur = floor && cur && floor.currency === cur ? floor : null;
 
   return {
     event: {
@@ -2635,7 +2655,10 @@ export async function buildTurnFromThread(
     // ...but the price the thread already established is not new information
     // either - it is the standing fact the wait was scheduled around.
     usablePrice: threadPrice,
-    currency: cur,
+    // Empty rather than a fabricated "USD": every money renderer treats a
+    // falsy code as unknown and prints a bare number with a chip, which is
+    // honest. A wrong symbol is the trust-killer the owner reported.
+    currency: cur ?? "",
     floorPrice: floorSameCur?.floor,
     floorTypical: floorSameCur?.typical ?? undefined,
     sessionClosed,

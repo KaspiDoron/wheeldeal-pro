@@ -27,6 +27,9 @@ import {
   CUR_SYM as RATE_CUR_SYM,
   CUR_WORDS as RATE_CUR_WORDS,
   CUR_TAIL_GENERIC,
+  DAY_WORDS_NATIVE,
+  MAGNITUDE_TAIL,
+  applyMagnitude,
 } from "./rate-expr";
 import { normalizeDigits } from "../integrity/translation";
 import { CURRENCIES } from "../currency";
@@ -111,6 +114,61 @@ const CUR_TRAIL = `${CUR_SYM}|(?:${CUR_WORDS})(?![a-z])|${CUR_TAIL_GENERIC}`;
 // quote in Turkish lira.
 const AMBIGUOUS_CUR = new Set(["try", "mad", "a"]);
 
+/**
+ * Currency WORDS that name a unit shared by many countries.
+ *
+ * "peso" is Philippine, Mexican, Colombian, Chilean and Argentine; "dollar" is
+ * American, Australian, New Zealand, Singaporean and Canadian; "rupee" is
+ * Indian, Sri Lankan, Nepali and Pakistani. codeForToken mapped each to ONE
+ * code - PHP, USD, INR - and because the word was genuinely "mentioned",
+ * reconcileCurrency then DEFENDED that answer and discarded the shop's actual
+ * region. Executed across ten markets, eight rendered the wrong currency: "250
+ * pesos per day" in Mexico came out as PHP 250 with a ₱ sign, and "45 dollars"
+ * in Australia as USD.
+ *
+ * This is the same class as the owner's "bath became USD" - the earlier wave
+ * fixed the MISSPELLING half and left the ambiguity half.
+ *
+ * The word still names the currency when the region agrees with it, and when
+ * there is no region to consult. It just may not OVERRULE a known region.
+ */
+const MULTI_COUNTRY_WORD: Record<string, readonly string[]> = {
+  peso: ["PHP", "MXN", "COP", "CLP", "ARS", "UYU", "DOP", "CUP"],
+  pesos: ["PHP", "MXN", "COP", "CLP", "ARS", "UYU", "DOP", "CUP"],
+  piso: ["PHP"],
+  dollar: ["USD", "AUD", "NZD", "SGD", "CAD", "HKD", "TWD", "BND", "FJD"],
+  dollars: ["USD", "AUD", "NZD", "SGD", "CAD", "HKD", "TWD", "BND", "FJD"],
+  rupee: ["INR", "LKR", "NPR", "PKR", "MUR", "SCR"],
+  rupees: ["INR", "LKR", "NPR", "PKR", "MUR", "SCR"],
+  real: ["BRL"],
+  kr: ["SEK", "NOK", "DKK", "ISK"],
+  dinar: ["JOD", "TND", "DZD", "KWD", "BHD", "IQD", "RSD", "LYD"],
+  riyal: ["SAR", "QAR", "OMR", "YER"],
+  rial: ["IRR", "OMR", "YER"],
+  franc: ["CHF", "XOF", "XAF", "XPF"],
+  pound: ["GBP", "EGP", "LBP", "SDG", "SYP"],
+  pounds: ["GBP", "EGP", "LBP", "SDG", "SYP"],
+  krone: ["NOK", "DKK"],
+  kroner: ["NOK", "DKK"],
+  krona: ["SEK", "ISK"],
+  shilling: ["KES", "TZS", "UGX", "SOS"],
+};
+
+/** Is this token a currency word several countries share? */
+export function isMultiCountryCurrencyWord(token: string): boolean {
+  return token.toLowerCase() in MULTI_COUNTRY_WORD;
+}
+
+/**
+ * Could this multi-country word plausibly mean `code`? Used to keep a shop's
+ * own word when it AGREES with the region ("pesos" in the Philippines is PHP)
+ * while refusing to let it override one it disagrees with.
+ */
+export function multiCountryWordAllows(token: string, code: string): boolean {
+  const list = MULTI_COUNTRY_WORD[token.toLowerCase()];
+  return !list || list.includes(code);
+}
+
 // A money amount: either grouped thousands ("1,750" / "1.750" / "1 750") OR a
 // plain run of digits ("1750", "350"), optional decimals. The old pattern only
 // matched the grouped form, so a bare "1750" was truncated to "175".
@@ -122,7 +180,7 @@ const NUM = "(\\d{1,3}(?:[.,\\s]\\d{3})+(?:\\.\\d+)?|\\d+(?:\\.\\d+)?)";
 // denominator, so "250/1day" handed it the 1.
 // A total for the whole rental ("1750 in 5 days", "900 for 3 days") - divided.
 const PRICE_TOTAL = new RegExp(
-  `(?:${CUR_LEAD})?\\s*${NUM}\\s*(?:${CUR_TRAIL})?\\s*(?:for|in|=|:)?\\s*(\\d{1,2})\\s*days?\\b`,
+  `(?:${CUR_LEAD})?\\s*${NUM}\\s*(?:${CUR_TRAIL})?\\s*(?:for|in|=|:)?\\s*(\\d{1,2})\\s*(?:days?\\b|${DAY_WORDS_NATIVE})`,
   "i"
 );
 // The day count BEFORE the total ("3 days 900", "5 days is 1750") - also divided.
@@ -135,7 +193,9 @@ const PRICE_TOTAL = new RegExp(
 // like "rental"/"deposit"/"a week" between the two now breaks the match, which
 // is exactly the human reading: those numbers are not a rental total.
 const PRICE_TOTAL_REV = new RegExp(
-  `\\b(\\d{1,2})\\s*days?\\b\\s*(?:is|are|=|:|-|~|for|at|cost|costs|price)?\\s*(?:${CUR_LEAD})?\\s*${NUM}`,
+  // The native day words too - "เช่า 3 วัน 900 บาท" and "sewa 3 hari 200rb" are
+  // the SAME sentence as "3 days 900 baht", and were read as nothing.
+  `(\\d{1,2})\\s*(?:days?\\b|${DAY_WORDS_NATIVE})\\s*(?:is|are|=|:|-|~|for|at|cost|costs|price)?\\s*(?:${CUR_LEAD})?\\s*${NUM}`,
   "i"
 );
 // A whole-rental total stated WITHOUT the day count ("1000 or 1250 total",
@@ -327,13 +387,29 @@ function codeForToken(t: string): string | undefined {
   return CUR_CODES.has(t.toUpperCase()) ? t.toUpperCase() : undefined;
 }
 
-/** Every currency the text EXPLICITLY names, letter-guarded. Order preserved. */
-export function mentionedCurrencies(text: string): string[] {
+/**
+ * Every currency the text EXPLICITLY names, letter-guarded. Order preserved.
+ *
+ * `regionCurrency`, when known, disambiguates a shared word: "pesos" in a PHP
+ * region is PHP, in an MXN region is MXN, and with no region at all falls back
+ * to codeForToken's single guess. Without it this function confidently reported
+ * PHP for a Mexican shop, and reconcileCurrency honoured the report.
+ */
+export function mentionedCurrencies(text: string, regionCurrency?: string): string[] {
   const out: string[] = [];
   if (!text) return out;
   for (const m of text.matchAll(CUR_ANYWHERE)) {
     const tok = (m[1] ?? m[2] ?? "").toLowerCase();
     if (!tok || AMBIGUOUS_CUR.has(tok)) continue;
+    if (regionCurrency && isMultiCountryCurrencyWord(tok)) {
+      // The shop's word and the shop's country agree - that IS the currency.
+      // They disagree - the word is not specific enough to overrule the
+      // country, so it names nothing and the region wins downstream.
+      if (multiCountryWordAllows(tok, regionCurrency)) {
+        if (!out.includes(regionCurrency)) out.push(regionCurrency);
+      }
+      continue;
+    }
     const code = codeForToken(tok);
     if (code && !out.includes(code)) out.push(code);
   }
@@ -361,7 +437,12 @@ export function reconcileCurrency(
   // fall back to the shop's region rather than store a code nothing can price.
   if (!CUR_CODES.has(extracted)) return regionCurrency;
   if (!regionCurrency || extracted === regionCurrency) return extracted;
-  return mentionedCurrencies(text).includes(extracted) ? extracted : regionCurrency;
+  // The region is passed IN now, so a word several countries share is read
+  // against the country the shop is actually in rather than against one
+  // hard-coded guess.
+  return mentionedCurrencies(text, regionCurrency).includes(extracted)
+    ? extracted
+    : regionCurrency;
 }
 
 // SHARED-UNIT ALTERNATIVES.
@@ -812,8 +893,17 @@ export function extractQuotedPrices(
     if (total) {
       // PRICE_TOTAL captures (amount, days); PRICE_TOTAL_REV captures (days, amount).
       const rev = !line.match(PRICE_TOTAL);
-      const whole = parseAmount(rev ? total[2] : total[1]);
+      const rawWhole = rev ? total[2] : total[1];
       const nDays = parseInt(rev ? total[1] : total[2], 10);
+      // THE MAGNITUDE SUFFIX IS PART OF THE NUMBER HERE TOO. "sewa 3 hari
+      // 200rb" is 200,000 over three days, not 200 - and reading it as 200 put
+      // a 67-per-day phantom on the card that would have beaten every real
+      // quote in the hunt.
+      const wholeAt = line.indexOf(rawWhole, Math.max(0, amountIndex(line, total, rev ? 2 : 1) - 2));
+      const magTail = new RegExp(`^\\s*(${MAGNITUDE_TAIL})(?![a-z])`, "i").exec(
+        line.slice((wholeAt < 0 ? 0 : wholeAt) + rawWhole.length)
+      );
+      const whole = applyMagnitude(parseAmount(rawWhole), magTail?.[1]);
       // MISDIVISION GUARDS (the field's ฿30/day). Division is the WEAKER
       // reading: (a) an amount the shop marked per-day right after it ("6 days
       // 180 per day") is a rate, never a total - the reversed pattern must not
@@ -828,7 +918,12 @@ export function extractQuotedPrices(
       // insurance / fine / bond clause is that charge, never the rental total.
       // Both are read as a total by the raw arithmetic, so guard the division.
       const subjectBefore = line.slice(Math.max(0, amtAt - 28), amtAt);
-      const amtLen = String(Math.round(whole)).length;
+      // THE RAW TOKEN'S LENGTH, not the computed value's. These differ whenever
+      // the amount was written with separators ("150.000") or a magnitude
+      // suffix ("150 nghìn" -> 150000), and the slice below then started past
+      // the text it meant to read - so the per-day marker and the charge words
+      // were looked for in the wrong place.
+      const amtLen = rawWhole.length + (magTail?.[0]?.length ?? 0);
       // BOTH SIDES. This looked only at the 28 chars BEFORE the amount, so
       // "500 deposit" - the charge word trailing its number, which is how
       // people actually write it - sailed through and divided to 167/day.
@@ -858,7 +953,7 @@ export function extractQuotedPrices(
         clockCueBefore
       )
         continue;
-      const afterAmount = line.slice(amtAt + String(Math.round(whole)).length, amtAt + 24);
+      const afterAmount = line.slice(amtAt + amtLen, amtAt + amtLen + 24);
       const markedPerDay = /^\s*(?:baht|thb|php|pesos?|[a-z]{1,3}\.?)?\s*(?:\/|per\b|a\b|each\b|-)?\s*day/i.test(
         afterAmount
       );
