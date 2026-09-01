@@ -36,6 +36,7 @@ import { LoadingDots } from "../LoadingDots";
 import { useCallbackRef } from "../useCallbackRef";
 import { useI18n } from "../../lib/i18n";
 import {
+  GSI_BUTTON_SIZE,
   GsiLoadError,
   gsiButtonWidth,
   gsiFailureCopy,
@@ -65,6 +66,56 @@ function gsiPromptCopy(type: string | undefined): string {
     default:
       return "Google sign-in could not be completed - please try again or use email below.";
   }
+}
+
+// ---------------------------------------------------------------------------
+// THE GOOGLE MARK. Google's own asset, unmodified.
+//
+// "You can't change the size or color of the Google G logo. It must be the
+// standard color version ... and appear on a white background." So it is never
+// tinted, never monochrome, never scaled off its aspect ratio, and it sits on
+// the white tile below rather than directly on our dark plate.
+//
+// No ltr wrapper here on purpose: this is one glyph, so it cannot reverse. The
+// ROW around it (mark then label) SHOULD mirror in Hebrew, and letting it do so
+// is a correctness win GSI's own button does not have - Google forces
+// direction:ltr on its container.
+// ---------------------------------------------------------------------------
+const GOOGLE_G_PATHS: { fill: string; d: string }[] = [
+  {
+    fill: "#EA4335",
+    d: "M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z",
+  },
+  {
+    fill: "#4285F4",
+    d: "M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z",
+  },
+  {
+    fill: "#FBBC05",
+    d: "M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z",
+  },
+  {
+    fill: "#34A853",
+    d: "M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z",
+  },
+];
+
+/** 18px is Google's own logo box at `size: "large"`. It is not scaled. */
+function GoogleG() {
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 48 48"
+      aria-hidden="true"
+      focusable="false"
+      className="block shrink-0"
+    >
+      {GOOGLE_G_PATHS.map((p) => (
+        <path key={p.fill} fill={p.fill} d={p.d} />
+      ))}
+    </svg>
+  );
 }
 
 export interface GoogleButtonProps {
@@ -132,7 +183,8 @@ export function GoogleButton({
         node.replaceChildren();
         gsi.accounts.id.renderButton(node, {
           theme: "outline",
-          size: "large",
+          // Shared with the plate's drawn height - see gsiDrawnHeightPx.
+          size: GSI_BUTTON_SIZE,
           shape: "pill",
           text: "continue_with",
           logo_alignment: "center",
@@ -170,53 +222,121 @@ export function GoogleButton({
   }, [node, clientId, lang, emitCredential, emitUnavailable, emitError]);
 
   return (
+    // TWO LAYERS, ONE BOX.
+    //
+    // GSI renders its button inside Google's own iframe (or, on the FedCM path,
+    // a div it owns), so it cannot be restyled - which is why the login screen
+    // carried a stark white stock pill in a near-black premium UI. The fix is
+    // to draw our own plate and leave GOOGLE'S REAL BUTTON on top of it,
+    // transparent, still taking every pointer, every focus and the accessible
+    // name. Google permits this: a custom button is explicitly allowed, and
+    // localising the label is "permitted and encouraged".
+    //
+    // The one thing that must never happen is the drawn button and the
+    // clickable button drifting apart. The plate is drawn at Google's own
+    // `size: "large"` height (40px, see gsiDrawnHeightPx) inside a 44px row, so
+    // what is painted is a strict SUBSET of what is pressable in BOTH of
+    // Google's DOM shapes, and the 44px tap floor is the row.
     <div
-      className={`relative flex w-full min-w-0 justify-center ${
+      className={`gbtn-shell relative flex w-full min-w-0 justify-center ${
         disabled && !busy ? "pointer-events-none opacity-50" : ""
       }`}
+      data-disabled={disabled && !busy ? "" : undefined}
       aria-busy={busy || !painted}
     >
-      {/* min-h keeps a 44px tap target reserved so nothing below jumps when the
-          iframe lands, and overflow-hidden contains the GSI iframe at 320px. */}
-      <div
-        ref={attach}
-        className={`flex min-h-[44px] w-full max-w-[360px] items-center justify-center overflow-hidden ${
-          busy ? "pointer-events-none opacity-0" : ""
-        }`}
-      />
-      {!painted && !busy && (
-        // A SKELETON SAYS "SOMETHING GOES HERE". A SPINNER SAYS "IT IS COMING".
-        //
-        // GSI is a third-party script plus an iframe, so this container is
-        // visibly empty for a noticeable beat on a cold load - long enough that
-        // a static placeholder reads as a broken control rather than as work in
-        // progress. The shimmer still reserves the exact 44px pill (nothing
-        // below it jumps when the real button lands), and a ring turning inside
-        // it, with the reason spelled out, is what makes the wait legible.
-        //
-        // The ring is a CSS transform on one small element - no layout, no
-        // repaint of the page behind it, so it costs nothing while it spins.
+      {/* The plate is aria-hidden, so nothing inside it can be announced. This
+          is the only live region, and Google's own element carries the button's
+          accessible name. */}
+      <span className="sr-only" role="status">
+        {busy ? t("Signing you in") : !painted ? t("Loading Google sign-in") : ""}
+      </span>
+
+      {/* THE COLUMN. The single box both layers measure themselves against, so
+          there is no width written twice: its width is what gsiButtonWidth()
+          hands to Google. */}
+      <div className="relative w-full min-w-0 max-w-[360px]">
+        {/* THE VISIBLE LAYER. Paint only - aria-hidden and pointer-events-none,
+            so it can never receive :hover, :active or :focus itself. Every one
+            of its states is driven from .gbtn-shell above it.
+
+            h-10 is Google's drawn height; the row is 44px, so the plate is
+            centred inside the tap target. rounded-2xl, text-sm and
+            font-extrabold are the "Log in" button's own values: this is that
+            button with the colour drained out, because it is the secondary way
+            in and it should look like a sibling rather than a stranger. */}
         <div
-          className="pointer-events-none absolute inset-0 flex items-center justify-center"
-          role="status"
-          aria-label={t("Loading Google sign-in")}
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 z-0 flex items-center"
         >
-          <Skeleton className="h-11 w-full max-w-[360px]" rounded="rounded-full" />
-          <span className="absolute flex items-center gap-2 text-[12px] font-bold text-faint">
-            {/* Was a bare border spinner - the last of two that survived a
-                prior cleanup. The orbit is the app's small-loader primitive;
-                a rotating half-border is a different vocabulary for the same
-                sentence. */}
-            <OrbitDots size={16} label={t("Loading Google sign-in")} className="opacity-70" />
-            {t("Loading Google sign-in")}
-          </span>
+          <div className="gbtn flex h-10 w-full items-center justify-center gap-3 overflow-hidden rounded-2xl px-3">
+            {!painted && !busy && (
+              // A SKELETON SAYS "SOMETHING GOES HERE". A SPINNER SAYS "IT IS
+              // COMING". Both, on the finished plate: the border, the radius
+              // and the lift are already the real control, and only the
+              // interior is still resolving - so when GSI paints, nothing
+              // moves.
+              <>
+                <Skeleton className="absolute inset-0" rounded="rounded-2xl" />
+                <span className="relative flex items-center gap-2 text-[12px] font-bold text-faint">
+                  <OrbitDots
+                    size={16}
+                    label={t("Loading Google sign-in")}
+                    className="opacity-70"
+                  />
+                  {t("Loading Google sign-in")}
+                </span>
+              </>
+            )}
+
+            {painted && !busy && (
+              <>
+                {/* THE ONE COLOUR HERE THAT IS NOT A THEME TOKEN, and the only
+                    one Google's guidelines actually mandate: the mark "must be
+                    the standard color version ... and appear on a white
+                    background". White in BOTH themes - never --card, never
+                    --card2, both of which are off-white on light and would let
+                    the tile disappear. */}
+                <span className="gbtn-mark flex h-7 w-7 shrink-0 items-center justify-center rounded-lg">
+                  <GoogleG />
+                </span>
+                {/* OUR text, in OUR language. This is the other half of the
+                    Portuguese fix: the label a traveller reads now comes from
+                    the same `lang` that drives gsiLocale(lang), so the painted
+                    text and the name Google announces agree instead of
+                    contradicting each other. "Continue with Google" is one of
+                    Google's three approved calls to action.
+
+                    truncate is the 320px backstop: a pathologically long
+                    translation shortens, it never pushes the page sideways. */}
+                <span className="min-w-0 truncate text-sm font-extrabold leading-tight text-strong">
+                  {t("Continue with Google")}
+                </span>
+              </>
+            )}
+
+            {busy && (
+              // The plate does not vanish and get replaced by floating dots. It
+              // stays where it is and only its contents change, so the
+              // handshake reads as this button working rather than as the
+              // button leaving.
+              <LoadingDots label={t("Signing you in")} />
+            )}
+          </div>
         </div>
-      )}
-      {busy && (
-        <div className="absolute inset-0 flex items-center justify-center">
-          <LoadingDots label={t("Signing you in")} />
-        </div>
-      )}
+
+        {/* THE REAL GSI BUTTON. Unchanged in behaviour, transparent in paint.
+            opacity-0 ONLY - display:none, visibility:hidden or a zero size
+            would all kill the click. childElementCount is unaffected by
+            opacity, so the 2500ms unauthorised-origin probe still reads a true
+            signal and an unpainted button still disappears entirely (with its
+            divider) rather than sitting there looking pressable. */}
+        <div
+          ref={attach}
+          className={`relative z-10 flex min-h-[44px] w-full items-center justify-center overflow-hidden opacity-0 ${
+            busy ? "pointer-events-none" : ""
+          }`}
+        />
+      </div>
     </div>
   );
 }

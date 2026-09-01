@@ -948,6 +948,156 @@ button.chip::after {
 }
 .leaflet-control-attribution a { color: #4b5563 !important; }
 
+/* ==========================================================================
+   THE GOOGLE SIGN-IN PLATE - the quiet sibling of .btn-primary
+   ==========================================================================
+
+   The login screen carried a stark white stock pill in a near-black premium UI,
+   because GSI renders its button inside Google's own iframe and it cannot be
+   restyled. So we draw this, and leave Google's real button on top of it
+   transparent to take the click. Google permits a custom button; what it does
+   not permit is recolouring the mark or putting it on a non-white background,
+   which is what .gbtn-mark below is for.
+
+   COHERENCE, NOT DECORATION. This is the "Log in" button on the same card with
+   the colour drained out: same 1rem radius, same 800-weight 14px label, same
+   soft lift, same scale(0.96) press. It differs on exactly one axis - the
+   surface is quiet, because this is the secondary way in.
+
+   IT IS PAINT ONLY. The element is aria-hidden and pointer-events-none, so it
+   can never receive :hover, :active or :focus itself. Every state below is
+   driven from .gbtn-shell, the wrapper both layers live in. */
+
+.gbtn {
+  --gbtn-lift: var(--shadow);
+  --gbtn-edge: inset 0 1px 0 0 rgba(255, 255, 255, 0.55);
+  --gbtn-ring: 0 0 0 0 rgba(0, 0, 0, 0);
+  background: var(--card2);
+  border: 1px solid var(--line);
+  box-shadow: var(--gbtn-lift), var(--gbtn-edge), var(--gbtn-ring);
+  transition: background-color 0.15s ease, border-color 0.15s ease,
+    box-shadow 0.15s ease, transform 0.12s ease;
+}
+
+/* A hard white top edge reads as a lit bevel over #eef1f6 and as a glare over
+   #2a2e34, so dark rides at a twelfth of the strength - the same ratio
+   .glass-solid already uses. */
+[data-theme="dark"] .gbtn {
+  --gbtn-edge: inset 0 1px 0 0 rgba(255, 255, 255, 0.07);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) .gbtn {
+    --gbtn-edge: inset 0 1px 0 0 rgba(255, 255, 255, 0.07);
+  }
+}
+
+/* HOVER. One declaration correct in both themes: --card2 pulled toward --text
+   darkens the light plate and lightens the dark one. Background only, because
+   .btn-primary:hover and .btn-ghost:hover on this same card do the same. */
+.gbtn-shell:hover .gbtn {
+  background: color-mix(in srgb, var(--card2) 94%, var(--text));
+}
+
+/* PRESS. The exact value .btn:active uses, so the two buttons give under the
+   thumb by the same amount.
+
+   HONEST LIMIT: :active propagates to ancestors of the pressed element, which
+   holds wherever Google renders into our own DOM (the FedCM path). A
+   cross-origin iframe does not propagate activation to its embedder, so on that
+   path the press is silent and the busy state is the feedback instead - which
+   fires in every browser. */
+.gbtn-shell:active .gbtn {
+  transform: scale(0.96);
+}
+
+/* FOCUS. A transparent button paints no focus ring of its own, and this app has
+   no global :focus-visible rule, so the ring is authored here in the app's own
+   per-control idiom (border goes --blue, as every input on this page does) plus
+   a halo, because a plate that already has a border needs more than a border
+   change to read.
+
+   :has(:focus-visible) rather than :focus-within, so the ring appears on Tab
+   and not on every mouse click. Both of Google's DOM shapes put the focused
+   element inside .gbtn-shell. Engines without :has fall back to :focus-within,
+   which also rings on click - a smaller sin than no ring on Tab. */
+@supports selector(:has(:focus-visible)) {
+  .gbtn-shell:has(:focus-visible) .gbtn {
+    border-color: var(--blue);
+    --gbtn-ring: 0 0 0 3px color-mix(in srgb, var(--blue) 30%, transparent);
+  }
+}
+@supports not selector(:has(:focus-visible)) {
+  .gbtn-shell:focus-within .gbtn {
+    border-color: var(--blue);
+    --gbtn-ring: 0 0 0 3px color-mix(in srgb, var(--blue) 30%, transparent);
+  }
+}
+
+/* DISABLED. The shell already carries pointer-events-none + opacity-50; this
+   only drops the lift, because a drop shadow seen through a half-transparent
+   plate reads as dirt rather than as depth. */
+.gbtn-shell[data-disabled] .gbtn {
+  --gbtn-lift: 0 0 0 0 rgba(0, 0, 0, 0);
+}
+
+/* THE MARK'S WHITE TILE. Google's guidelines are explicit that the standard
+   colour mark must appear on a white background, so this is white in BOTH
+   themes - never --card, never --card2, both of which are off-white on light
+   and would let the tile dissolve. On light a hairline ring defines its edge;
+   on dark, white on #2a2e34 needs nothing, which is what Google's own dark
+   button does too. */
+.gbtn-mark {
+  background: #ffffff;
+  box-shadow: inset 0 0 0 1px rgba(33, 40, 55, 0.07);
+}
+[data-theme="dark"] .gbtn-mark {
+  box-shadow: none;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) .gbtn-mark {
+    box-shadow: none;
+  }
+}
+
+/* Older WebViews with no color-mix: a flat token instead of a mix. --card moves
+   away from --card2 in both themes, so hover still reads. */
+@supports not (background: color-mix(in srgb, red 50%, transparent)) {
+  .gbtn-shell:hover .gbtn {
+    background: var(--card);
+  }
+  .gbtn-shell:has(:focus-visible) .gbtn,
+  .gbtn-shell:focus-within .gbtn {
+    --gbtn-ring: 0 0 0 2px var(--blue);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gbtn {
+    transition: none;
+  }
+  .gbtn-shell:active .gbtn {
+    transform: none;
+  }
+}
+
+/* THE OR DIVIDER - the top half of one composition with the button below it.
+   The rules fade toward the card edges instead of butting into them, so the
+   pair reads as a single block rather than a ruled-off zone. --line carries
+   both themes with no per-theme rule. The gradient direction is physical, not
+   logical, so it is flipped for RTL. */
+.wd-or-rule {
+  background: linear-gradient(to right, transparent, var(--line) 82%);
+}
+.wd-or-rule-end {
+  background: linear-gradient(to left, transparent, var(--line) 82%);
+}
+[dir="rtl"] .wd-or-rule {
+  background: linear-gradient(to left, transparent, var(--line) 82%);
+}
+[dir="rtl"] .wd-or-rule-end {
+  background: linear-gradient(to right, transparent, var(--line) 82%);
+}
+
 /* Dark cartography: the canvas behind the tiles and the attribution strip must
    follow, or every pan flashes a light rectangle under the loading tiles. */
 [data-theme="dark"] .leaflet-container { background: #17191d !important; }

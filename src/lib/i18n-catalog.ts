@@ -210,6 +210,7 @@ export const I18N_CATALOG: string[] = [
   "Connection hiccup - showing the conversation as of a moment ago.",
   "Contact",
   "Contacting",
+  "Continue with Google",
   "Copied",
   "Copy number",
   "Could not delete your account - try again.",

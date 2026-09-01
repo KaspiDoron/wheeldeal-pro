@@ -192,6 +192,39 @@ export function resetGsi(): void {
 }
 
 /**
+ * WHAT GOOGLE DRAWS, SO WE CAN DRAW EXACTLY THE SAME BOX.
+ *
+ * The visible button is ours; the CLICKABLE button is Google's, sitting
+ * transparently on top. If the two differ in size at all, the control a
+ * traveller can see and the control they can press drift apart - which is a
+ * worse bug than the stock widget we started with.
+ *
+ * Google renders `size: "large"` as a 40px-tall button. It pads its own hit
+ * area to 44px on the iframe path (`margin: -6px -10px` around the pill), but
+ * on the FedCM path it renders a plain 40px `div[role=button]` in our own DOM
+ * with no such padding. Drawing our plate at 40px therefore makes what is drawn
+ * a strict SUBSET of what is clickable in BOTH of Google's DOM shapes: there is
+ * no band of button that looks pressable and is not.
+ *
+ * The 44px tap floor CLAUDE.md mandates is preserved by the ROW around the
+ * plate, not by the plate itself.
+ *
+ * These two move together. `google-button.test.ts` fails if the component draws
+ * a height that this size does not produce.
+ */
+export const GSI_BUTTON_SIZE = "large" as const;
+export const GSI_BUTTON_HEIGHT_PX: Readonly<Record<string, number>> = {
+  large: 40,
+  medium: 32,
+  small: 20,
+};
+
+/** The height the plate must be drawn at, given the size we ask Google for. */
+export function gsiDrawnHeightPx(): number {
+  return GSI_BUTTON_HEIGHT_PX[GSI_BUTTON_SIZE];
+}
+
+/**
  * GSI's `renderButton` takes a pixel width and rejects anything outside 200-400.
  * The old code passed the literal 320, which at the 320px viewport this app is
  * required to support left a 240px content box and an iframe hanging 40px off
