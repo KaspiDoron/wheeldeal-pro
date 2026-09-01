@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
 import { resolveOutreachIdentity } from "./identity";
 
 describe("resolveOutreachIdentity (privacy keystone + orphaned-reply fix)", () => {
@@ -10,7 +11,7 @@ describe("resolveOutreachIdentity (privacy keystone + orphaned-reply fix)", () =
       claimsRealShop: true,
       resolvedPhone: "", // unknown - NOT a contradiction
       supplied: "6281234567",
-      ownerTestMode: false,
+      drillIntent: false,
     });
     expect(d.action).toBe("keep");
   });
@@ -20,30 +21,30 @@ describe("resolveOutreachIdentity (privacy keystone + orphaned-reply fix)", () =
       claimsRealShop: true,
       resolvedPhone: "6281234567",
       supplied: "6281234567",
-      ownerTestMode: false,
+      drillIntent: false,
     });
     expect(d.action).toBe("keep");
   });
 
-  it("BUG 1B: an OWNER in production (no drill) keeps a real shop's real identity - no (unverified)", () => {
+  it("an OWNER with no declared drill keeps a real shop's real identity - no (unverified)", () => {
     // The owner is a normal user in production (TEST_MODE off). A real shop at
     // its real Google number must NOT be re-keyed to a "(unverified)" test id.
     const d = resolveOutreachIdentity({
       claimsRealShop: true,
       resolvedPhone: "6281234567",
       supplied: "6281234567",
-      ownerTestMode: false,
+      drillIntent: false,
       vendorName: "Qui Motorbike Rental",
     });
     expect(d.action).toBe("keep");
   });
 
-  it("BUG 1B: an OWNER in production keeps identity even with no reference phone", () => {
+  it("an OWNER with no declared drill keeps identity even with no reference phone", () => {
     const d = resolveOutreachIdentity({
       claimsRealShop: true,
       resolvedPhone: "",
       supplied: "6281234567",
-      ownerTestMode: false,
+      drillIntent: false,
       vendorName: "Pai River Scooter",
     });
     expect(d.action).toBe("keep");
@@ -54,17 +55,17 @@ describe("resolveOutreachIdentity (privacy keystone + orphaned-reply fix)", () =
       claimsRealShop: true,
       resolvedPhone: "6281111111",
       supplied: "6289999999", // spoofed / wrong number
-      ownerTestMode: false,
+      drillIntent: false,
     });
     expect(d).toEqual({ action: "send-to-shop", toPhone: "6281111111" });
   });
 
-  it("re-keys an owner DRILL to a WINDOWED unverified identity even without a contradiction", () => {
+  it("re-keys a DECLARED drill to a WINDOWED unverified identity even without a contradiction", () => {
     const d = resolveOutreachIdentity({
       claimsRealShop: true,
       resolvedPhone: "",
       supplied: "6289999999",
-      ownerTestMode: true,
+      drillIntent: true,
       vendorName: "Bali Scooters",
     });
     expect(d.action).toBe("rekey-test");
@@ -74,12 +75,12 @@ describe("resolveOutreachIdentity (privacy keystone + orphaned-reply fix)", () =
     }
   });
 
-  it("re-keys an owner DRILL mismatch to a test identity (owner cannot override to send elsewhere)", () => {
+  it("re-keys a DECLARED drill mismatch to a test identity (the caller cannot override to send elsewhere)", () => {
     const d = resolveOutreachIdentity({
       claimsRealShop: true,
       resolvedPhone: "6281111111",
       supplied: "6289999999",
-      ownerTestMode: true,
+      drillIntent: true,
     });
     expect(d.action).toBe("rekey-test");
   });
@@ -89,7 +90,7 @@ describe("resolveOutreachIdentity (privacy keystone + orphaned-reply fix)", () =
       claimsRealShop: false,
       resolvedPhone: "6281111111",
       supplied: "6289999999",
-      ownerTestMode: false,
+      drillIntent: false,
     });
     expect(d.action).toBe("keep");
   });
@@ -99,7 +100,7 @@ describe("resolveOutreachIdentity (privacy keystone + orphaned-reply fix)", () =
       claimsRealShop: true,
       resolvedPhone: "6281111111",
       supplied: "",
-      ownerTestMode: false,
+      drillIntent: false,
     });
     expect(d.action).toBe("keep");
   });
@@ -110,7 +111,7 @@ describe("resolveOutreachIdentity (privacy keystone + orphaned-reply fix)", () =
       claimsRealShop: true,
       resolvedPhone: "6281111111",
       supplied: "6289999999",
-      ownerTestMode: true,
+      drillIntent: true,
       vendorName: long,
     });
     if (d.action === "rekey-test") {
@@ -118,5 +119,28 @@ describe("resolveOutreachIdentity (privacy keystone + orphaned-reply fix)", () =
     } else {
       throw new Error("expected rekey-test");
     }
+  });
+});
+
+describe("TEST_MODE is not a statement that the shop is fake", () => {
+  it("the outreach route derives drillIntent from an explicit flag, never from TEST_MODE", () => {
+    // THE BETA-KILLING REGRESSION. `drillIntent` used to be
+    // `session.role === "owner" && await testModeOn()`. TEST_MODE stays ON for
+    // the entire tester programme, so every real shop the owner contacted was
+    // stamped `test-<digits>` - a DRILL ANCHOR, which collapses the inbound
+    // window from 14 days to 3 hours and binds replies to a vendorId no card
+    // holds. Shops answered; the app said "Awaiting reply".
+    const src = readFileSync("src/app/api/outreach/route.ts", "utf8");
+    expect(src).toContain("const drillIntent = body.drill === true;");
+    // The identity block must not consult TEST_MODE at all any more.
+    // Strip comments before asserting: the comment explaining this regression
+    // necessarily quotes the code it replaced, and a grep that cannot tell
+    // prose from code is a test that fails on its own documentation.
+    const code = src
+      .slice(src.indexOf("IDENTITY VERIFICATION"), src.indexOf("if (!to) {"))
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("//") && !l.trim().startsWith("*"))
+      .join("\n");
+    expect(code).not.toMatch(/testModeOn/);
   });
 });

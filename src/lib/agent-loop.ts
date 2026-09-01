@@ -310,7 +310,17 @@ export async function processVendorReply(opts: {
     const isPhoneJid = /@s\.whatsapp\.net$|@c\.us$/.test(opts.remoteJid);
     // Phone JIDs must match by digits; a privacy @lid JID cannot be verified
     // against a phone number, so we fail closed (do not attribute).
-    if (!isPhoneJid || originDigits !== from) return;
+    if (!isPhoneJid || originDigits !== from) {
+      // This used to be a BARE return - the one refusal in the whole inbound
+      // path that left no breadcrumb at all, so a shop reply that died here was
+      // invisible to the WA doctor, to the drop counters and to every
+      // diagnostic built to find exactly this.
+      void noteInboundDropped(opts.senderEmail, from, "origin-mismatch", {
+        jid: opts.remoteJid.slice(0, 48),
+        origin: originDigits,
+      });
+      return;
+    }
   }
   const senderFilter = opts.senderEmail
     ? `&raw->>sender=eq.${encodeURIComponent(opts.senderEmail)}`
@@ -344,6 +354,18 @@ export async function processVendorReply(opts: {
     });
   }
   if (!resolved.rfq || !ctx) {
+    // OUR OUTAGE IS NOT "WE NEVER MESSAGED THEM". When the anchor read could
+    // not be answered, declaring `no-rfq-thread` abandons a live negotiation
+    // over a transient blip - and does it silently, because that reason reads
+    // as a deliberate outcome. Report it as the retryable outage it is, so the
+    // recovery sweep picks the reply up on its next pass instead of the thread
+    // going quiet for good.
+    if (resolved.unavailable) {
+      void noteInboundDropped(opts.senderEmail, from, "thread-unreadable", {
+        anchors: resolved.anchors,
+      });
+      return;
+    }
     // Still no anchor: we genuinely never sent this number an RFQ. Trace it so
     // the WA doctor can explain "why no agent reply" instead of going silent.
     void noteInboundDropped(opts.senderEmail, from, "no-rfq-thread", {

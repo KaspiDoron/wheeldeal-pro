@@ -41,6 +41,18 @@ export interface ThreadContext {
   /** Ingestible: a real shop thread inside its window. */
   ok: boolean;
   reason: IngestReason;
+  /**
+   * OUR OUTAGE, not the shop's absence.
+   *
+   * The anchor read used to be wrapped in `.catch(() => [])`, so a Supabase
+   * wobble produced zero rows and the caller concluded "we never sent this
+   * number an RFQ" - writing `no-rfq-thread` and abandoning a live negotiation
+   * over a transient blip. drill.ts refuses to make that mistake (it reads
+   * strict precisely so unavailable stays distinguishable from empty) and this
+   * resolver never got the same treatment. When this is true the caller must
+   * leave the reply REPLAYABLE rather than declaring the thread unknown.
+   */
+  unavailable?: boolean;
   /** The newest outbound raw that carries an RFQ (not merely the newest row),
    *  reconciled against the thread's opening promise. */
   rfq: StructuredRFQ | null;
@@ -172,13 +184,17 @@ export async function resolveThreadContext(
   // lib/wa/rental-params for why the newest rfq cannot be trusted with them.
   const boundary = await sessionBoundary(senderEmail);
   const sinceBound = boundary ? `&received_at=gt.${encodeURIComponent(boundary)}` : "";
-  const [rows, openerRows] = await Promise.all([
-    sbSelect<{ id: number; received_at: string; raw: ThreadRaw | null }>(
+  const { sbSelectStrict } = await import("../runtime-config");
+  const [anchorRead, openerRows] = await Promise.all([
+    // STRICT on the anchor read. This is the query that decides whether a live
+    // thread exists at all; a permissive catch here turns our own outage into
+    // "this shop was never contacted".
+    sbSelectStrict<{ id: number; received_at: string; raw: ThreadRaw | null }>(
       "whatsapp_messages",
       `select=id,received_at,raw&direction=eq.outbound&raw->>sender=eq.${encodeURIComponent(
         senderEmail
       )}&order=received_at.desc&limit=${WINDOW}&or=${or}`
-    ).catch(() => []),
+    ),
     // The opener of the CURRENT search - the first thing we told this shop
     // THIS hunt, which is the promise that binds. The previous hunt's opener
     // (before the boundary) binds nothing anymore.
@@ -190,6 +206,12 @@ export async function resolveThreadContext(
     ).catch(() => []),
   ]);
 
+  // "missing" (no table yet, a fresh deploy) is a real empty; anything else is
+  // an outage and must not be read as "no thread".
+  if (!("rows" in anchorRead)) {
+    return anchorRead.error === "missing" ? empty : { ...empty, unavailable: true };
+  }
+  const rows = anchorRead.rows;
   if (rows.length === 0) return empty;
 
   const gate = classifyIngestDetailed(rows, Date.now());

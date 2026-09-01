@@ -421,15 +421,26 @@ export async function GET(req: Request) {
   // missing, so a deployment can have ZERO retention and no surface saying so.
   // Read through sbSelectDark - "never ran" and "could not ask" are different
   // answers and the tile must say which.
+  //
+  // TWO RED STATES, TWO DIFFERENT OWNER ACTIONS. The app now self-runs the
+  // prune from the cron ping (lib/retention.ts), so a missing heartbeat no
+  // longer means "nobody scheduled it" - it means the RPC itself is absent,
+  // i.e. supabase/retention.sql has never been run. That attempt leaves a
+  // 'retention-unavailable' breadcrumb, and reading BOTH kinds lets the tile
+  // say which of the two things the owner has to do.
   const { sbSelectDark } = await import("@/lib/runtime-config");
-  const retentionRows = await sbSelectDark<{ created_at: string }>(
+  const retentionRows = await sbSelectDark<{ created_at: string; kind: string }>(
     "agent_events",
-    "select=created_at&kind=eq.retention-ran&order=created_at.desc&limit=1"
+    "select=created_at,kind&kind=in.(retention-ran,retention-unavailable)&order=created_at.desc&limit=1"
   );
-  const retentionLastRanAt = retentionRows?.[0]?.created_at ?? null;
+  const retentionNewest = retentionRows?.[0] ?? null;
+  const retentionLastRanAt =
+    retentionNewest && retentionNewest.kind === "retention-ran" ? retentionNewest.created_at : null;
   const retention = {
     lastRanAt: retentionLastRanAt,
     unreadable: retentionRows === null,
+    // The prune function has never been created - the app tried and got a 404.
+    notInstalled: retentionNewest?.kind === "retention-unavailable",
     // Nightly job: anything past 48h means the schedule is broken or absent.
     stale: Boolean(
       retentionLastRanAt && now - Date.parse(retentionLastRanAt) > 48 * 3600_000

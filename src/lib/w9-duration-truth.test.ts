@@ -244,15 +244,17 @@ async function loadResolver(opts: { rows: Row[]; recovered?: StructuredRFQ | nul
   const desc = [...opts.rows].sort((a, b) => (a.received_at < b.received_at ? 1 : -1));
   const asc = [...opts.rows].sort((a, b) => (a.received_at < b.received_at ? -1 : 1));
 
+  const answer = (q: string) =>
+    // The session-boundary marker read (owner report 6 B): these threads
+    // have no previous search, so no marker exists.
+    q.includes("to_number=eq.session") ? [] : q.includes("received_at.asc") ? [asc[0]] : desc;
+
   vi.doMock("@/lib/runtime-config", () => ({
-    sbSelect: async (_t: string, q: string) =>
-      // The session-boundary marker read (owner report 6 B): these threads
-      // have no previous search, so no marker exists.
-      q.includes("to_number=eq.session")
-        ? []
-        : q.includes("received_at.asc")
-          ? [asc[0]]
-          : desc,
+    sbSelect: async (_t: string, q: string) => answer(q),
+    // The anchor read is STRICT now, so an outage stays distinguishable from
+    // "this shop was never contacted" (wa/thread-context). Same rows, strict
+    // envelope.
+    sbSelectStrict: async (_t: string, q: string) => ({ rows: answer(q) }),
     sbInsert: async (_t: string, rows: Array<Record<string, unknown>>) => {
       events.push(...rows);
       return true;
@@ -419,6 +421,7 @@ describe("promisedRfq, executed - what the mass route now runs every re-contact 
     vi.resetModules();
     vi.doMock("@/lib/runtime-config", () => ({
       sbSelect: async () => (opener ? [opener] : []),
+      sbSelectStrict: async () => ({ rows: opener ? [opener] : [] }),
       sbInsert: async () => true,
       sbUpdate: async () => true,
     }));

@@ -477,7 +477,16 @@ export async function GET(req: Request) {
   // A reply STORED but not yet derived counts too: join the raw inbound rows to
   // vendors by number via our own outbound rows. "Awaiting reply" can never
   // coexist with a reply already sitting in whatsapp_messages.
-  const { digitsOnly } = await import("@/lib/phone");
+  // IDENTITY, NOT SPELLING. This map is built from OUTBOUND `to_number` (the
+  // spelling Google Places gave us, often the national form: 081236954642) and
+  // read with INBOUND `from_number` (the spelling the WhatsApp JID gives us,
+  // always international: 6281236954642). Keyed on raw digits those two never
+  // meet, so a shop that genuinely replied produced no lastInboundAt, no
+  // "active" state and no ledger hit - the card sat under "Awaiting reply"
+  // while the reply sat in whatsapp_messages. phone-key.ts names this exact
+  // bug in its own comments; /api/replies and thread/peek-batch already use
+  // identityKey and this route was simply missed.
+  const { identityKey } = await import("@/lib/wa/phone-key");
   const vendorByDigits: Record<string, string> = {};
   // Two shapes on purpose: `outbound` carries a nested `raw`, while `rfqRows`
   // projects `raw->>vendorId` flat to keep that 400-row read cheap. Normalise
@@ -486,10 +495,10 @@ export async function GET(req: Request) {
     m.raw?.vendorId ?? m.vendorId;
   for (const m of [...outbound, ...rfqRows]) {
     const id = vendorIdOf(m);
-    const digits = digitsOnly(m.to_number);
+    const digits = identityKey(m.to_number);
     if (id && digits && !vendorByDigits[digits]) vendorByDigits[digits] = id;
   }
-  for (const m of inboundRows) bumpState(vendorByDigits[digitsOnly(m.from_number)], "active");
+  for (const m of inboundRows) bumpState(vendorByDigits[identityKey(m.from_number)], "active");
   // A real priced OFFER is the strongest state.
   for (const o of offers) if (o.price_per_day) bumpState(o.vendor_id, "offer");
 
@@ -511,7 +520,7 @@ export async function GET(req: Request) {
     ).catch(() => []);
     for (const t of threadRows) {
       if (!t.stage) continue;
-      const id = t.vendor_id || vendorByDigits[digitsOnly(t.to_number)];
+      const id = t.vendor_id || vendorByDigits[identityKey(t.to_number)];
       if (id) vendorStages[id] = { stage: t.stage, at: t.stage_at };
     }
   }
@@ -564,7 +573,7 @@ export async function GET(req: Request) {
   // Underived-but-stored inbound fills the gap (newest-first here too), so the
   // panel shows what the shop actually said even before the agent turn runs.
   for (const m of inboundRows) {
-    const id = vendorByDigits[digitsOnly(m.from_number)];
+    const id = vendorByDigits[identityKey(m.from_number)];
     if (!id) continue;
     const slot = ensureLast(id);
     if (slot.lastInboundAt && Date.parse(slot.lastInboundAt) >= Date.parse(m.received_at)) continue;

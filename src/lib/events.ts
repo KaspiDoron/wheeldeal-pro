@@ -95,6 +95,7 @@ export const AGENT_EVENT_KINDS = [
   "webhook-orphan", // webhook event for an unknown instance
   "cron-ping", // scheduler heartbeat
   "retention-ran", // nightly prune heartbeat - WRITTEN BY supabase/retention.sql
+  "retention-unavailable", // prune_old_rows does not exist: retention.sql was never run
   "engine-disabled", // both engines off by hand; reply stored but unanswered
   "ai-budget-exhausted", // provider budget refused an AI call
   "ai-chain-exhausted", // EVERY rung refused: the fleet is running deterministic

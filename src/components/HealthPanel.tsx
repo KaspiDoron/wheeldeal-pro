@@ -69,6 +69,11 @@ export function HealthPanel() {
   const [retention, setRetention] = useState<{
     lastRanAt: string | null;
     unreadable: boolean;
+    // The app now self-runs the prune from the cron ping, so a missing
+    // heartbeat has TWO causes with two different owner actions: the SQL file
+    // was never run (the RPC 404s - this flag), or it ran and the schedule
+    // stopped. The tile must not tell the owner to do the wrong one.
+    notInstalled?: boolean;
     stale: boolean;
   } | null>(null);
   const [checkedAt, setCheckedAt] = useState<Date | null>(null);
@@ -345,7 +350,9 @@ export function HealthPanel() {
                 Retention:{" "}
                 {retention.unreadable
                   ? "UNKNOWN - the heartbeat could not be read"
-                  : !retention.lastRanAt
+                  : retention.notInstalled
+                    ? "NOT INSTALLED - prune_old_rows does not exist"
+                    : !retention.lastRanAt
                     ? "NEVER RAN - no prune heartbeat exists"
                     : retention.stale
                       ? `STALE - last prune ${agoMins(Date.now() - Date.parse(retention.lastRanAt))} ago`
@@ -353,10 +360,9 @@ export function HealthPanel() {
               </div>
               {(retention.unreadable || !retention.lastRanAt || retention.stale) && (
                 <p className="mt-1 leading-snug">
-                  Run supabase/retention.sql (it schedules a nightly prune via
-                  pg_cron) - until it runs, transcripts and events grow without
-                  bound and the privacy policy&apos;s retention promise is not
-                  being kept.
+                  {retention.notInstalled
+                    ? "The app tried to run the prune itself and Supabase answered 404 - the function has never been created. Run supabase/retention.sql once in the Supabase SQL editor; the app takes it from there hourly, so pg_cron is optional."
+                    : "Run supabase/retention.sql once (it also revokes anon access to the prune function). After that the app runs the prune itself from the cron ping - until it runs, transcripts and events grow without bound and the privacy policy's retention promise is not being kept."}
                 </p>
               )}
             </div>

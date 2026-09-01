@@ -19,6 +19,7 @@ import {
   trackerStageForLedger,
   LEDGER_TERMINAL_CARD_STAGES,
 } from "@/lib/client/ledger-stage";
+import { stageRank } from "@/lib/client/stage-order";
 import { vehicleLabel } from "@/lib/labels";
 import { Icon } from "@/components/icons";
 import { Filters, DEFAULT_FILTERS, type FilterState } from "@/components/Filters";
@@ -1249,20 +1250,6 @@ export default function Home() {
       > = d.lastByVendor && typeof d.lastByVendor === "object" ? d.lastByVendor : {};
       // Forward-only stage ranking - the DB state can only ADVANCE a card, never
       // rewind it, and never overrides a terminal decline / no-contact.
-      const STAGE_ORDER: Record<string, number> = {
-        queued: 0,
-        "locating-contact": 1,
-        found: 2,
-        "no-response": 2,
-        // In flight: past "found", not yet delivered. Ranked so the DB rollup
-        // can advance it once the send lands but can never rewind it to "found".
-        sending: 2,
-        "rfq-sent": 3,
-        "awaiting-response": 4,
-        negotiating: 5,
-        "offer-received": 6,
-        "counter-offer": 7,
-      };
       const stageForState = (s: "messaged" | "active" | "offer") =>
         s === "offer" ? "offer-received" : s === "active" ? "negotiating" : "awaiting-response";
       // J: vendorIds where the agent has countered the shop's quote this session
@@ -1285,7 +1272,7 @@ export default function Home() {
         // "awaiting-response" by the mere existence of its RFQ row - only a real
         // reply (active/offer) revives it.
         !(cur === "no-response" && target === "awaiting-response") &&
-        (STAGE_ORDER[target] ?? -1) > (STAGE_ORDER[cur ?? "queued"] ?? -1);
+        stageRank(target) > stageRank(cur);
       // J: relabel a card's stage to "counter-offer" once the agent has countered
       // this shop's quote - applied LAST (after offer seeding) at every return
       // site so the priced offer still shows; canAdvance keeps it off terminal
@@ -3118,7 +3105,18 @@ export default function Home() {
       // under "Active offers" after it had said it had nothing to rent - the
       // replied bucket below carries the honest per-stage line for both.
       if (v.offer && v.stage !== "out-of-stock" && v.stage !== "declined") deals.push(v);
-      else if (v.lastInboundAt || v.stage === "negotiating" || v.stage === "counter-offer")
+      // "replied" IS THE REPLIED BUCKET. It was missing from this predicate,
+      // so a card the ledger had correctly advanced to `replied` fell through
+      // to the catch-all and rendered under "Awaiting reply" - the app
+      // contradicting itself, because the counter above keys on lastInboundAt
+      // and DID move. The stage is the strongest evidence there is here: it is
+      // written by advanceThreadStage on a real stored inbound.
+      else if (
+        v.lastInboundAt ||
+        v.stage === "replied" ||
+        v.stage === "negotiating" ||
+        v.stage === "counter-offer"
+      )
         replied.push(v);
       // Cancelled BY THE USER with nothing ever sent: terminal, and counted
       // nowhere else. `sentText` is the test rather than the stage, because

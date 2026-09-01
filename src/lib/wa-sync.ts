@@ -261,7 +261,7 @@ export async function syncInboundReplies(email: string): Promise<number> {
         // webhook itself takes, so whichever arrives second is told so instead
         // of writing a duplicate "[photo]" into the traveller's transcript.
         if (!seenIds.has(m.id) && (await claimInboundStore(m.id, email))) {
-          await sbInsert("whatsapp_messages", [
+          const stored = await sbInsert("whatsapp_messages", [
             {
               wa_message_id: m.id,
               from_number: digits,
@@ -271,9 +271,37 @@ export async function syncInboundReplies(email: string): Promise<number> {
               direction: "inbound",
               // receiver = the user whose WhatsApp this sync ran for - without
               // it a recovered row would be invisible to every scoped read.
-              raw: { channel: "evolution", recovered: true, receiver: email },
+              //
+              // THE ALIAS IS PERSISTED HERE, and this is the only place that
+              // can. `rememberAlias` above puts the lid in PROCESS MEMORY,
+              // which dies on redeploy and is per-instance on Cloud Run - so
+              // the webhook path kept answering `unresolved-identity` (a
+              // 200, never redelivered: that reply is gone) for a chat this
+              // very sweep had already resolved. `raw.lid` is exactly what
+              // lid-alias's aliasFromThreads reads, so writing it here teaches
+              // the live path permanently, fleet-wide.
+              raw: {
+                channel: "evolution",
+                recovered: true,
+                receiver: email,
+                ...(chatLid ? { lid: chatLid } : {}),
+              },
             },
-          ]).catch(() => {});
+          ]).catch(() => false);
+
+          // THE LEDGER MUST SEE A RECOVERED REPLY TOO. The webhook path stamps
+          // `replied` on every stored inbound; this path never did, so a reply
+          // that arrived through the rescue left the thread on `contacted` and
+          // the traveller's card on "Awaiting reply" - the rescue recovered the
+          // message and not the fact that the shop had spoken.
+          if (stored) {
+            const { advanceThreadStage } = await import("./funnel/stages");
+            await advanceThreadStage(
+              { userEmail: email, toNumber: digits },
+              "replied",
+              "recovered inbound (wa-sync sweep)"
+            ).catch(() => null);
+          }
         }
 
         const images: { mime: string; base64: string }[] = [];

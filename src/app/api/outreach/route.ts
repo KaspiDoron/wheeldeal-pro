@@ -159,18 +159,22 @@ async function handlePost(req: Request) {
     }
     const supplied = digitsOnly(to);
     // The decision is a pure, unit-pinned helper (see wa/identity.ts) - only a
-    // POSITIVE phone contradiction or an explicit owner test re-keys to a test
-    // identity; the mere absence of a reference phone keeps the real identity.
-    // BUG 1B: only re-key to a "(unverified)" test identity when the owner is
-    // actually running a DRILL (TEST_MODE on). In production the owner is a real
-    // user - their real shops must keep their real names.
-    const { testModeOn } = await import("@/lib/allowlist");
-    const ownerTestMode = session.role === "owner" && (await testModeOn());
+    // POSITIVE phone contradiction or an EXPLICITLY declared drill re-keys to a
+    // test identity; the mere absence of a reference phone keeps the real one.
+    //
+    // This used to read `session.role === "owner" && await testModeOn()`, which
+    // meant that for the entire beta - TEST_MODE is on for the whole tester
+    // programme - every real shop the owner contacted was stamped
+    // `test-<digits>`. That is a drill anchor, so the inbound window shrank from
+    // 14 days to 3 hours and real shop replies were gated out as `vendor-gate`.
+    // TEST_MODE is a billing and banner switch; it is not a statement that the
+    // shop on the other end is fake.
+    const drillIntent = body.drill === true;
     const identity = resolveOutreachIdentity({
       claimsRealShop,
       resolvedPhone,
       supplied,
-      ownerTestMode,
+      drillIntent,
       vendorName: body.vendorName ? String(body.vendorName) : undefined,
     });
     if (identity.action === "send-to-shop") {
