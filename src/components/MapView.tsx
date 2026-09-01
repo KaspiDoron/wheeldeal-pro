@@ -20,6 +20,8 @@ import { ShopPhoto } from "./ShopPhoto";
 import { moneyLocal } from "@/lib/currency";
 import { useI18n } from "@/lib/i18n";
 import { useAppTheme } from "@/lib/client/theme";
+import { OSM_TILES, tilesForTheme, type MapTiles } from "@/lib/map-tiles";
+import { loadPublicConfig } from "@/lib/client/public-config";
 
 // Google-Maps-style map: Voyager cartography, price-bubble pins, and a
 // booking.com-style swipeable shop list along the bottom (in BOTH the compact
@@ -272,10 +274,29 @@ export default function MapView({
 }) {
   const [full, setFull] = useState(false);
   const stripRef = useRef<HTMLDivElement>(null);
-  // CSS variables restyle every OTHER surface on a theme flip; raster tiles
-  // are pixels, so the map needs its own dark cartography (same CARTO host,
-  // dark_all style). Keyed below so react-leaflet recreates the layer.
+  // CSS variables restyle every OTHER surface on a theme flip; raster tiles are
+  // pixels, so dark mode needs its own treatment. The keyless default has ONE
+  // tile source and inverts it with the filter openstreetmap.org uses for its
+  // own dark mode; a keyed provider that ships real dark cartography supplies a
+  // second URL instead and is never filtered. Keyed below so react-leaflet
+  // recreates the layer on either change.
   const theme = useAppTheme();
+  // Starts on the keyless default so the map draws on the very first paint,
+  // then upgrades if the owner has configured a provider. A dead config
+  // endpoint leaves the default in place - never a grey void.
+  const [tiles, setTiles] = useState<MapTiles>(OSM_TILES);
+  useEffect(() => {
+    let alive = true;
+    loadPublicConfig()
+      .then((c) => {
+        if (alive && c.map?.url) setTiles(c.map);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+  const { url: tileUrl, className: tileClass } = tilesForTheme(tiles, theme === "dark" ? "dark" : "light");
 
   // Lock the page behind the fullscreen map so touch-scroll doesn't move it.
   useEffect(() => {
@@ -321,13 +342,16 @@ export default function MapView({
       zoomControl={false}
     >
       <TileLayer
-        key={theme}
-        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/attributions">CARTO</a>'
-        url={
-          theme === "dark"
-            ? "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
-            : "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
-        }
+        // Keyed on the URL too, not just the theme: a provider swap arriving
+        // from /api/config/public must recreate the layer, and a keyless
+        // single-source basemap changes className rather than url between
+        // themes - which Leaflet would otherwise never repaint.
+        key={`${theme}|${tileUrl}`}
+        attribution={tiles.attribution}
+        url={tileUrl}
+        className={tileClass}
+        maxZoom={tiles.maxZoom}
+        {...(tiles.subdomains ? { subdomains: tiles.subdomains } : {})}
       />
       <Recenter origin={origin} radiusKm={radiusKm} vendors={spread} focus={selected} />
       <Controls origin={origin} />

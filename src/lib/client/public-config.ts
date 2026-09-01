@@ -21,6 +21,7 @@
 // a single-page client that reloads on deploy.
 
 import { fetchJson } from "./fetch-json";
+import { OSM_TILES, type MapTiles } from "../map-tiles";
 
 export interface PublicConfig {
   googleClientId: string | null;
@@ -28,7 +29,12 @@ export interface PublicConfig {
   adsenseClient: string | null;
   adsenseSlot: string | null;
   testMode: boolean;
-  poll: { activityMs: number; repliesMs: number; tagsMs: number };
+  /** The basemap the two map surfaces draw. Resolved server-side from the Key
+   *  Vault so the owner can change providers with no redeploy; the fallback
+   *  below is keyless OpenStreetMap, so a dead config endpoint still draws a
+   *  real map rather than a grey void. */
+  map: MapTiles;
+  poll: { activityMs: number; repliesMs: number; tagsMs: number; pulseMs: number };
 }
 
 /** What a caller gets when the endpoint cannot be reached. Never a throw, and
@@ -39,7 +45,8 @@ export const PUBLIC_CONFIG_FALLBACK: PublicConfig = {
   adsenseClient: null,
   adsenseSlot: null,
   testMode: false,
-  poll: { activityMs: 6000, repliesMs: 8000, tagsMs: 120000 },
+  map: OSM_TILES,
+  poll: { activityMs: 20000, repliesMs: 30000, tagsMs: 120000, pulseMs: 2500 },
 };
 
 export const PUBLIC_CONFIG_URL = "/api/config/public";
@@ -63,10 +70,12 @@ export function loadPublicConfig(): Promise<PublicConfig> {
       adsenseClient: d.adsenseClient ?? null,
       adsenseSlot: d.adsenseSlot ?? null,
       testMode: Boolean(d.testMode),
+      map: d.map?.url ? d.map : OSM_TILES,
       poll: {
         activityMs: d.poll?.activityMs ?? PUBLIC_CONFIG_FALLBACK.poll.activityMs,
         repliesMs: d.poll?.repliesMs ?? PUBLIC_CONFIG_FALLBACK.poll.repliesMs,
         tagsMs: d.poll?.tagsMs ?? PUBLIC_CONFIG_FALLBACK.poll.tagsMs,
+        pulseMs: d.poll?.pulseMs ?? PUBLIC_CONFIG_FALLBACK.poll.pulseMs,
       },
     };
   })().catch(() => PUBLIC_CONFIG_FALLBACK);

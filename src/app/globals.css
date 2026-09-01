@@ -948,10 +948,21 @@ button.chip::after {
 }
 .leaflet-control-attribution a { color: #4b5563 !important; }
 
-/* Dark cartography (CARTO dark_all, keyed in MapView): the canvas behind the
-   tiles and the attribution strip must follow, or every pan flashes a light
-   rectangle under the loading tiles. */
+/* Dark cartography: the canvas behind the tiles and the attribution strip must
+   follow, or every pan flashes a light rectangle under the loading tiles. */
 [data-theme="dark"] .leaflet-container { background: #17191d !important; }
+
+/* DARK TILES WITHOUT A SECOND TILE SOURCE. The keyless OpenStreetMap default
+   ships one raster style, so dark mode is produced the way openstreetmap.org
+   produces its own: invert + hue-rotate the tile imagery. MapView applies this
+   class to the TileLayer ONLY (Leaflet puts className on the tile <img>s), so
+   the price bubbles, the origin pin and the zoom controls keep their real
+   colours. A keyed provider that ships genuine dark cartography sets
+   filterDark:false and never gets this class - inverting dark_all would
+   produce a light map on a dark theme. */
+.wd-map-tiles {
+  filter: invert(100%) hue-rotate(180deg) brightness(95%) contrast(90%);
+}
 [data-theme="dark"] .leaflet-control-attribution {
   background: rgba(23, 25, 29, 0.75) !important;
   color: #99a2b1 !important;

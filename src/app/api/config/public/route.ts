@@ -3,6 +3,7 @@ import { getConfig, getGoogleClientId } from "@/lib/runtime-config";
 import { sessionSecretReady } from "@/lib/session";
 import { authMethods, methodById } from "@/lib/auth/methods";
 import { ADSENSE_PUBLISHER } from "@/lib/site";
+import { resolveMapTiles } from "@/lib/map-tiles";
 
 // Must resolve at request time so Key-Vault values apply without a redeploy.
 export const dynamic = "force-dynamic";
@@ -10,7 +11,18 @@ export const dynamic = "force-dynamic";
 // Browser-safe configuration only. The Google OAuth client ID is public by
 // design; secret keys are never exposed here.
 export async function GET() {
-  const [methods, mapsKey, adsense, testMode, scaleMode, adsenseSlot] = await Promise.all([
+  const [
+    methods,
+    mapsKey,
+    adsense,
+    testMode,
+    scaleMode,
+    adsenseSlot,
+    tileUrl,
+    tileUrlDark,
+    tileAttribution,
+    tilesKey,
+  ] = await Promise.all([
     // The provider list is built by the ONE registry (src/lib/auth/methods.ts)
     // that /api/auth/methods also uses, so this endpoint and the login screen
     // can no longer disagree about whether Google sign-in exists. The legacy
@@ -30,6 +42,17 @@ export async function GET() {
     // complete and earned nothing. It is a Key Vault value like every other
     // integration, so the owner pastes it in Admin -> Keys with no redeploy.
     getConfig("ADSENSE_SLOT"),
+    // THE BASEMAP. Both maps hard-coded keyless CARTO raster tiles; in late
+    // August 2026 CARTO began requiring a key and WATERMARKING unauthenticated
+    // tiles, so the traveller's map filled with "API KEY REQUIRED" and nothing
+    // in the app could see it. The default is keyless OpenStreetMap now (see
+    // lib/map-tiles); these four let the owner upgrade the cartography from
+    // Admin -> Keys with no redeploy. All four are PUBLIC by construction -
+    // the browser fetches the tiles - and are registered secret:false.
+    getConfig("MAP_TILE_URL"),
+    getConfig("MAP_TILE_URL_DARK"),
+    getConfig("MAP_TILE_ATTRIBUTION"),
+    getConfig("MAP_TILES_KEY"),
   ]);
   const clientId = methodById(methods, "google")?.config?.clientId;
   // The ONE flag dialect (config-flags) - this route used to hand-roll a third
@@ -55,8 +78,20 @@ export async function GET() {
     testMode: on(testMode),
     // Client polling cadence: SCALE_MODE stretches intervals to cut function
     // invocations under load (a single instance has no workers to add).
+    map: resolveMapTiles({
+      url: tileUrl,
+      darkUrl: tileUrlDark,
+      attribution: tileAttribution,
+      key: tilesKey,
+    }),
+    // Client polling cadence. `pulseMs` is the cheap change-detector (one
+    // indexed row per source) that makes the heavy polls event-driven instead
+    // of periodic - see /api/pulse. The activity/replies intervals below it are
+    // now a SAFETY FLOOR, not the freshness mechanism: they still carry the
+    // opportunistic drain and the missed-webhook reconciler, which is why they
+    // do not go to zero.
     poll: scaled
-      ? { activityMs: 15000, repliesMs: 20000, tagsMs: 300000 }
-      : { activityMs: 6000, repliesMs: 8000, tagsMs: 120000 },
+      ? { activityMs: 30000, repliesMs: 45000, tagsMs: 300000, pulseMs: 5000 }
+      : { activityMs: 20000, repliesMs: 30000, tagsMs: 120000, pulseMs: 2500 },
   });
 }

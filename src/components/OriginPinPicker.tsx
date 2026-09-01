@@ -14,6 +14,9 @@ import { createPortal } from "react-dom";
 import { useI18n } from "@/lib/i18n";
 import { LoadingDots } from "./LoadingDots";
 import type { Origin } from "./OriginPicker";
+import { useAppTheme } from "@/lib/client/theme";
+import { OSM_TILES, tilesForTheme, type MapTiles } from "@/lib/map-tiles";
+import { loadPublicConfig } from "@/lib/client/public-config";
 
 const pinIcon = L.divIcon({
   className: "",
@@ -48,6 +51,27 @@ export default function OriginPinPicker({
   const [label, setLabel] = useState<string>("");
   const [resolving, setResolving] = useState(false);
   const seq = useRef(0);
+
+  // The same basemap the main map draws (see lib/map-tiles). This surface used
+  // to hard-code the keyless CARTO voyager URL, so it inherited the "API KEY
+  // REQUIRED" watermark independently, and it never followed the theme.
+  const theme = useAppTheme();
+  const [tiles, setTiles] = useState<MapTiles>(OSM_TILES);
+  useEffect(() => {
+    let alive = true;
+    loadPublicConfig()
+      .then((c) => {
+        if (alive && c.map?.url) setTiles(c.map);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+  const { url: tileUrl, className: tileClass } = tilesForTheme(
+    tiles,
+    theme === "dark" ? "dark" : "light"
+  );
 
   // Reverse-geocode the pin into a real place name (same API the GPS flow
   // uses) - the label drives currency + language resolution downstream.
@@ -109,9 +133,19 @@ export default function OriginPinPicker({
               center={[start.lat, start.lng]}
               zoom={pin ? 14 : 11}
               className="h-full w-full"
-              attributionControl={false}
             >
-              <TileLayer url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png" />
+              {/* The credit was suppressed entirely here (attributionControl
+                  false, no attribution prop) - a live compliance gap under
+                  every raster provider's terms, independent of the watermark
+                  this component was carrying. */}
+              <TileLayer
+                key={`${theme}|${tileUrl}`}
+                url={tileUrl}
+                className={tileClass}
+                attribution={tiles.attribution}
+                maxZoom={tiles.maxZoom}
+                {...(tiles.subdomains ? { subdomains: tiles.subdomains } : {})}
+              />
               <ClickCatcher onPick={(lat, lng) => setPin({ lat, lng })} />
               {marker}
               {pin && (
