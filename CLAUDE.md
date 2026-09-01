@@ -86,7 +86,9 @@ src/
                      lifetime, blocked/erased checks; ADMIN_EMAILS role gate
 supabase/schema.sql        run on setup, idempotent (RLS on, service-role only)
 supabase/perf-indexes.sql  run once per database
-supabase/retention.sql     run once; nightly prune + de-identify + heartbeat
+supabase/retention.sql     run once; prune + de-identify + heartbeat + the
+                           anon revoke. The app calls prune_old_rows itself
+                           hourly (lib/retention.ts), so pg_cron is optional
 ```
 
 ## Key mechanics
@@ -147,7 +149,9 @@ Bootstrap env vars in GCP Secret Manager: `SUPABASE_URL`,
 `SESSION_SECRET`), `REDIS_URL` (fleet-wide rate limits + AI RPM). Run ALL
 THREE SQL files: `supabase/schema.sql`, `supabase/perf-indexes.sql`,
 `supabase/retention.sql` (the health panel's retention tile stays red until
-the nightly prune has actually run). Evolution runs against its OWN database -
+the prune has actually run; the app self-runs it hourly from the cron ping, so
+pg_cron is optional - but the FILE is mandatory, because it also revokes the
+anon grant on `prune_old_rows`). Evolution runs against its OWN database -
 never the app's Supabase project. Its save-data posture (render.yaml, owner
 report 8): `CONTACTS=false`, `MESSAGE_UPDATE=false`, but `NEW_MESSAGE=true` +
 `CHATS=true` - the missed-reply recovery sweep reads a 10-row tail per chat

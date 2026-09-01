@@ -752,8 +752,12 @@ Two things worth noticing in that table:
 Stated plainly, because a scaling document that only lists wins is a marketing
 document.
 
-1. **Retention is owner-run SQL.** `supabase/retention.sql` exists and is
-   idempotent, but nothing runs it for you. Until you paste it into the SQL
+1. **Retention needs one owner-run SQL file, once.** `supabase/retention.sql`
+   is idempotent, and the app now CALLS `prune_old_rows` itself hourly from
+   `/api/wa/ping` (`src/lib/retention.ts`, gated on the heartbeat row so it
+   cannot fire twice) - so pg_cron is a nice-to-have rather than a dependency,
+   and a paused free-tier project no longer means zero retention. But nothing
+   can create the function for you. Until you paste it into the SQL
    editor once, your tables grow forever and so does the bill - **and the
    `prune_old_rows` function stays callable by the public anon key**, because
    PostgreSQL grants EXECUTE to PUBLIC by default and Supabase publishes that
