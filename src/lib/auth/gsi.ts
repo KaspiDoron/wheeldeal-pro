@@ -59,6 +59,34 @@ export interface GsiApi {
 export const GSI_SRC = "https://accounts.google.com/gsi/client";
 export const GSI_DEFAULT_TIMEOUT_MS = 8000;
 
+/**
+ * The language GSI should speak.
+ *
+ * GSI localises to the BROWSER's locale, and nothing used to tell it otherwise -
+ * so the one control on the login page that is not ours was also the only one
+ * that ignored the app's language selector. A traveller with a Portuguese phone
+ * reading an English app was offered "Continuar com o Google".
+ *
+ * `hl` on the script URL sets it for the whole page; `locale` on renderButton
+ * sets it per button and is what survives a language change after load. We send
+ * both, because the script is memoised and only the first load can carry `hl`.
+ *
+ * Codes are passed through as-is: this app's LANGS codes ("en", "pt", "he",
+ * "uk", "zh") are already the BCP-47 primary subtags GSI expects. Anything
+ * unrecognisable falls back to English rather than to the browser, because
+ * "whatever this device happens to be" is the bug being fixed.
+ */
+export function gsiLocale(lang: string | null | undefined): string {
+  const code = String(lang ?? "").trim().toLowerCase();
+  return /^[a-z]{2}(-[a-z0-9]{2,8})?$/i.test(code) ? code : "en";
+}
+
+/** The script URL for a locale. Kept separate from GSI_SRC so the tag-reuse
+ *  lookup can match on the base regardless of which locale loaded it first. */
+export function gsiSrcFor(lang: string | null | undefined): string {
+  return `${GSI_SRC}?hl=${encodeURIComponent(gsiLocale(lang))}`;
+}
+
 /** User-safe copy for each way the loader can fail. */
 export function gsiFailureCopy(code: GsiFailureCode): string {
   switch (code) {
@@ -78,7 +106,7 @@ function readApi(): GsiApi | null {
   return g?.accounts?.id ? (g as GsiApi) : null;
 }
 
-function startLoad(timeoutMs: number): Promise<GsiApi> {
+function startLoad(timeoutMs: number, lang?: string): Promise<GsiApi> {
   const ready = readApi();
   if (ready) return Promise.resolve(ready);
 
@@ -118,12 +146,16 @@ function startLoad(timeoutMs: number): Promise<GsiApi> {
       finish(() => reject(new GsiLoadError("script-error", gsiFailureCopy("script-error"))));
 
     // Reuse a tag another mount (or a previous failed attempt) already added.
-    const existing = doc.querySelector<HTMLScriptElement>(`script[src="${GSI_SRC}"]`);
+    // PREFIX match: the src now carries an `hl` locale, and a second mount in a
+    // different language must still reuse the one tag rather than append a
+    // second copy of the SDK.
+    const existing =
+      doc.querySelector<HTMLScriptElement>(`script[src^="${GSI_SRC}"]`) ?? null;
     const script = existing ?? doc.createElement("script");
     script.addEventListener("load", onLoad);
     script.addEventListener("error", onError);
     if (!existing) {
-      script.src = GSI_SRC;
+      script.src = gsiSrcFor(lang);
       script.async = true;
       script.defer = true;
       doc.head.appendChild(script);
@@ -135,9 +167,12 @@ function startLoad(timeoutMs: number): Promise<GsiApi> {
  * Resolve the GSI namespace, or reject with a `GsiLoadError` within `timeoutMs`.
  * Concurrent callers share one promise and one <script> tag.
  */
-export function loadGsi(timeoutMs: number = GSI_DEFAULT_TIMEOUT_MS): Promise<GsiApi> {
+export function loadGsi(
+  timeoutMs: number = GSI_DEFAULT_TIMEOUT_MS,
+  lang?: string
+): Promise<GsiApi> {
   if (inFlight) return inFlight;
-  const attempt = startLoad(timeoutMs).catch((err) => {
+  const attempt = startLoad(timeoutMs, lang).catch((err) => {
     // Only a FAILED attempt drops the memo. Poisoning the cache with a rejection
     // would make "tap to retry" permanently useless on the very networks where
     // retrying is the correct move.

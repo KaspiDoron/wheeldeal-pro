@@ -35,7 +35,13 @@ import { OrbitDots } from "../OrbitDots";
 import { LoadingDots } from "../LoadingDots";
 import { useCallbackRef } from "../useCallbackRef";
 import { useI18n } from "../../lib/i18n";
-import { GsiLoadError, gsiButtonWidth, gsiFailureCopy, loadGsi } from "../../lib/auth/gsi";
+import {
+  GsiLoadError,
+  gsiButtonWidth,
+  gsiFailureCopy,
+  gsiLocale,
+  loadGsi,
+} from "../../lib/auth/gsi";
 
 /**
  * GSI paints nothing and logs to the console when this page's origin is missing
@@ -86,7 +92,7 @@ export function GoogleButton({
   disabled = false,
   busy = false,
 }: GoogleButtonProps) {
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
   // Callback ref, NOT useRef: a remount hands us a new node and re-runs the
   // effect below, which is the whole fix for the vanishing-button bug.
   const [node, setNode] = useState<HTMLDivElement | null>(null);
@@ -105,7 +111,7 @@ export function GoogleButton({
     let cancelled = false;
     let probe: ReturnType<typeof setTimeout> | null = null;
 
-    loadGsi()
+    loadGsi(undefined, lang)
       .then((gsi) => {
         if (cancelled) return;
         gsi.accounts.id.initialize({
@@ -120,12 +126,22 @@ export function GoogleButton({
           },
         });
         const width = gsiButtonWidth(node.clientWidth);
+        // A REMOUNT MUST NOT STACK BUTTONS. The effect re-runs when the language
+        // changes, and renderButton APPENDS - so without this a traveller who
+        // switched languages twice got three Google buttons in a column.
+        node.replaceChildren();
         gsi.accounts.id.renderButton(node, {
           theme: "outline",
           size: "large",
           shape: "pill",
           text: "continue_with",
           logo_alignment: "center",
+          // The app's language, not the browser's. GSI localises to the device
+          // by default, which is why an English app on a Portuguese phone
+          // offered "Continuar com o Google" - the one control on the page that
+          // ignored the language selector. `hl` on the script URL covers the
+          // first load; this covers every change after it.
+          locale: gsiLocale(lang),
           ...(width ? { width } : {}),
         });
         // Painting is asynchronous inside GSI, so "did it work" can only be
@@ -151,7 +167,7 @@ export function GoogleButton({
       cancelled = true;
       if (probe) clearTimeout(probe);
     };
-  }, [node, clientId, emitCredential, emitUnavailable, emitError]);
+  }, [node, clientId, lang, emitCredential, emitUnavailable, emitError]);
 
   return (
     <div

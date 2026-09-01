@@ -658,9 +658,18 @@ describe("SCALING.md does not drift from the code it describes", () => {
     expect(doc).toMatch(/basic-256mb/);
   });
 
-  it("points at the retention script that exists and is not run for you", () => {
+  it("points at the retention script, and is exact about what still needs a human", () => {
     expect(doc).toMatch(/supabase\/retention\.sql/);
-    expect(doc).toMatch(/nothing runs it for you/);
+    // The app calls prune_old_rows itself hourly now, so "nothing runs it for
+    // you" stopped being true. What must NOT be lost in that update is WHY the
+    // file is still mandatory: it also revokes the anon grant. A doc that says
+    // "optional" without that distinction is a security regression dressed as a
+    // convenience, so the pin now guards both halves.
+    expect(doc).toMatch(/pg_cron is a nice-to-have|pg_cron is optional/i);
+    // Whitespace-tolerant: markdown wraps, and a pin that breaks on a line
+    // break tests the paragraph filling, not the claim.
+    expect(doc).toMatch(/nothing\s+can\s+create\s+the\s+function\s+for\s+you/i);
+    expect(doc).toMatch(/prune_old_rows.*(anon|public)/is);
   });
 
   it("names the exact three event kinds the ops doc says should page someone", () => {
@@ -685,7 +694,7 @@ describe("SCALING.md does not drift from the code it describes", () => {
     expect(doc).toMatch(/What this guide does NOT solve/);
     expect(doc).toMatch(/no error tracking/i);
     expect(doc).toMatch(/workers VM is not provisioned/i);
-    expect(doc).toMatch(/Retention is owner-run SQL/i);
+    expect(doc).toMatch(/Retention needs one owner-run SQL file/i);
   });
 
   it("carries a cost envelope per user tier, not a single number", () => {
