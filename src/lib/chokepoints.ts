@@ -117,6 +117,11 @@ export interface InviteHeadroom {
  * INVITES against capacity rather than paired sessions: it is the pessimistic
  * reading, and the pessimistic reading is the one worth alarming on when the
  * downside is a tester who cannot use the product.
+ *
+ * `invited` COUNTS EVERY ACCOUNT THAT WILL HOLD A SOCKET, THE OWNER INCLUDED.
+ * The fleet ceiling does not know about roles - hostUserCounts counts every
+ * wa_sessions row with status=open - so an owner-exempt count here would make
+ * the tile optimistic by exactly one, in the one direction that hurts.
  */
 export function inviteHeadroom(
   invited: number,

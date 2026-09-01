@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 // OWNER REPORT 10, W1 - THE TWO CEILINGS THAT DECIDE AN INVITE.
 //
@@ -175,5 +176,57 @@ describe("doc pin: the fleet runbook does not resurrect dead free tiers", () => 
   it("the EVOLUTION_HOSTS example still carries its dial prefixes", () => {
     // The exact shape whose parsing was broken in OR8 (see or8-audit-blockers).
     expect(read()).toMatch(/\|<the key from \.env>\|66,84,855,856,60,65/);
+  });
+});
+
+describe("the owner holds a socket, so the owner counts", () => {
+  // THE TILE WAS OPTIMISTIC BY ONE, IN THE DIRECTION THAT HURTS.
+  //
+  // The route used to pass `list.length - 1`, subtracting the owner's row
+  // because inviteHeadroom's contract said the owner is not counted. But the
+  // ceiling this compares against is the EVOLUTION FLEET, and hostUserCounts
+  // counts every wa_sessions row with status=open - the owner's among them. So
+  // the correction turned a pessimistic tile into an optimistic one, and an
+  // optimistic capacity tile invites a tester who signs in fine and then cannot
+  // link WhatsApp: the exact failure the tile exists to prevent.
+
+  it("24 testers plus the owner on a 25-socket fleet is EXACTLY FULL, not 'room for 1'", async () => {
+    const { inviteHeadroom } = await import("./chokepoints");
+    // What betaAllowlist() actually returns for 24 invited testers: it always
+    // appends the owner, so the list is 25 rows and 25 sockets get held.
+    const h = inviteHeadroom(25, 1, 25, 100);
+    expect(h.headroom).toBe(0);
+    expect(h.capacity).toBe(25);
+    expect(h.detail).toMatch(/Exactly full/);
+    // Not red - nobody is broken yet - but it must say the next invite has
+    // nowhere to go rather than offering a slot that does not exist.
+    expect(h.state).toBe("warn");
+    expect(h.detail).toMatch(/the next invite does not/);
+  });
+
+  it("the 25th tester is the one who signs in and then cannot link", async () => {
+    const { inviteHeadroom } = await import("./chokepoints");
+    const h = inviteHeadroom(26, 1, 25, 100); // 25 testers + owner
+    expect(h.state).toBe("alarm");
+    expect(h.headroom).toBe(-1);
+    expect(h.detail).toMatch(/1 of them can sign in and then FAIL to link/);
+  });
+
+  it("the route passes the owner-inclusive count", () => {
+    // The wiring, because the arithmetic above is only correct if the caller
+    // stops subtracting. A source check is the only way to see a caller.
+    const route = readFileSync(
+      join(process.cwd(), "src/app/api/admin/chokepoints/route.ts"),
+      "utf8"
+    );
+    expect(route).toMatch(/inviteHeadroom\(\s*list\.length,/);
+    expect(route).not.toMatch(/Math\.max\(0, list\.length - 1\)/);
+  });
+
+  it("the fleet arithmetic for a real 100-tester wave is unchanged", async () => {
+    // Guards the change from over-reaching: four hosts really do hold 100.
+    const { inviteHeadroom } = await import("./chokepoints");
+    expect(inviteHeadroom(100, 4, 25, 100).state).not.toBe("alarm");
+    expect(inviteHeadroom(101, 4, 25, 100).state).toBe("alarm");
   });
 });
