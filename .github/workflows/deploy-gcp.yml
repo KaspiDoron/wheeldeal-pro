@@ -41,18 +41,24 @@ on:
     branches:
       - main
       - master
-      # The active development branch - runs `verify` on push, never `deploy`.
-      - claude/rental-agents-legal-setup-o7rgcv
+      # EVERY development branch, by pattern - never by name.
       #
-      # `claude/rental-negotiation-app-pc33ux` used to be listed here and was
-      # described as "the live production branch". It has not existed on the
-      # remote for a long time - `git ls-remote --heads` returns only master and
-      # the two claude/* branches above - and master is what actually deploys.
-      # Keeping the dead name was not harmless: it is what pointed Render's
-      # blueprint at that branch, so every Manual Sync failed with
-      # "not found: file: .../render.yaml" - a real file, on a branch that is
-      # gone. A stale branch name in config is a live misconfiguration
-      # somewhere else.
+      # This listed ONE branch by name, and the name was of a branch CLAUDE.md
+      # itself calls retired. So the active branch was not in the list, and the
+      # quality gate below had never run on a single one of its commits: they
+      # were green on a laptop and ungated in CI. `list_workflow_runs` for that
+      # branch returned zero.
+      #
+      # The file already knew the lesson and wrote it about Render - a stale
+      # branch name in config is a live misconfiguration somewhere else - and
+      # then repeated the mistake one line further down. A pattern cannot go
+      # stale when someone renames a branch, which is the only durable fix.
+      #
+      # This is SAFE to widen because deploying is gated separately: the
+      # `deploy` job's `if` (below) admits only refs/heads/main and
+      # refs/heads/master, so a feature branch gets the full quality gate and
+      # can never reach a deploy.
+      - 'claude/**'
   pull_request:
   workflow_dispatch: {}
 

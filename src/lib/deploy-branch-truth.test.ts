@@ -161,13 +161,32 @@ describe("no config points at a branch that does not exist", () => {
           `git push origin master:refs/heads/${MIRROR_BRANCH}`
       ).toBe(shaFor("master"));
     }
-    // Every branch the deploy workflow lists must actually exist, except the
-    // conventional `main` fallback which is deliberately kept for a future
-    // rename.
+    // INTENT PRESERVED, MECHANISM MOVED ON. This used to assert that every
+    // branch the workflow LISTS really exists - the right check while the
+    // trigger named branches one by one. It named exactly one, and the one it
+    // named was retired, so the branch actually being worked on was never
+    // gated: the rule caught dead names and could not catch a MISSING one.
+    //
+    // The trigger is a pattern now (`claude/**`), so "does every listed name
+    // exist" is no longer the property that can hurt. The property that can is
+    // the reverse - that the branch CLAUDE.md tells the next session to develop
+    // on is one CI will actually fire for.
     const wf = read(".github/workflows/deploy-gcp.yml");
-    const listed = [...wf.matchAll(/^\s*-\s*(claude\/[\w./-]+)\s*$/gm)].map((m) => m[1]);
-    expect(listed.length).toBeGreaterThan(0);
-    for (const b of listed) expect(heads, `workflow lists ${b}`).toContain(`refs/heads/${b}`);
+    const working = read("CLAUDE.md").match(/Develop on `(claude\/[^`]+)`/)?.[1];
+    expect(working, "CLAUDE.md must name the working branch").toBeTruthy();
+    expect(heads, `CLAUDE.md says to develop on ${working}`).toContain(
+      `refs/heads/${working}`
+    );
+    // ...and the trigger admits it. Every claude/* branch matches the pattern,
+    // so this holds through any future rename - which is the whole point.
+    expect(wf).toMatch(/^\s+- 'claude\/\*\*'$/m);
+    expect(working!.startsWith("claude/")).toBe(true);
+    // Any concrete claude/<name> entry reappearing in the trigger is the
+    // original defect coming back.
+    const literals = [...wf.matchAll(/^\s*-\s*'?(claude\/[\w./-]+)'?\s*$/gm)]
+      .map((m) => m[1])
+      .filter((b) => !b.includes("**"));
+    expect(literals, "the trigger must not name branches individually").toEqual([]);
   });
 
   it("THE REPO SIDE IS CLEAN - the four checks that locate the 404 inside Render", () => {

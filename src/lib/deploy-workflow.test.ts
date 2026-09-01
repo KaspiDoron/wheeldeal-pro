@@ -121,3 +121,76 @@ describe("secrets reach gcloud as environment variables, not as pasted text", ()
     expect(s.slice(s.indexOf("  deploy:"))).toMatch(/needs: verify/);
   });
 });
+
+// THE GATE HAD NEVER RUN ON THE BRANCH BEING DEVELOPED.
+//
+// The push trigger listed development branches BY NAME, and the one name it
+// carried belonged to a branch CLAUDE.md itself calls retired. So the active
+// branch was absent, `list_workflow_runs` for it returned zero, and every
+// commit on it was green on a laptop and ungated in CI.
+//
+// The file already knew this lesson - it wrote it, at length, about how a dead
+// branch name in Render's blueprint made every Manual Sync fail - and then
+// repeated the mistake in its own trigger four lines later.
+describe("CI runs on the branch people actually work on", () => {
+  const branchBlock = () => {
+    const s = wf();
+    const start = s.indexOf("on:\n  push:\n    branches:");
+    expect(start).toBeGreaterThan(-1);
+    return s.slice(start, s.indexOf("  pull_request:", start));
+  };
+
+  it("matches development branches by PATTERN, not by name", () => {
+    // A pattern cannot go stale when someone renames a branch, which is the
+    // only durable fix - every named-branch scheme drifts the moment the name
+    // changes, and nothing fails loudly when it does.
+    expect(branchBlock()).toMatch(/^\s+- 'claude\/\*\*'$/m);
+  });
+
+  it("no branch is named individually any more", () => {
+    // Any concrete claude/<name> entry is the defect coming back.
+    const named = branchBlock()
+      .split("\n")
+      .filter((l) => /^\s+-\s+'?claude\//.test(l))
+      .filter((l) => !l.includes("claude/**"));
+    expect(named).toEqual([]);
+  });
+
+  it("the branch CLAUDE.md says to develop on is covered by the pattern", () => {
+    // The coupling that actually matters: the doc names the working branch, and
+    // the trigger has to admit it. Executed rather than eyeballed.
+    const claudeMd = readFileSync(join(process.cwd(), "CLAUDE.md"), "utf8");
+    const m = claudeMd.match(/Develop on `(claude\/[^`]+)`/);
+    expect(m, "CLAUDE.md must name the working branch").toBeTruthy();
+    const working = m![1];
+    expect(working.startsWith("claude/")).toBe(true);
+    // ...and the pattern in the workflow admits it.
+    expect(branchBlock()).toContain("claude/**");
+  });
+
+  it("widening the trigger cannot widen DEPLOYS", () => {
+    // This is what makes the pattern safe. The deploy job admits exactly two
+    // refs; a feature branch gets the full quality gate and can never reach a
+    // deploy no matter how the trigger is written.
+    const s = wf();
+    const deployIf = s.slice(s.indexOf("  deploy:"), s.indexOf("runs-on", s.indexOf("  deploy:")));
+    expect(deployIf).toContain("github.ref == 'refs/heads/main'");
+    expect(deployIf).toContain("github.ref == 'refs/heads/master'");
+    expect(deployIf).toContain("github.event_name != 'pull_request'");
+    // No branch-pattern matching in the deploy gate - only exact refs.
+    expect(deployIf).not.toMatch(/startsWith\(github\.ref/);
+  });
+
+  it("the quality gate itself still runs all four checks", () => {
+    // If the trigger is fixed but the gate is hollow, nothing was gained.
+    const s = wf();
+    for (const cmd of [
+      "npm run typecheck",
+      "npm run typecheck:services",
+      "npm run typecheck:tests",
+      "npx vitest run",
+    ]) {
+      expect(s).toContain(cmd);
+    }
+  });
+});
