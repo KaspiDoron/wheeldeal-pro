@@ -211,6 +211,36 @@ describe("transportSummary - the tile that never cries wolf", () => {
     expect(t.note).toMatch(/asserted but unverified/);
   });
 
+  it("a configured-but-UNVERIFIED fleet still raises the cluster alarm", async () => {
+    // The alarm's whole point is numbers egressing from one datacenter IP. A
+    // pasted template asserts an exit; proxy_verified_at is the only evidence
+    // one is carrying traffic. Five unverified numbers on one host are exactly
+    // as exposed as five unconfigured ones, so the tile must say so - it used
+    // to go quiet the moment the template existed.
+    config = { EVOLUTION_PROXY_TEMPLATE: "socks5://u:p_session-{session}@gw:1080" };
+    selectQueue = [
+      Array.from({ length: 5 }, () => ({ host_url: "https://h1", proxy_verified_at: null })),
+    ];
+    const t = await transportSummary();
+    expect(t.configured).toBe(true);
+    expect(t.verified).toBe(0);
+    expect(t.clusterWarning).toEqual({ host: "https://h1", count: 5 });
+    expect(t.note).toMatch(/cluster-ban risk/);
+  });
+
+  it("a fleet whose exits are all CONFIRMED stays calm at the same size", async () => {
+    config = { EVOLUTION_PROXY_TEMPLATE: "socks5://u:p_session-{session}@gw:1080" };
+    selectQueue = [
+      Array.from({ length: 8 }, () => ({
+        host_url: "https://h1",
+        proxy_verified_at: "2026-08-09T00:00:00Z",
+      })),
+    ];
+    const t = await transportSummary();
+    expect(t.clusterWarning).toBeUndefined();
+    expect(t.note).toMatch(/confirmed residential exit/i);
+  });
+
   it("an unreadable session table reports UNKNOWN, never a confident zero", async () => {
     config = { EVOLUTION_PROXY: "socks5://u:p@gw:1080" };
     selectThrows = true;

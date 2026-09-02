@@ -79,27 +79,28 @@ describe("A3 fingerprint - refreshed version, baked into the image", () => {
 });
 
 describe("A4 datacenter-IP cluster banner - pure and loud", () => {
-  it("flags a host with >= threshold unproxied numbers, names the worst", () => {
+  it("flags a host with >= threshold exposed numbers, names the worst", () => {
     const hosts = ["h1", "h1", "h1", "h1", "h1", "h2"]; // 5 on h1
-    expect(clusterWarning(hosts, false)).toEqual({ host: "h1", count: 5 });
+    expect(clusterWarning(hosts)).toEqual({ host: "h1", count: 5 });
   });
 
-  it("stays silent below the threshold, and silent whenever a proxy is set", () => {
-    expect(clusterWarning(["h1", "h1", "h1"], false)).toBeNull();
-    const many = Array.from({ length: 20 }, () => "h1");
-    expect(clusterWarning(many, true)).toBeNull(); // proxied => every number its own exit
+  it("stays silent below the threshold, and on an empty exposed set", () => {
+    expect(clusterWarning(["h1", "h1", "h1"])).toBeNull();
+    expect(clusterWarning([])).toBeNull(); // every number confirmed => nothing exposed
     expect(PROXYLESS_CLUSTER_THRESHOLD).toBe(5);
   });
 
   it("picks the WORST host when several cross the line", () => {
     const hosts = [...Array(5).fill("a"), ...Array(8).fill("b")];
-    expect(clusterWarning(hosts, false)).toEqual({ host: "b", count: 8 });
+    expect(clusterWarning(hosts)).toEqual({ host: "b", count: 8 });
   });
 
-  it("transportSummary surfaces the warning as a red state, not the calm baseline", () => {
-    const proxy = readCode("src/lib/wa/proxy.ts");
-    expect(proxy).toMatch(/clusterWarning\(hostRows\.map/);
-    expect(proxy).toMatch(/cluster-ban risk/);
+  it("takes no config flag, so no pasted value can silence it", () => {
+    // The old signature was (hosts, proxied) and returned null the instant a
+    // template existed - which silenced the alarm for numbers whose exit was
+    // never confirmed. A one-argument pure function cannot be silenced by a
+    // config value it never sees; the CALLER decides what is exposed.
+    expect(clusterWarning.length).toBe(1);
   });
 });
 

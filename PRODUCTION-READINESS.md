@@ -666,7 +666,11 @@ deploy; each one names the surface that answers it.
    simply false. A tile that is always red trains the owner to ignore it, so
    treat it as a standing owner ACTION - set `EVOLUTION_PROXY_TEMPLATE`, or add
    a second Evolution host and let the numbers spread - not as a status to
-   watch. Note also what the alarm cannot see: it reads `wa_sessions.host_url`
+   watch. What it now DOES see, and did not before: a number whose exit is
+   configured but never confirmed (`proxy_verified_at` unset) counts as exposed,
+   so pasting a proxy template no longer silences the banner for a fleet whose
+   exits have not actually carried traffic. What the alarm still cannot see:
+   it reads `wa_sessions.host_url`
    only, and that table has no phone column, so it counts how many numbers share
    a host and never which COUNTRIES they are from. The dial prefix lives on a
    different path entirely (`linkedNumberFor` -> `app_users.phone`, and the
