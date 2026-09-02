@@ -113,7 +113,14 @@ describe("the vision ladder is current and hot-fixable", () => {
     // this pin only ever asserted the Gemini formula (owner report 5).
     expect(ai).toMatch(/maxOutputTokens: visionCeiling\(images\.length, raiseCeiling\)/);
     expect(ai).toMatch(/max_tokens: visionCeiling\(images\.length, raiseCeiling\)/);
-    expect(ai.match(/visionCeiling\(images\.length, raiseCeiling\)/g)?.length).toBe(3);
+    // Counted against the ladder rather than a magic number, so a NEW rung is
+    // required to carry the ceiling too rather than quietly failing this pin.
+    // `max_completion_tokens` is the same ceiling in OpenAI's reasoning
+    // dialect, which rejects `max_tokens` outright.
+    expect(ai).toMatch(/max_completion_tokens: visionCeiling\(images\.length, raiseCeiling\)/);
+    const rungs = ai.match(/Attempt\(\s*key: string/g)?.length ?? 0;
+    expect(rungs).toBeGreaterThanOrEqual(4);
+    expect(ai.match(/visionCeiling\(images\.length, raiseCeiling\)/g)?.length).toBe(rungs);
     expect(ai).toMatch(/responseMimeType: "application\/json"/);
     expect(ai).toMatch(/response_format: \{ type: "json_object" \}/);
     // W12g: the primary board read now also carries a budget derived from the

@@ -2210,6 +2210,31 @@ export async function processVendorReply(opts: {
       !usablePrice && extraction.found === false && !readingIsFailure(draft)
         ? { ...draft, notUsedReason: "No usable price in this image." }
         : draft;
+    // ARM THE DEFERRED RE-READ. A failure that is about the MINUTE - every rung
+    // exhausted, a cut-off answer, an unparseable one - is not a statement about
+    // the photo, and the per-minute budgets reset. The reply has already gone
+    // out, so a later retry costs the traveller nothing and can turn an
+    // unreadable price board into a real price. The retry needs the RFQ and the
+    // message text this read used, and stamping them HERE is what makes the
+    // sweep self-contained: no thread context to re-resolve, no queue table.
+    {
+      const { REREADABLE } = await import("./media/reread");
+      if (REREADABLE.has(mediaReading.outcome) && !mediaReading.fromBurstLeader) {
+        mediaReading = {
+          ...mediaReading,
+          reread: {
+            ...(mediaReading.reread ?? {}),
+            attempts: mediaReading.reread?.attempts ?? 0,
+            // Not an attempt - the ARMING. The sweep's cooldown measures from
+            // here, so the first retry lands after the budgets have reset
+            // rather than in the same exhausted minute.
+            lastAt: mediaReading.reread?.lastAt ?? new Date().toISOString(),
+            rfq,
+            text: (extractText ?? text ?? "").slice(0, 1200),
+          },
+        };
+      }
+    }
     // AWAITED: `void` here meant the stamp rode a detached promise, and on
     // Cloud Run a detached promise dies the instant the response flushes
     // (after.ts documents exactly this) - the other half of every

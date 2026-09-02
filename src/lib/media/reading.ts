@@ -130,9 +130,36 @@ export interface ReadingFollowUp {
   at: string;
 }
 
+/**
+ * THE DEFERRED RE-READ'S STATE, carried on the reading it belongs to.
+ *
+ * When every vision rung is exhausted the failure is usually about THIS MINUTE
+ * - a 429, a timeout, a provider blip - not about the photo. The reply already
+ * went out (nothing about media ever blocks a reply), so retrying costs the
+ * traveller nothing and can turn an unreadable price board into a real price
+ * once the per-minute budgets reset. The retry needs the RFQ and the message
+ * text the first read used; carrying them here is what makes the sweep
+ * self-contained, with no thread context to re-resolve.
+ */
+export interface RereadState {
+  /** How many deferred retries have already been spent. */
+  attempts: number;
+  /** ISO of the last attempt, so the cooldown is measurable. */
+  lastAt: string;
+  /** The RFQ the first read used. Opaque here - this module stays pure. */
+  rfq?: unknown;
+  /** The coalesced message text that accompanied the media. */
+  text?: string;
+  /** Set once every retry is spent: the honest counter that answers "do we
+   *  actually need offline OCR" with evidence instead of assumption. */
+  exhausted?: boolean;
+}
+
 export interface MediaReading {
   /** Did the reader run, and did it find anything? See ReadingOutcome. */
   outcome: ReadingOutcome;
+  /** Deferred-re-read bookkeeping (media/reread.ts). Absent = never queued. */
+  reread?: RereadState;
   /** Why the reader could not run, when `outcome` is "unavailable". */
   unavailableReason?: string;
   /** The follow-up the turn recorded - never a claim the UI invents. */

@@ -29,8 +29,11 @@ export type VisionFailure =
   | "network" // fetch threw
   | "upstream"; // 5xx and anything else
 
+/** Every provider that can be a rung on the vision ladder. */
+export type VisionProvider = "gemini" | "groq" | "anthropic" | "openai";
+
 export interface VisionAttempt {
-  provider: "gemini" | "groq" | "anthropic";
+  provider: VisionProvider;
   model: string;
   ok: boolean;
   /** Exact upstream error (status + body excerpt) when the attempt failed. */
@@ -44,7 +47,7 @@ export type VisionRead =
   | {
       ok: true;
       text: string;
-      provider: "gemini" | "groq" | "anthropic";
+      provider: VisionProvider;
       model: string;
       attempts: VisionAttempt[];
     }
