@@ -175,7 +175,8 @@ Two failures and what each one means:
 allowlist gate runs BEFORE any account is created, so a tester signing in with
 Google whose email is not on the list gets a 403 and *"WheelDeal is in a
 private, invite-only beta..."*, and no user row is created. Add them in
-**Admin -> Users** first (see the tester runbook in `RUNBOOK.md`).
+**Admin -> "Private beta - invite list"** first - see
+[the tester runbook](./RUNBOOK.md#adding-a-beta-tester).
 
 ---
 
@@ -415,8 +416,12 @@ fails the user over to a healthy host - with NO re-scanning, NO re-linking.
 - Each user "sticks" to one host (saved in `wa_sessions.host_url`) so their
   session stays warm; if that host is down, they migrate to the least-loaded
   healthy host automatically.
-- A per-host cap (Admin -> Keys -> `EVOLUTION_MAX_PER_HOST`, default 40) stops
-  any one free server from being overloaded - new users land on emptier hosts.
+- A per-host cap (Admin -> Keys -> `EVOLUTION_MAX_PER_HOST`, default **25**)
+  stops any one server from being overloaded. At the cap the app **REFUSES** a
+  new link with an honest "at capacity" message rather than placing the
+  traveller on a full box - with several hosts configured, new users land on
+  emptier ones first. The refusal is on the LINK path only: sends, media and
+  connection reads to an already-placed user are never affected by capacity.
 - Owner page -> Keys -> "WhatsApp host pool" shows a live green/red dot and the
   user count for every host. Tap "Test API" on `EVOLUTION_HOSTS` to ping them all.
 
@@ -576,8 +581,10 @@ resources if you exceed a limit), and leave the boot volume at the ~47 GB defaul
 2. Run once in Supabase SQL editor:
    `alter table public.wa_sessions add column if not exists host_url text;`
 
-3. (Optional) `EVOLUTION_MAX_PER_HOST` - users per host before spilling to the
-   next (default 40).
+3. (Optional) `EVOLUTION_MAX_PER_HOST` - paired users per host (default
+   **25**). With more than one host, new users spill to the emptiest; with one
+   host, the next link is REFUSED rather than overfilling the box. Do not raise
+   it above 25 on a 512MB Render `starter` - see SCALING.md.
 
 4. The **WhatsApp host pool** panel (same Keys screen) shows every VM live:
    green/red dot, user count, and the reason if one is ever down. Add/remove hosts

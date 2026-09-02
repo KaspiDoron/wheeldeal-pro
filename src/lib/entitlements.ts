@@ -110,7 +110,7 @@ export const FEATURE_META: Record<
   },
   "vip-concurrency": {
     label: "VIP capacity",
-    blurb: "Up to 40 new shops every 3 hours - the widest safe reach, refreshing fastest.",
+    blurb: "Up to 24 new shops every 3 hours - the widest safe reach, refreshing fastest.",
     icon: "shieldCheck",
     plan: "ultra",
   },

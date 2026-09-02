@@ -86,6 +86,55 @@ line unless you write down why.
       Meta; dry-run rehearsal shows the full funnel moving; ONE real opted-in
       test shop completes lead -> YES -> takeover; kill switch verified.
 
+## Adding a beta tester
+
+`GUIDE.md` pointed here for this and the section did not exist. It does now.
+
+**Where.** Admin -> the **"Private beta - invite list"** card. It is its own
+panel, not under Admin -> Users (which manages accounts that already exist).
+
+**What to paste.** One line per tester, split on `,` `:` or `|`:
+
+```
+alice@example.com, ultra, test
+bob@example.com,   ultra
+```
+
+- **email** - lowercased for you.
+- **plan** - `free` | `pro` | `ultra`. Defaults to `free` if omitted.
+- **`test`** - optional third field. Combined with the `TEST_MODE` switch it
+  gives that person Ultra free, applies checkout plans instantly with no charge,
+  and exempts them from the number warm-up. Without `TEST_MODE` on, the flag
+  does nothing.
+
+Save writes the whole list at once. The ceiling is 100 entries; anything past it
+is dropped and the response says how many.
+
+**Pin testers to `ultra`.** On `free` a day-0 tester's first search contacts 10
+of the 24 shops the app can reach, and the beta's whole point is the wide sweep.
+
+**Being on the list is not a socket.** The allowlist gates SIGN-IN. WhatsApp
+capacity is enforced separately, at link time, by the per-host cap - so a
+25th tester can sign in happily and then be refused when they try to link. Watch
+the invite tile in Admin -> Chokepoints: it goes red BEFORE the failure, and at
+one host with the default cap of 25 the red starts at the 26th invite (the
+owner's own linked number counts).
+
+**Removing a tester** is deleting their line and saving. It blocks the next
+sign-in; it does not sign out a live session or erase data - use Admin -> Users
+for either.
+
+**Order of operations for a cohort.**
+
+1. Confirm host headroom first (Admin -> Chokepoints, the invite and occupancy
+   tiles). Add an Evolution host before the invites if it is amber.
+2. Paste the cohort with `ultra`.
+3. Stagger the pairings over several days. Connect time is where a ban fires,
+   and 25 numbers linking from one datacenter IP in one afternoon is the exact
+   shape the cluster alarm exists to warn about.
+4. Set `EVOLUTION_PROXY_TEMPLATE` if the numbers are not already spread across
+   hosts.
+
 ## 4. The 18 reported problems - final reconciliation
 
 Signed off when the owner has spot-checked each in the product.
