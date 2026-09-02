@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { readFileSync } from "fs";
 import { join } from "path";
+import { citesPrice } from "../integrity/money-context";
 
 vi.mock("server-only", () => ({}));
 const read = (p: string) => readFileSync(join(process.cwd(), p), "utf8");
@@ -173,8 +174,20 @@ describe("a bargain that ignores the rival is REJECTED, not sent", () => {
     // 280 - can you beat it?" on a board that also holds a 250 - good leverage,
     // already validated as real by checkOutboundNumbers.
     const blk = rails.slice(rails.indexOf("CITE THE RIVAL"));
-    expect(blk.slice(0, 3600)).toMatch(/ANY REAL RIVAL COUNTS/);
-    expect(blk.slice(0, 3600)).toMatch(/quotable\.some\(\(q\) => Math\.abs\(n - Math\.round\(q\)\) <= 1\)/);
+    expect(blk.slice(0, 4200)).toMatch(/ANY REAL RIVAL COUNTS/);
+    // Every real rival's price goes into the citable set, and the rail asks the
+    // shared money reader whether any of them was named.
+    expect(blk.slice(0, 4200)).toMatch(/const quotable = ctx\.session\.rivals/);
+    expect(blk.slice(0, 4200)).toMatch(/citesPrice\(normalizeDigits\(text\), quotable\)/);
+  });
+
+  it("EXECUTED: the rail cannot be satisfied by a date that matches the rival", () => {
+    // The rail counted ANY numeral within 1 unit of a real rival, so a bargain
+    // that never named the rival satisfied the rail built to require it.
+    expect(citesPrice("can you do it for the 17 Aug?", [17])).toBe(false);
+    expect(citesPrice("we need it for 5 days", [5])).toBe(false);
+    // ...and the sentence the owner actually asked for still passes.
+    expect(citesPrice("Another shop offered 200, can you do 190?", [200])).toBe(true);
   });
 
   it("it runs AFTER send-worthiness - an empty draft is diagnosed as empty", () => {

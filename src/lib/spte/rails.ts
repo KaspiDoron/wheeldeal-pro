@@ -13,6 +13,7 @@ import { inventsADate } from "../negotiation/traveller-disclosure";
 import type { RailResult, TurnArtifact, TurnContext } from "./types";
 import { quoteOnTable } from "./policy";
 import { normalizeDigits } from "../integrity/translation";
+import { citesPrice } from "../integrity/money-context";
 
 // A drafted message must never AGREE a concrete pickup/delivery time - the
 // traveller confirms that directly (Step 5 hard rule). These patterns catch an
@@ -498,12 +499,17 @@ export function runPostRails(ctx: TurnContext, artifact: TurnArtifact): RailResu
       // all), and a rail that cannot read the digits in front of it would
       // reject a draft that cites the rival perfectly well in local script -
       // rejecting correct output is a downgrade, not a guarantee.
-      const nums = (normalizeDigits(text).match(/\d[\d,.]*/g) ?? []).map((n) =>
-        Number(n.replace(/[,.](?=\d{3}\b)/g, "").replace(/,/g, "."))
-      );
-      const cited = nums.some(
-        (n) => Number.isFinite(n) && quotable.some((q) => Math.abs(n - Math.round(q)) <= 1)
-      );
+      //
+      // ...BUT THE NUMERAL HAS TO BE MONEY. This counted ANY numeral within 1
+      // unit of a real rival, so a bargain that never named the rival could
+      // satisfy the rail built to require it: "can you do it for the 17 Aug?"
+      // passed against a rival at 17/day, "we need it for 5 days" against a
+      // rival at 5, "the 125cc one" against 125. A coincidence detector is not
+      // a guarantee. `citesPrice` applies the same tolerance to numerals that
+      // read as prices in the sentence they appear in, and deliberately does
+      // NOT require a currency token - that would reject the owner's own
+      // sentence, "another shop offered 200, can you do 180?".
+      const cited = citesPrice(normalizeDigits(text), quotable);
       if (!cited) {
         return {
           ok: false,

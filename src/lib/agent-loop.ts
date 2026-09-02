@@ -1600,6 +1600,52 @@ export async function processVendorReply(opts: {
     ]);
     if (!okBasic) await sbInsert("vendor_replies", [replyBase]);
   }
+  // THE SEARCH THIS THREAD BELONGS TO - resolved ONCE, lazily.
+  //
+  // THE THREAD'S OWN SEARCH, NOT THE NEWEST ONE. This read `searches`
+  // newest-first at REPLY time, so a shop answering an hour after the traveller
+  // started a second hunt filed its offer under the NEW search - and cross-shop
+  // leverage is scoped by search_id. A Krabi scooter price could therefore be
+  // cited at a Canggu shop, wearing the new hunt's id. An earlier round of this
+  // same thread already carries the right id; ask it first and fall back to
+  // newest-first only for threads written before the stamp existed. Round one
+  // still falls back to newest-first, which is correct unless the very first
+  // reply arrives after a new hunt began - the residual case, and the one a
+  // search stamp on the thread itself would close.
+  //
+  // Lazy + memoised because TWO sites need it and they are mutually exclusive
+  // per turn: the offers insert (priced turns) and the rival eviction (declines,
+  // which by definition carry no price). Hoisting it eagerly would put two
+  // Postgres reads on EVERY reply turn, including the ones that just say
+  // "we open at 9" - a real cost on the latency-sensitive reply path.
+  let _searchId: number | null | undefined;
+  const resolveSearchId = async (): Promise<number | null> => {
+    if (_searchId !== undefined) return _searchId;
+    let found: number | null = null;
+    if (ctx.sender) {
+      if (ctx.vendorId) {
+        const prior = await sbSelect<{ search_id: number | null }>(
+          "offers",
+          `select=search_id&user_email=eq.${encodeURIComponent(
+            ctx.sender
+          )}&vendor_id=eq.${encodeURIComponent(
+            ctx.vendorId
+          )}&search_id=not.is.null&order=created_at.asc&limit=1`
+        ).catch(() => []);
+        found = prior[0]?.search_id ?? null;
+      }
+      if (found == null) {
+        const s = await sbSelect<{ id: number }>(
+          "searches",
+          `select=id&user_email=eq.${encodeURIComponent(ctx.sender)}&order=created_at.desc&limit=1`
+        ).catch(() => []);
+        found = s[0]?.id ?? null;
+      }
+    }
+    _searchId = found;
+    return found;
+  };
+
   // ---- FUNNEL LEDGER: what this reply proved (src/lib/funnel/stages.ts) ------
   //
   // `replied` was stamped at ingest when the frame was stored; HERE is where the
@@ -1643,6 +1689,32 @@ export async function processVendorReply(opts: {
       await advanceThreadStage(stageArgs, "declined", "shop walked away");
     } else if (extraction.shopUnavailable === true) {
       await advanceThreadStage(stageArgs, "out_of_stock", "shop said the vehicle is not available");
+    }
+    // A SHOP THAT SAID NO STOPS BEING A RIVAL, EVEN WHEN IT SAYS NO WITHOUT A
+    // PRICE - which is the normal shape of a decline. The eviction further down
+    // lives inside `if (usablePrice && matchesSpec !== false)`, so a bare "sorry,
+    // we have nothing" never reached it: the shop's EARLIER quote stayed in the
+    // hot ZSET for the rest of the 18h TTL and kept being cited at other shops.
+    if (
+      ctx.sender &&
+      ctx.vendorId &&
+      (extraction.shopDeclined === true || extraction.shopUnavailable === true)
+    ) {
+      const sid = await resolveSearchId();
+      if (sid != null) {
+        const [{ vehicleKeyFor }, { dropSessionOfferAnyCurrency }] = await Promise.all([
+          import("./market"),
+          import("./rival-cache"),
+        ]);
+        await dropSessionOfferAnyCurrency({
+          searchId: sid,
+          vendorId: ctx.vendorId,
+          vehicleKey: vehicleKeyFor(rfq),
+          // The space this shop's earlier quote is most likely in, for sessions
+          // written before the currency hash existed.
+          fallbackCurrency: cur,
+        }).catch(() => {});
+      }
     }
   }
   // Verified shop tags (item #13): record what this reply explicitly stated.
@@ -1699,48 +1771,7 @@ export async function processVendorReply(opts: {
       delivers,
     };
     // Session attribution for exact rival grouping (analytics + deals).
-    // THE THREAD'S OWN SEARCH, NOT THE NEWEST ONE.
-    //
-    // This read `searches` newest-first at REPLY time, so a shop answering an
-    // hour after the traveller started a second hunt filed its offer under the
-    // NEW search - and cross-shop leverage is scoped by search_id. A Krabi
-    // scooter price could therefore be cited at a Canggu shop, wearing the new
-    // hunt's id. The thread knows which search it belongs to; ask it first and
-    // fall back to newest-first only for threads written before the stamp
-    // existed.
-    let searchId: number | null = null;
-    if (ctx.sender) {
-      // THE SEARCH THIS THREAD BELONGS TO, when the thread can tell us.
-      //
-      // This read `searches` newest-first at REPLY time, so a shop answering
-      // after the traveller had started a SECOND hunt filed its offer under the
-      // new search - and cross-shop leverage is scoped by search_id, so a Krabi
-      // price could then be cited at a Canggu shop wearing the new hunt's id.
-      // An earlier round of this same thread already carries the right id;
-      // reuse it rather than re-deriving one from the clock.
-      //
-      // Round one still falls back to newest-first, which is correct unless the
-      // very first reply arrives after a new hunt began - the residual case,
-      // and the one a search stamp on the thread itself would close.
-      if (ctx.vendorId) {
-        const prior = await sbSelect<{ search_id: number | null }>(
-          "offers",
-          `select=search_id&user_email=eq.${encodeURIComponent(
-            ctx.sender
-          )}&vendor_id=eq.${encodeURIComponent(
-            ctx.vendorId
-          )}&search_id=not.is.null&order=created_at.asc&limit=1`
-        ).catch(() => []);
-        searchId = prior[0]?.search_id ?? null;
-      }
-      if (searchId == null) {
-        const s = await sbSelect<{ id: number }>(
-          "searches",
-          `select=id&user_email=eq.${encodeURIComponent(ctx.sender)}&order=created_at.desc&limit=1`
-        ).catch(() => []);
-        searchId = s[0]?.id ?? null;
-      }
-    }
+    const searchId = await resolveSearchId();
     // THE GUARD THAT WAS DECLARED, READ, AND NEVER WRITTEN (owner report 5 #2).
     //
     // `offers.effective_daily_rate` is in the schema and `pickCheapestRival`
@@ -1821,7 +1852,14 @@ export async function processVendorReply(opts: {
         currency: cur,
       }).catch(() => {});
     }
-    if (searchId != null) {
+    // ...AND DO NOT PUT IT STRAIGHT BACK. This write was unconditional, so the
+    // eviction above was a `zrem` immediately followed by a `zadd` of the same
+    // member with the same score. Net effect: nothing was ever evicted, and the
+    // comment above described an intent the code did not carry out. A shop that
+    // has just said no is not leverage, so it does not get re-published.
+    const shopSaidNo =
+      extraction.shopDeclined === true || extraction.shopUnavailable === true;
+    if (searchId != null && !shopSaidNo) {
       const { recordSessionOffer } = await import("./rival-cache");
       await recordSessionOffer({
         searchId,

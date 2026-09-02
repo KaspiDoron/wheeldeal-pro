@@ -160,6 +160,21 @@ export function offersKey(searchId: string | number, vehicleKey: string, currenc
 export function listPriceKey(searchId: string | number, vehicleKey: string, currency: string): string {
   return `session:${searchId}:${vehicleKey}:${currency}:list`;
 }
+/**
+ * The set of currencies this session/vehicle has ever filed an offer under.
+ *
+ * WHY IT EXISTS: every offers ZSET is scoped by currency, so evicting a shop
+ * requires knowing which currency its quote was filed under - and the turn that
+ * needs to evict is usually the one with NO price ("sorry, we have nothing"),
+ * where the only currency in hand is the one reconciled from the shop's region.
+ * A shop that quoted in USD earlier and then declines would keep its USD row
+ * for the rest of the TTL. This is a tiny HSET (a session realistically holds
+ * one or two currencies) so the eviction can sweep every space the shop could
+ * be in, using only commands `RedisLike` already declares.
+ */
+export function currenciesKey(searchId: string | number, vehicleKey: string): string {
+  return `session:${searchId}:${vehicleKey}:currencies`;
+}
 export function aggKey(searchId: string | number): string {
   return `session:${searchId}:agg`;
 }
@@ -253,6 +268,11 @@ export async function recordSessionOffer(w: SessionOfferWrite): Promise<void> {
     await r.set(liveFlagKey(w.searchId), "1", "EX", TTL_S);
     await r.expire(oKey, TTL_S);
     await r.expire(lKey, TTL_S);
+    // Remember the currency space this offer lives in, so a later decline can
+    // be evicted from it even when that turn carries no price of its own.
+    const cKey = currenciesKey(w.searchId, w.vehicleKey);
+    await r.hset(cKey, w.currency, "1");
+    await r.expire(cKey, TTL_S);
 
     // Recompute aggregates from the full ZSET (cheap: a session holds <50 shops).
     const rows = await r.zrange(oKey, 0, -1, "WITHSCORES");
@@ -348,6 +368,49 @@ export async function dropSessionOffer(q: {
   } catch {
     // The cache is never the source of truth; a failed eviction only means the
     // Postgres path stays authoritative for this shop, which is the safe side.
+  }
+}
+
+/**
+ * Drop a shop from EVERY currency space of one session/vehicle.
+ *
+ * THE TURN THAT NEEDS THIS HAS NO PRICE. `dropSessionOffer` needs a currency,
+ * and the only caller that had one sat inside `if (usablePrice && ...)` - so it
+ * ran only on turns that carried a price, which is precisely the turn a decline
+ * is NOT. "Sorry, we have nothing" therefore never evicted anything: the shop's
+ * earlier quote stayed citable for the rest of the 18h TTL, and the hot path
+ * short-circuits the Postgres query whose dead-phase filter would have excluded
+ * it. The agent could tell one shop to beat a price from a shop that had
+ * already refused to rent.
+ *
+ * `fallbackCurrency` covers sessions written before the currency hash existed
+ * (and a Redis that answers the zrem but not the hgetall): the caller passes the
+ * currency it reconciled for this shop, which is the space the offer is in
+ * unless the shop explicitly named a different one earlier.
+ */
+export async function dropSessionOfferAnyCurrency(q: {
+  searchId: string | number;
+  vendorId: string;
+  vehicleKey: string;
+  fallbackCurrency?: string | null;
+}): Promise<void> {
+  const r = await cacheClient();
+  if (!r) return;
+  const spaces = new Set<string>();
+  if (q.fallbackCurrency) spaces.add(q.fallbackCurrency);
+  try {
+    const known = await r.hgetall(currenciesKey(q.searchId, q.vehicleKey));
+    for (const cur of Object.keys(known ?? {})) if (cur) spaces.add(cur);
+  } catch {
+    // Unreadable currency set - the fallback space is still worth evicting.
+  }
+  for (const cur of spaces) {
+    try {
+      await r.zrem(offersKey(q.searchId, q.vehicleKey, cur), q.vendorId);
+    } catch {
+      // The cache is never the source of truth; a failed eviction only means
+      // the Postgres path stays authoritative for this shop - the safe side.
+    }
   }
 }
 

@@ -4,6 +4,7 @@ import { join } from "path";
 import { splitHostLines } from "../evolution";
 import { parseDialPrefixes, affinityFor, AFFINITY_MATCH } from "./host-region";
 import { normalizeDigits } from "../integrity/translation";
+import { citesPrice } from "../integrity/money-context";
 
 const read = (p: string) => readFileSync(join(process.cwd(), p), "utf8");
 const readCode = (p: string) =>
@@ -244,15 +245,31 @@ describe("F4 the findings the audit fleet died before reviewing", () => {
     // LOCALIZED wire text, so on every Ultra local-language send the owner's
     // headline leverage KPI read false - zero exactly where the feature works -
     // and the rail would reject a draft that cited the rival perfectly well.
+    //
+    // All three now delegate to ONE reader (`integrity/money-context`), which
+    // folds the digits AND requires the numeral to be money - so the rail, the
+    // instrument and the fallback can never disagree about what counts as a
+    // citation, and none of them can be satisfied by a date.
     const live = readCode("src/lib/spte/live.ts");
     const rails = readCode("src/lib/spte/rails.ts");
     const pass = readCode("src/lib/spte/pass.ts");
-    expect(live).toMatch(/normalizeDigits\(send\)\.match/);
-    expect(rails).toMatch(/normalizeDigits\(text\)\.match/);
-    expect(pass).toMatch(/normalizeDigits\(message\)\.match/);
+    expect(live).toMatch(/citesPrice\(normalizeDigits\(send\)/);
+    expect(rails).toMatch(/citesPrice\(normalizeDigits\(text\)/);
+    expect(pass).toMatch(/citesPrice\(normalizeDigits\(message\)/);
     for (const src of [live, rails, pass]) {
       expect(src).toMatch(/from "\.\.\/integrity\/translation"/);
+      expect(src).toMatch(/from "\.\.\/integrity\/money-context"/);
     }
+    // No bare numeral scan survives on any of the three.
+    for (const src of [live, rails, pass]) {
+      expect(src).not.toMatch(/normalizeDigits\((?:send|text|message)\)\.match/);
+    }
+  });
+
+  it("EXECUTED: the shared reader folds Thai numerals AND refuses a date", () => {
+    // Non-vacuous end to end: the guarantee the three call sites now inherit.
+    expect(citesPrice(normalizeDigits("อีกร้านเสนอ ๒๐๐ บาท"), [200])).toBe(true);
+    expect(citesPrice(normalizeDigits("can we collect on the ๑๗ Aug?"), [17])).toBe(false);
   });
 
   it("Thai numerals really do fold to the digits these matchers need", () => {

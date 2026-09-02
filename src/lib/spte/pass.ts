@@ -17,6 +17,7 @@ import { clampWaitMinutes } from "./wait";
 import { nextGap } from "../offer-options";
 import { planLeverage, leadCard, cheapestCheaperRival } from "../negotiation/leverage";
 import { normalizeDigits } from "../integrity/translation";
+import { citesPrice } from "../integrity/money-context";
 import { beatRivalTarget } from "../negotiation/beat-rival";
 import { askVariantDirective, askVariantFor } from "../negotiation/ask-variant";
 import { disclosureBlock } from "../negotiation/traveller-disclosure";
@@ -757,10 +758,12 @@ export function fallbackLeverage(
   const rival = cheapestCheaperRival(ctx.session.rivals, quoteOnTable(ctx));
   if (!rival) return [];
   const target = Math.round(rival.pricePerDay);
-  const cited = (normalizeDigits(message).match(/\d[\d,.]*/g) ?? []).some((n) => {
-    const v = Number(n.replace(/[,.](?=\d{3}\b)/g, "").replace(/,/g, "."));
-    return Number.isFinite(v) && Math.abs(v - target) <= 1;
-  });
+  // MONEY, NOT ANY NUMERAL. A bare numeral scan reported ["rival"] whenever the
+  // message happened to carry a date, a duration or an engine size within a
+  // unit of the rival's price - so the leverage KPI counted "for the 17 Aug" as
+  // leverage against a rival at 17/day. Same helper as the cite-the-rival rail
+  // and the citedRival instrument, so all three agree on what a citation is.
+  const cited = citesPrice(normalizeDigits(message), [target]);
   return cited ? ["rival"] : [];
 }
 

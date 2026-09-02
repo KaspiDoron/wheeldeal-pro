@@ -26,6 +26,7 @@ import {
 } from "./comprehension";
 import { quoteOnTable } from "./policy";
 import { normalizeDigits } from "../integrity/translation";
+import { citesPrice } from "../integrity/money-context";
 import { cheapestCheaperRival } from "../negotiation/leverage";
 import { deriveThreadFacts } from "./thread-facts";
 import { getPolicyOverlay, DEFAULT_OVERLAY, type PolicyOverlay } from "../ops/overlay";
@@ -1844,10 +1845,15 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
           // ASCII \d therefore reported citedRival:false on every Ultra
           // local-language send: the owner's leverage KPI read zero exactly
           // where the leverage was working.
-          return (normalizeDigits(send).match(/\d[\d,.]*/g) ?? []).some((n) => {
-            const v = Number(n.replace(/[,.](?=\d{3}\b)/g, "").replace(/,/g, "."));
-            return Number.isFinite(v) && Math.abs(v - target) <= 1;
-          });
+          //
+          // ...AND THE NUMERAL HAS TO BE MONEY. A bare numeral scan counted
+          // dates, durations and engine sizes: a send reading "for the 17 Aug"
+          // recorded citedRival:true against a rival at 17/day, so the KPI that
+          // answers "do the agents actually use other shops' prices" was
+          // inflated by coincidence. Same tolerance, narrower question - and
+          // the same helper the cite-the-rival rail now uses, so the rail and
+          // the instrument can never disagree about what counts as a citation.
+          return citesPrice(normalizeDigits(send), [target]);
         })(),
         // The shop's menu + what it sent, so the option and vision KPIs have a
         // source that is not a guess.
