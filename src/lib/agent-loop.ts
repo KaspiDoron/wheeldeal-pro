@@ -684,8 +684,28 @@ export async function processVendorReply(opts: {
   // to no vehicle (matchesSpec=false -> the offer is dropped, UI stuck on "No
   // price yet"). Instead, extract from the WHOLE unread inbound buffer since our
   // last outbound, chronologically, so one read sees the vehicle AND its price.
-  const { coalesceUnreadInbound } = await import("./wa/coalesce");
+  const { coalesceUnreadInbound, onlyForwardedContent } = await import("./wa/coalesce");
   const extractText = coalesceUnreadInbound(thread, priorAt ?? "", text) || text;
+  // WHOSE PRICE IS THIS? (`contextInfo.isForwarded`, previously unread anywhere
+  // in the codebase.) A shop that FORWARDS a competitor's price board - or a
+  // supplier's rate card - has not quoted us, and the number on that board was
+  // being extracted as the shop's own posted price, banked as an `offers` row,
+  // and cited at a third shop as this shop's quote. Conservative by design: see
+  // `onlyForwardedContent`. The reply still happens - the shop is talking to us
+  // - it is only the ATTRIBUTION of the number that is withheld.
+  const forwardedOnly = onlyForwardedContent(
+    thread.map((m) => {
+      const raw = (m.raw ?? null) as { forwarded?: unknown; media?: unknown } | null;
+      return {
+        direction: m.direction,
+        body: m.body,
+        received_at: m.received_at,
+        forwarded: Boolean(raw?.forwarded),
+        hasMedia: Boolean(raw?.media),
+      };
+    }),
+    priorAt ?? ""
+  );
   // PENDING REPLIES COUNT TOO. A reply parked in wa_outbox with a human
   // "thinking" delay is NOT yet in whatsapp_messages. Without counting it, a
   // SECOND shop message arriving inside that 45-240s window reads the counters
@@ -1735,7 +1755,31 @@ export async function processVendorReply(opts: {
   // cheapest/lockable price misleads the user, and filing it under the requested
   // vehicle_key would poison the market rate. It stays in vendor_replies (so the
   // reply is still visible and the agent can clarify), but never an offers row.
-  if (usablePrice && extraction.matchesSpec !== false) {
+  //
+  // ...AND IT HAS TO BE THIS SHOP'S PRICE. A number that reached us only on
+  // forwarded content is somebody else's quote: banking it as an offer files a
+  // competitor's board under this vendor, shows it on the best-price card as
+  // theirs, poisons the market rate, and makes it citable at a third shop. The
+  // reply still goes out and the reply row still records what we read, so the
+  // agent can simply ask whose price it is - what is withheld is the claim that
+  // this shop quoted it.
+  if (usablePrice && extraction.matchesSpec !== false && forwardedOnly) {
+    void sbInsert("agent_events", [
+      {
+        kind: "forwarded-price-unattributed",
+        user_email: ctx.sender ?? null,
+        to_number: from,
+        vendor_id: ctx.vendorId ?? "",
+        vendor_name: ctx.vendorName ?? "",
+        detail: JSON.stringify({
+          price: usablePrice,
+          currency: cur,
+          note: "every frame carrying a number in this burst was FORWARDED - not filed as this shop's offer",
+        }).slice(0, 400),
+      },
+    ]).catch(() => {});
+  }
+  if (usablePrice && extraction.matchesSpec !== false && !forwardedOnly) {
     // Tag the offer with area + vehicle bucket + a delivery signal, so the
     // owner's shop-intelligence warehouse can aggregate real market data.
     const { vehicleKeyFor, regionKeysFor } = await import("./market");

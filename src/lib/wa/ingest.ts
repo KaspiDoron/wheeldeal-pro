@@ -36,6 +36,8 @@ import {
   waMediaKind,
   waProductCard,
   waQuotedText,
+  waPlaceholderOnly,
+  waForwarded,
 } from "@/lib/wa/message-text";
 import { resolveChatIdentity } from "@/lib/wa/lid-alias";
 import { claimInboundStore } from "@/lib/wa/inbound-claim";
@@ -122,11 +124,17 @@ function hasImageMessage(data: any): boolean {
 // happened. Same class as the price-list photo, and a shop filming the bike is
 // usually a shop that wants to do business.
 function hasVideoMessage(data: any): boolean {
-  return Boolean(unwrap(data)?.videoMessage);
+  // A ROUND VIDEO NOTE IS A VIDEO. WhatsApp ships it as its own `ptvMessage`
+  // subtype and nothing here matched it, so a shop filming the bike as a video
+  // note produced a turn with no content and no media job - the same
+  // silently-dropped shape the caption-less video above was fixed for.
+  const m = unwrap(data);
+  return Boolean(m?.videoMessage || m?.ptvMessage);
 }
 /** The video's own mimetype, for the media stamp + the native-read gate. */
 function videoMessage(data: any): { mimetype?: string } | null {
-  const v = unwrap(data)?.videoMessage;
+  const m = unwrap(data);
+  const v = m?.videoMessage ?? m?.ptvMessage;
   return v ? { mimetype: v.mimetype } : null;
 }
 // Beyond image/audio: documents (PDF rate cards), location pins and contact
@@ -137,7 +145,11 @@ function documentMessage(data: any): { mimetype?: string; fileName?: string } | 
   return d ? { mimetype: d.mimetype, fileName: d.fileName } : null;
 }
 function locationMessage(data: any): { lat?: number; lng?: number; name?: string } | null {
-  const l = unwrap(data)?.locationMessage;
+  // A LIVE location is still a location - and it is the one pin that means
+  // "I am on my way with the bike", so dropping it lost the most time-critical
+  // message a shop can send.
+  const m = unwrap(data);
+  const l = m?.locationMessage ?? m?.liveLocationMessage;
   return l
     ? { lat: Number(l.degreesLatitude), lng: Number(l.degreesLongitude), name: l.name || l.address }
     : null;
@@ -751,23 +763,35 @@ export async function processEvolutionWebhook(
       // location (getUserStay masks coords without consent; we only ever surface
       // a rough distance, never their pin).
       let syntheticText = text;
+      // "NO REAL TEXT" IS NOT THE SAME AS "EMPTY STRING".
+      //
+      // Every enrichment below was guarded on `!syntheticText`, and
+      // `waMessageText` had already returned "[location]" / "[contact]" /
+      // "[document]" for exactly these frames - it never returns empty for a
+      // frame it recognises, that is its whole contract. So all three branches
+      // were unreachable: a real location pin's coordinates never reached the
+      // engine, a contact card's name and number never did, and a PDF rate
+      // card's filename never did. The turn arrived as a bare bracket label,
+      // which `wa/coalesce` then strips - so it arrived as nothing.
+      const labelOnly = waPlaceholderOnly(syntheticText);
+      const hasWords = Boolean(syntheticText) && !labelOnly;
       const pinLoc =
         loc && Number.isFinite(loc.lat) && Number.isFinite(loc.lng)
           ? { lat: loc.lat as number, lng: loc.lng as number, name: loc.name }
           : null;
-      const textCoords = syntheticText ? parseInboundCoords(syntheticText) : null;
+      const textCoords = hasWords ? parseInboundCoords(syntheticText) : null;
       if (pinLoc || textCoords) {
         const { getUserStay } = await import("@/lib/access");
         const s = await getUserStay(email).catch(() => null);
         const stayCoords = s ? { lat: s.lat, lng: s.lng } : null;
-        if (!syntheticText && pinLoc) {
+        if (!hasWords && pinLoc) {
           syntheticText = describeShopLocation(pinLoc, stayCoords);
-        } else if (syntheticText && textCoords) {
+        } else if (hasWords && textCoords) {
           const note = distanceNote(textCoords, stayCoords);
           if (note) syntheticText = `${syntheticText}${note}`;
         }
       }
-      if (!syntheticText && contact && (contact.name || contact.digits)) {
+      if (!hasWords && !pinLoc && contact && (contact.name || contact.digits)) {
         syntheticText = `(the shop shared a contact${contact.name ? `: ${contact.name}` : ""}${contact.digits ? ` +${contact.digits}` : ""})`;
       }
 
@@ -779,6 +803,7 @@ export async function processEvolutionWebhook(
       // appended: the model needs to know what "this one" points at. The
       // deterministic price rails deliberately SKIP "(quoting: ...)" segments -
       // quoting a number is not stating it.
+      const forwarded = waForwarded(data);
       const productCard = waProductCard(data);
       const quotedText = waQuotedText(data);
       if (quotedText && syntheticText) {
@@ -809,7 +834,12 @@ export async function processEvolutionWebhook(
           from_number: from,
           to_number: instance,
           body:
-            syntheticText ||
+            // A BARE LABEL IS NOT A BODY. `syntheticText` starts as
+            // `waMessageText`, which returns "[document]" for a document - so
+            // this `||` short-circuited and the `[document: <filename>]` branch
+            // below, plus every richer label, was unreachable. Only real words,
+            // or text an enrichment above actually produced, wins here.
+            (hasWords || syntheticText !== text ? syntheticText : "") ||
             (hasImage
               ? "[photo]"
               : hasAudio
@@ -884,6 +914,19 @@ export async function processEvolutionWebhook(
             // What this message replied to, for the transcript's quote block
             // and the model's referent.
             ...(quotedText ? { quoted: { text: quotedText } } : {}),
+            // A FORWARDED PRICE BOARD IS SOMEBODY ELSE'S PRICE.
+            //
+            // `contextInfo.isForwarded` appeared ZERO times in this codebase,
+            // and the consequence is a number-integrity failure of exactly the
+            // class the ungrounded-price rail exists for: a shop forwarding a
+            // competitor's board (or a supplier's rate card) was read as having
+            // posted that price ITSELF, and the number could then enter the
+            // rival table and be cited at a third shop as this one's quote.
+            // Stamped here so every later reader - the engine, the offers
+            // writer, the transcript - can tell whose number it is.
+            ...(forwarded.forwarded
+              ? { forwarded: { score: forwarded.score || undefined } }
+              : {}),
           },
         },
       ]);

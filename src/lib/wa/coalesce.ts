@@ -50,6 +50,52 @@ export function isMediaPlaceholder(text: string | null | undefined): boolean {
   return t.length === 0 || PLACEHOLDER.test(t);
 }
 
+/** One inbound frame, with the two flags the provenance question needs. */
+export interface ProvenanceMsg extends CoalesceMsg {
+  /** `raw.forwarded` - the shop passed this on, it did not write it. */
+  forwarded?: boolean;
+  /** The frame carries media whose reading could produce a price. */
+  hasMedia?: boolean;
+}
+
+/** A digit in any of the scripts the app reads (integrity/translation folds
+ *  these on every other path; here we only need "is there a number at all"). */
+const ANY_DIGIT = /[\d\u0660-\u0669\u06f0-\u06f9\u0966-\u096f\u0e50-\u0e59\u0ed0-\u0ed9\u17e0-\u17e9\u1040-\u1049]/;
+
+/**
+ * IS EVERY NUMBER IN THIS BURST SOMEBODY ELSE'S?
+ *
+ * A shop forwarding a competitor's price board - or a supplier's rate card -
+ * is not quoting us. Nothing in this codebase read `contextInfo.isForwarded`,
+ * so that board was extracted as the shop's OWN posted price, banked as an
+ * `offers` row, and could then be cited at a third shop as this one's quote:
+ * a number presented as one shop's when it is another's, which is the exact
+ * class the ungrounded-price rail exists to prevent.
+ *
+ * Deliberately CONSERVATIVE, because the cost of a false positive is losing a
+ * real offer. It answers true only when the window contains forwarded content
+ * AND no unforwarded frame could have carried a price - no digits in the text
+ * the shop typed itself, and no media of its own for the reader to price. So
+ * the ordinary "here you go" + forwarded board still banks nothing (the shop's
+ * own frame has no number), while "our rate is 300" + a forwarded board banks
+ * the 300, because the shop did state a price itself.
+ */
+export function onlyForwardedContent(
+  thread: ProvenanceMsg[],
+  lastOutboundAt: string
+): boolean {
+  const unread = thread.filter(
+    (m) => m.direction === "inbound" && (!lastOutboundAt || m.received_at > lastOutboundAt)
+  );
+  if (!unread.length) return false;
+  if (!unread.some((m) => m.forwarded === true)) return false;
+  return !unread.some(
+    (m) =>
+      m.forwarded !== true &&
+      (m.hasMedia === true || ANY_DIGIT.test(String(m.body ?? "")))
+  );
+}
+
 export function coalesceUnreadInbound(
   thread: CoalesceMsg[],
   lastOutboundAt: string,

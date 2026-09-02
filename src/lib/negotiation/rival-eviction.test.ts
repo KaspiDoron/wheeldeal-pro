@@ -296,7 +296,9 @@ describe("the caller reaches the eviction on a decline that carries no price", (
     // - which runs on every reply, priced or not.
     const ledgerIdx = loop.indexOf('advanceThreadStage(stageArgs, "price_received"');
     const evictIdx = loop.indexOf("dropSessionOfferAnyCurrency");
-    const pricedBlockIdx = loop.indexOf("if (usablePrice && extraction.matchesSpec !== false)");
+    const pricedBlockIdx = loop.indexOf(
+      "if (usablePrice && extraction.matchesSpec !== false && !forwardedOnly)"
+    );
     expect(ledgerIdx).toBeGreaterThan(-1);
     expect(evictIdx).toBeGreaterThan(ledgerIdx);
     expect(evictIdx).toBeLessThan(pricedBlockIdx);

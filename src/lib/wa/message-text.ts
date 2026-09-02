@@ -31,8 +31,60 @@ function innerEnvelope(message: Record<string, any>): Record<string, any> | null
     message.viewOnceMessageV2Extension?.message ??
     message.editedMessage?.message?.protocolMessage?.editedMessage ??
     message.documentWithCaptionMessage?.message ??
+    // A MESSAGE THE SHOP SENT FROM ANOTHER DEVICE IS STILL THE SHOP TALKING.
+    //
+    // WhatsApp wraps a message composed on a linked companion device in
+    // `deviceSentMessage`, and this list never peeled it - so every detector
+    // downstream (`hasImageMessage`, the text branches, `waMediaKind`) saw an
+    // envelope with no known subtype inside and the turn was read as empty. A
+    // shop owner replying from their laptop was invisible.
+    message.deviceSentMessage?.message ??
     null
   );
+}
+
+/**
+ * A frame we could LABEL but not decode - "[photo]", "[location]" and friends.
+ *
+ * Exported because two callers need to tell "the shop wrote words" apart from
+ * "we know something arrived": `wa/ingest` builds richer text for a location
+ * pin, a contact card and a document ONLY when there is no real caption, and
+ * `wa/coalesce` must not spend a reply on a turn whose whole content is a
+ * bracket label. Both were testing the string for emptiness, and this function
+ * never returns empty - that is its entire point - so both were dead.
+ */
+export const WA_PLACEHOLDER_RX =
+  /^\[(photo|video|video note|voice note|document|sticker|location|live location|album|contact|poll|order|catalog)\]$/i;
+
+export function waPlaceholderOnly(text: string | null | undefined): boolean {
+  return WA_PLACEHOLDER_RX.test(String(text ?? "").trim());
+}
+
+/**
+ * WAS THIS FORWARDED FROM SOMEONE ELSE?
+ *
+ * `contextInfo.isForwarded` appeared ZERO times in this codebase, and the
+ * consequence is a number-integrity failure of the same class as the
+ * ungrounded-price rail: a shop that FORWARDS a competitor's price board is
+ * read as having posted that price itself, and it can then enter the rival
+ * table as leverage - a price presented as one shop's when it is another's.
+ *
+ * `forwardingScore >= 5` is WhatsApp's own "forwarded many times" threshold;
+ * either signal means the content did not originate with this shop.
+ */
+export function waForwarded(message: any): { forwarded: boolean; score: number } {
+  const m = waUnwrap(message);
+  let forwarded = false;
+  let score = 0;
+  for (const node of Object.values(m ?? {})) {
+    const ctx = (node as { contextInfo?: { isForwarded?: boolean; forwardingScore?: number } } | null)
+      ?.contextInfo;
+    if (!ctx) continue;
+    if (ctx.isForwarded === true) forwarded = true;
+    const n = Number(ctx.forwardingScore);
+    if (Number.isFinite(n) && n > score) score = n;
+  }
+  return { forwarded: forwarded || score > 0, score };
 }
 
 /**
@@ -174,17 +226,77 @@ export function waMessageText(message: any): string {
     m.listMessage?.description ??
     m.listMessage?.title ??
     m.buttonsMessage?.contentText ??
+    // A SHOP TAPPING A BUTTON IN ITS OWN BUSINESS FLOW IS ANSWERING US.
+    //
+    // `interactiveResponseMessage` / `nativeFlowResponseMessage` is what a
+    // WhatsApp Business flow reply arrives as - a shop selecting "125cc - 300"
+    // from its own menu - and nothing in this file knew the subtype, so the
+    // reply was read as silence and the thread looked abandoned while the shop
+    // had just quoted us. Same class as the button/list replies above, which
+    // this file already fixed once.
+    m.interactiveResponseMessage?.body?.text ??
+    nativeFlowText(m.interactiveResponseMessage?.nativeFlowResponseMessage) ??
     "";
   if (String(text).trim()) return String(text);
 
+  // A POLL IS A PRICE QUESTION IN DISGUISE ("which do you want: 125cc 300 /
+  // 150cc 400"). `waMediaKind` has labelled polls since it shipped and no text
+  // branch ever decoded one, so the turn carried the bare "[poll]" label - and
+  // `wa/coalesce` strips bare labels, so it carried NOTHING. The name and the
+  // options are plain structured fields.
+  const poll = m.pollCreationMessage ?? m.pollCreationMessageV2 ?? m.pollCreationMessageV3;
+  if (poll) {
+    const name = String(poll.name ?? "").trim();
+    const opts = Array.isArray(poll.options)
+      ? poll.options
+          .map((o: { optionName?: string }) => String(o?.optionName ?? "").trim())
+          .filter(Boolean)
+      : [];
+    if (name || opts.length) {
+      return `[poll] ${name}${opts.length ? `: ${opts.join(" / ")}` : ""}`.trim();
+    }
+  }
+
   if (m.imageMessage) return "[photo]";
   if (m.videoMessage) return "[video]";
+  // A round video note is a video. It arrives as its own subtype and was
+  // matched by nothing here, so the turn was read as empty.
+  if (m.ptvMessage) return "[video note]";
   if (m.audioMessage) return "[voice note]";
   if (m.documentMessage) return "[document]";
   if (m.stickerMessage) return "[sticker]";
   if (m.locationMessage) return "[location]";
+  // A live location is a shop saying "I am on my way with the bike" - the one
+  // frame where a pin is time-sensitive - and it matched nothing.
+  if (m.liveLocationMessage) return "[live location]";
+  if (m.albumMessage) return "[album]";
+  if (m.pollCreationMessage || m.pollCreationMessageV2 || m.pollCreationMessageV3) return "[poll]";
   if (m.contactMessage || m.contactsArrayMessage) return "[contact]";
   return "";
+}
+
+/**
+ * The text a WhatsApp Business native-flow reply carries.
+ *
+ * `paramsJson` is a JSON string the flow itself defines, so this reads the two
+ * shapes Baileys actually ships and refuses to guess beyond them. A malformed
+ * blob returns null rather than throwing: an undecodable reply still gets the
+ * "[interactive]" label from `waMediaKind`, which is honest, where a throw
+ * would lose the whole turn.
+ */
+function nativeFlowText(nf: unknown): string | null {
+  const node = nf as { name?: string; paramsJson?: string } | null | undefined;
+  const raw = String(node?.paramsJson ?? "").trim();
+  if (!raw) return null;
+  try {
+    const p = JSON.parse(raw) as Record<string, unknown>;
+    const parts = [p.title, p.description, p.selectedDisplayText, p.body, p.id]
+      .map((v) => (typeof v === "string" ? v.trim() : ""))
+      .filter(Boolean);
+    return parts.length ? parts.join(" - ") : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -201,13 +313,32 @@ export function waMediaKind(message: any): string | null {
   if (m.locationMessage) return "location";
   if (m.contactMessage || m.contactsArrayMessage) return "contact";
   if (m.reactionMessage) return "reaction";
-  if (m.pollCreationMessage || m.pollUpdateMessage) return "poll";
+  if (
+    m.pollCreationMessage ||
+    m.pollCreationMessageV2 ||
+    m.pollCreationMessageV3 ||
+    m.pollUpdateMessage
+  ) {
+    // Only the UNVERSIONED key matched, and WhatsApp has been shipping V2/V3
+    // for years - so a poll from a modern client was an unknown frame.
+    return "poll";
+  }
+  if (m.ptvMessage) return "ptv";
+  if (m.liveLocationMessage) return "location";
+  if (m.albumMessage) return "album";
   // Commerce/interactive frames: real turns, previously invisible (dropped as
   // "empty-media" with an empty stored row - the blank-bubble bug).
   if (m.productMessage) return "product";
   if (m.orderMessage) return "order";
   if (m.catalogMessage) return "catalog";
-  if (m.interactiveMessage || m.templateMessage || m.listMessage || m.buttonsMessage)
+  if (
+    m.interactiveMessage ||
+    m.templateMessage ||
+    m.listMessage ||
+    m.buttonsMessage ||
+    m.interactiveResponseMessage
+  ) {
     return "interactive";
+  }
   return null;
 }
