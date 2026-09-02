@@ -97,7 +97,11 @@ export function lexicalEmbed(text: string): Embedding | null {
   const v = new Array<number>(EMBED_DIM).fill(0);
   for (const gram of g) {
     const h = fnv1a32(gram);
-    const sign = fnv1a32(`${gram}sign`) & 1 ? 1 : -1;
+    // The salt is written as an ESCAPE, never as the literal byte: a raw
+    // control character makes the whole file binary to git diff, grep and
+    // ripgrep (source-bytes.test.ts). \u0001 cannot occur in a trigram of
+    // real message text, so the sign hash and the bucket hash never collide.
+    const sign = fnv1a32(`${gram}\u0001sign`) & 1 ? 1 : -1;
     v[h % EMBED_DIM] += sign;
   }
   let norm = 0;
