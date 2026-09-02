@@ -254,6 +254,10 @@ describe("defense-in-depth: RLS enabled on sensitive tables (deny-all for non-se
       "whatsapp_messages",
       "wa_outbox",
       "wa_recipient_state",
+      // The semantic corpus sidecar holds a capped copy of shop reply text
+      // keyed by user_email. It lives inside schema.sql's pg_extension branch,
+      // which does not exempt it from the deny-all posture.
+      "corpus_embeddings",
     ]) {
       expect(sql).toMatch(new RegExp(`alter table public\\.${tbl}\\s+enable row level security`));
     }

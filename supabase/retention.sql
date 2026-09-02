@@ -158,6 +158,29 @@ begin
   delete from public.search_sessions where created_at < cutoff_mid;
   get diagnostics n = row_count; others := others || jsonb_build_object('search_sessions', n);
 
+  -- THE SEMANTIC SIDECAR, AND THE ONE GUARDED DELETE IN THIS FUNCTION.
+  --
+  -- corpus_embeddings is created ONLY inside schema.sql's pg_extension branch,
+  -- so on a database without pgvector it does not exist. A bare
+  -- `delete from public.corpus_embeddings` would raise "relation does not
+  -- exist" AT EXECUTION and abort this whole function - stopping retention for
+  -- every other table at once, and turning the health panel's retention tile
+  -- red with no clue why. A privacy regression caused by a privacy feature.
+  --
+  -- Dynamic SQL is what makes it safe: plpgsql resolves a statement when it
+  -- runs it, and `execute` is never parsed against the catalogue at all, so
+  -- the missing relation is simply never looked up.
+  --
+  -- The window is cutoff_mid (180d), at or inside every source's own window -
+  -- the sidecar copies text and must never EXTEND the retention horizon of
+  -- what it copies. And it lives in this function rather than a separate
+  -- sweeper for the reason stated at the top of this file: the body is a fixed
+  -- list, so a table not named here is never pruned at all.
+  if to_regclass('public.corpus_embeddings') is not null then
+    execute 'delete from public.corpus_embeddings where created_at < $1' using cutoff_mid;
+    get diagnostics n = row_count; others := others || jsonb_build_object('corpus_embeddings', n);
+  end if;
+
   delete from public.auth_events where created_at < cutoff_mid;
   get diagnostics n = row_count; others := others || jsonb_build_object('auth_events', n);
 

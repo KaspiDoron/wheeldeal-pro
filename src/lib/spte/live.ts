@@ -52,6 +52,7 @@ import { shopAskedLocation, shopAskedLicense, shopAskedLicensePhoto } from "../w
 import { shopAskedQuestion } from "../graph/nodes";
 import { classifyActs } from "../wa/dialogue-acts";
 import { vehicleKeyFor, groundedBenchmarkFor } from "../market";
+import { enqueueCorpus } from "../corpus/sidecar";
 import { askVariantFor, variantHonoured } from "../negotiation/ask-variant";
 import {
   nextThreadLanguage,
@@ -2032,6 +2033,30 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
       }),
     })
     .catch(() => {});
+
+  // THE SEMANTIC CORPUS, ENQUEUED - NOT EMBEDDED (lib/corpus/sidecar.ts).
+  //
+  // Here, after `delivered` is resolved and the telemetry is written, is the
+  // last point in the turn where nothing can still affect what the shop
+  // receives. This performs ONE insert of a row with embedding = null: no AI
+  // call, no vector arithmetic, no Redis. The embedding itself happens on the
+  // /api/wa/ping backfill, charged to nobody.
+  //
+  // Bounded twice over and awaited on purpose: the hook has its own 1.5s
+  // ceiling (every sb* helper's timedFetch is 8s, far too long to spend after a
+  // send) and refuses to start at all below 2s of remaining turn. Awaiting a
+  // bounded promise is what makes the "adds no reply-path round trip" claim
+  // testable - a floating promise would merely make it unobservable.
+  //
+  // What is stored is what the SHOP said, keyed by the inbound message id, so
+  // the corpus row and the message row erase and prune together.
+  await enqueueCorpus({
+    sourceTable: "whatsapp_messages",
+    sourceId: input.ctx.inboundId ?? "",
+    text: tc.inbound.english?.trim() || tc.inbound.text,
+    userEmail: input.ctx.sender ?? null,
+    remainingMs: input.deadlineAt - io.now(),
+  }).catch(() => "error" as const);
 
   return {
     ran: true,

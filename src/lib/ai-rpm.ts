@@ -55,6 +55,13 @@ export const DEFAULT_RPM: Record<string, number> = {
   mistral: 60,
   huggingface: 15,
   gemini: 15, // free tier; paid raises this (scale #5) - owner overrides
+  // The corpus embedder (lib/corpus/embed.ts), DISTINCT from the chat `gemini`
+  // counter on purpose: one shared counter would let a backfill starve the
+  // negotiation chain, which is the wrong trade in every case. An entry here is
+  // mandatory rather than tidy - tryConsume returns true for an unknown ceiling
+  // ("never our place to refuse"), so a counter with no entry is ungoverned BY
+  // CONSTRUCTION. A deliberate under-shoot of the published free tier.
+  gemini_embed: 60,
   // PAID providers MUST have entries: "unknown -> unlimited" would silently
   // disable the pre-429 spillover for exactly the rungs that cost money per
   // call. Entry-paid-tier ceilings with headroom (Anthropic Start 1000 RPM,
@@ -83,6 +90,7 @@ export const DEFAULT_RPM: Record<string, number> = {
 export const DEFAULT_RPD: Record<string, number> = {
   groq: 7000,
   gemini: 250, // free flash tier is a few hundred RPD - the tightest rung
+  gemini_embed: 1500, // the backfill's daily ceiling, separate from chat
   openrouter: 200, // :free models: ~50/day bare, ~1000 with a $10 balance
   mistral: 2000,
   huggingface: 500,

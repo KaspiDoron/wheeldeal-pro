@@ -62,6 +62,19 @@ export const USER_TABLES: UserTableKey[] = [
   { table: "api_usage", column: "user_email", match: "exact" },
   { table: "graph_wakeups", column: "user_email", match: "exact" },
   { table: "product_events", column: "user_email", match: "exact" },
+  // The semantic corpus sidecar. It holds a capped copy of shop reply text
+  // DERIVED FROM this person's threads, so it is registered rather than
+  // excused - "a vector is not personal data" is not a claim this repo is
+  // willing to make. exportSelect omits `embedding` for the same reason
+  // feedback_images does: 768 floats per row would dwarf the DSAR payload
+  // while telling the person nothing they can read. The ERASE still deletes
+  // the whole row - exportSelect narrows the export only.
+  {
+    table: "corpus_embeddings",
+    column: "user_email",
+    match: "exact",
+    exportSelect: "id,source_table,source_id,embed_model,snippet,dim,created_at",
+  },
   { table: "feedback", column: "reporter_email", match: "exact" },
   { table: "feedback_replies", column: "author_email", match: "exact" },
   // ---- sender_key IS the email (one WhatsApp number per account) -----------

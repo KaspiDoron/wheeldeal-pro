@@ -1,10 +1,64 @@
 # Semantic retrieval (pgvector) - SPEC FOR REVIEW
 
-**Status: design only. Nothing here is implemented.** The owner reads this
-before any code is written, per instruction. A previous version of this spec was
-blocked 3/3 by adversarial review; section 0 states what was wrong with it,
-because a spec that does not say what it got wrong last time is asking to be
+**Status: PHASE 1 (the corpus) is implemented. The readers are not.** The owner
+read this before any code was written, per instruction, and then decided:
+corpus backfill first, retrieval once the backfilled vectors are populated and
+verified; enable the `vector` extension in Supabase; and the ~33% rise in
+governed AI calls per turn is accepted (that cost lands with the live embed in
+phase 2 - phase 1 spends nothing on the reply path). A previous version of this
+spec was blocked 3/3 by adversarial review; section 0 states what was wrong with
+it, because a spec that does not say what it got wrong last time is asking to be
 trusted rather than checked.
+
+## What shipped, and what did not
+
+**Shipped (phase 1):** the guarded `corpus_embeddings` block at the end of
+`supabase/schema.sql`; `src/lib/corpus/embed.ts` (the two rungs and the two
+model ids); `src/lib/corpus/gate.ts` (the three-state gate and the depth read);
+`src/lib/corpus/sidecar.ts` (stage A enqueue, stage B backfill); the erasure
+registry entry; the guarded 180-day delete in `prune_old_rows`; the governed
+`gemini_embed` counters; the stage-A hook in `spte/live.ts`; the backfill tick
+on `/api/wa/ping`; and the corpus tile on `/api/admin/health`.
+
+**Not shipped, on purpose:** every reader. No coaching re-ranking, no question
+suppression, no rival narrowing, no prompt change, no live embed in the
+comprehension fan-out, and no KNN database function. Nothing in phase 1 can
+alter a single outbound message, which is what makes "verified before retrieval"
+a checkable claim rather than a hope. The number-stripping of retrieved
+exemplars (9.2) ships with the reader that introduces the risk.
+
+## Two defects found while building, and how they were fixed
+
+**1. The retention delete would have broken `prune_old_rows` on every database
+without pgvector.** Section 2 says the corpus delete belongs in the function
+itself and is "mandatory rather than optional", which is right - but the table
+is created ONLY inside the `pg_extension` branch (section 3), and every other
+delete in `supabase/retention.sql` is unguarded (`to_regclass` appears nowhere
+in `supabase/`). A bare `delete from public.corpus_embeddings` raises "relation
+does not exist" at execution and aborts the whole function, stopping retention
+for every other table at once and turning the health panel's retention tile red
+with no clue why - a privacy regression caused by a privacy feature. Fixed with
+dynamic SQL, which plpgsql never resolves against the catalogue on a database
+that lacks the relation:
+
+```sql
+if to_regclass('public.corpus_embeddings') is not null then
+  execute 'delete from public.corpus_embeddings where created_at < $1' using cutoff_mid;
+  ...
+end if;
+```
+
+**2. The event kind had to be written as a LITERAL, not a constant.**
+`events-reconcile.test.ts` proves every registered `agent_events` kind has a
+real writer by scanning for a value-position string literal, and
+`noteAgentEvent` hard-refuses an unregistered kind by returning false. So
+`kind: CORPUS_GATE_KIND` would have been invisible to the scan while
+`corpus-gate-missing` sat in the registry as a claim nothing fulfilled - and if
+the kind had been left out of `AGENT_EVENT_KINDS` entirely, the breadcrumb would
+never have written AND the gate would have re-fired on every turn for ever,
+which is the exact trap `retention.ts` documents. The write site now spells the
+literal, the read filter keeps the constant, and a test pins the two together so
+they cannot drift.
 
 ---
 

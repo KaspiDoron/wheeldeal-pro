@@ -101,6 +101,12 @@ export const AGENT_EVENT_KINDS = [
   "ai-chain-exhausted", // EVERY rung refused: the fleet is running deterministic
   "drain-budget-stop", // the drain hit its wall clock and left rows for the next run
   "claims-table-missing", // wa_send_claims absent: atomic pacing is inert
+  // The semantic corpus sidecar (lib/corpus). "gate-missing" is written ONCE
+  // and then gates its own re-attempt - the retention-unavailable shape - so a
+  // database without pgvector breadcrumbs a single actionable row instead of
+  // one per turn for ever.
+  "corpus-gate-missing", // corpus_embeddings absent: semantic retrieval is OFF
+  "corpus-backfill", // one cold backfill batch: how many rows were embedded
   "localize-fallback", // localization fell back to English
   "user-persist-failed", // user-profile write failed
   "booking-write-failed", // all booking insert tiers failed
