@@ -56,9 +56,23 @@ export function askTargetFor(ctx: TurnContext): number | undefined {
   const quoteNow = quoteOnTable(ctx);
   if (typeof quoteNow !== "number" || quoteNow <= 0) return undefined;
   const rival = cheapestCheaperRival(ctx.session.rivals, quoteNow)?.pricePerDay;
+  // THE PRINTED-LIST CLAMP, on the engine that answers shops.
+  //
+  // A posted price board is a firmer anchor than a spoken quote: a deep lowball
+  // against a list the shop printed and hung on the wall insults them and kills
+  // the deal ("that's OK, take it there"). The graph engine has clamped against
+  // it since the overlay shipped - and it needs `fields.sheetPricePerDay`,
+  // which SPTE re-derived per turn and never persisted, so the lever was
+  // structurally absent from the only path a traveller is served by.
+  const sheet = ctx.thread.digest.sheetPricePerDay;
+  const sheetAnchor =
+    typeof sheet === "number" && sheet > 0
+      ? Math.round(sheet * (ctx.guards.sheetAnchor ?? 0.8))
+      : 0;
+  const effFloor = Math.max(ctx.guards.floorPerDay ?? 0, sheetAnchor) || undefined;
   return computeRoundTarget({
     quoted: quoteNow,
-    floorPrice: ctx.guards.floorPerDay,
+    floorPrice: effFloor,
     rivalPrice: rival,
     rounds: ctx.thread.digest.round ?? 0,
     // What we asked LAST time, measured off the wire and persisted by live.ts.
@@ -436,6 +450,18 @@ function buildPrompt(ctx: TurnContext): { system: string; user: string } {
       })}\n`
     : "";
 
+  // THE BOARD IS A FACT ABOUT THE NEGOTIATION, so the composer is told about
+  // it in words as well as clamped by it in arithmetic. Same line the failover
+  // engine has always carried (graph/nodes.ts) and the primary never did.
+  const sheetPlay =
+    typeof dg.sheetPricePerDay === "number" && dg.sheetPricePerDay > 0 && ctx.legalMoves.includes("bargain")
+      ? `THEY POSTED A PRICE LIST showing ${dg.sheetPricePerDay} ${s.currency}/day. Acknowledge their printed price warmly and keep your ask credible against it - a deep lowball against a board they printed insults the shop and kills the deal.\n`
+      : "";
+  // What the photo showed, carried across turns (mileage, condition, the tiers
+  // on the board). Durable now, so a scratch noticed on turn one is still
+  // honest leverage on turn four.
+  const mediaPlay = dg.mediaSummary ? `THEIR PHOTO SHOWED: ${dg.mediaSummary}\n` : "";
+
   // Kept as its own line only when there is nothing stronger to lead with.
   const durationLeverage =
     !lead && !atLow && round <= 0 && days >= 3 && ctx.legalMoves.includes("bargain")
@@ -457,6 +483,8 @@ function buildPrompt(ctx: TurnContext): { system: string; user: string } {
     menuBlock +
     roundPlay +
     askShape +
+    sheetPlay +
+    mediaPlay +
     firmNote +
     depositCounterNote +
     questionNote +

@@ -271,6 +271,20 @@ export interface ThreadDigest {
   alternativeOffer?: import("../vehicle/substitution").AlternativeOffer | null;
   round: number;
   /**
+   * THE PRICE THE SHOP PRINTED, carried across turns.
+   *
+   * `graph/state.ts` (the FAILOVER engine) has written `fields.sheetPricePerDay`
+   * and `fields.mediaSummary` since they existed. SPTE - the engine that
+   * actually answers shops - re-derived the sheet price per turn from the
+   * current frame and persisted neither, so from turn two onward the primary
+   * engine had no idea the shop had posted a board at all: the printed-list
+   * anchor and the "what the photo showed" memory were both absent from the
+   * only path a traveller is ever served by.
+   */
+  sheetPricePerDay?: number;
+  /** What the last photo showed, in the reader's words. Same story as above. */
+  mediaSummary?: string;
+  /**
    * THE NUMBER WE LAST ASKED THIS SHOP FOR - measured on the wire, not asserted.
    *
    * The live engine's ask was `Math.round(quoteNow * 0.85)`: a flat 15% off
@@ -548,6 +562,17 @@ export interface TurnContext {
     priceFarAboveFloor?: number;
     /** overlay.bannedPhrases - scrubbed from the finished draft by the rails. */
     bannedPhrases?: string[];
+    /**
+     * overlay.sheetAnchor - how far below a PRINTED price list an ask may go.
+     *
+     * A posted board is a firmer anchor than a spoken quote: a deep lowball
+     * against a list the shop has printed and hung on the wall insults them and
+     * kills the deal ("that's OK, take it there"). The graph engine has clamped
+     * against it since the overlay shipped; the engine that actually answers
+     * shops never saw it, because the sheet price it needed evaporated between
+     * turns. Defaults to the overlay's own 0.8 when unset.
+     */
+    sheetAnchor?: number;
   };
   /** Event that triggered this turn - a real inbound, a wakeup, or a swarm poke. */
   event: "shop-message" | "tick" | "rival-improved";

@@ -4,6 +4,13 @@ import { emptyDigest, persistableDigest, digestFromStored } from "./digest";
 import { askTargetFor } from "./pass";
 import { citesPrice, findNumerals } from "../integrity/money-context";
 import { normalizeDigits } from "../integrity/translation";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+const readCode = (p: string) =>
+  readFileSync(join(process.cwd(), p), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/.*$/gm, "");
 
 // THE LIVE ENGINE'S ASK WAS A FLAT PERCENTAGE.
 //
@@ -21,11 +28,14 @@ function ctx(p: {
   lastAskPerDay?: number;
   floorPerDay?: number;
   rivals?: Array<{ pricePerDay: number }>;
+  sheetPricePerDay?: number;
+  sheetAnchor?: number;
 }): TurnContext {
   const digest: Partial<ThreadDigest> = {
     quotedPricePerDay: p.quoted,
     round: p.round ?? 0,
     lastAskPerDay: p.lastAskPerDay,
+    sheetPricePerDay: p.sheetPricePerDay,
   };
   return {
     session: {
@@ -52,7 +62,7 @@ function ctx(p: {
     tail: [],
     inbound: { text: "", verified: { found: false } },
     legalMoves: ["bargain"],
-    guards: { maxRounds: 4, floorPerDay: p.floorPerDay },
+    guards: { maxRounds: 4, floorPerDay: p.floorPerDay, sheetAnchor: p.sheetAnchor },
     event: "shop-message",
   };
 }
@@ -166,5 +176,58 @@ describe("EXECUTED: the wire reading that feeds lastAskPerDay", () => {
 
   it("a message with no number below the quote leaves the ladder's memory alone", () => {
     expect(askFromWire("Any chance of a better rate?", 300)).toBeUndefined();
+  });
+});
+
+describe("EXECUTED: a printed price board is a firmer anchor than a spoken quote", () => {
+  // The graph engine has clamped against `fields.sheetPricePerDay` since the
+  // overlay shipped. SPTE re-derived the sheet price per turn from the current
+  // frame and persisted NOTHING, so from turn two the engine that actually
+  // answers shops had no idea a board existed and the clamp was dead code on
+  // the only path a traveller is served by.
+  it("the ask bottoms out at the overlay's fraction of the printed price", () => {
+    const t = askTargetFor(ctx({ quoted: 300, sheetPricePerDay: 300, sheetAnchor: 0.8 }))!;
+    expect(t).toBeGreaterThanOrEqual(240);
+    // ...and without the board the same round would have asked much lower.
+    expect(askTargetFor(ctx({ quoted: 300 }))!).toBeLessThan(240);
+  });
+
+  it("a REAL floor above the board still wins - the clamp only ever raises", () => {
+    const t = askTargetFor(
+      ctx({ quoted: 400, sheetPricePerDay: 300, sheetAnchor: 0.8, floorPerDay: 280 })
+    )!;
+    expect(t).toBeGreaterThanOrEqual(280);
+  });
+
+  it("the overlay default applies when the guard is unset", () => {
+    const withGuard = askTargetFor(ctx({ quoted: 300, sheetPricePerDay: 300, sheetAnchor: 0.8 }));
+    const withoutGuard = askTargetFor(ctx({ quoted: 300, sheetPricePerDay: 300 }));
+    expect(withoutGuard).toBe(withGuard);
+  });
+
+  it("no board, no clamp - an unposted quote keeps the ordinary ladder", () => {
+    expect(askTargetFor(ctx({ quoted: 300, sheetPricePerDay: 0 }))).toBe(
+      askTargetFor(ctx({ quoted: 300 }))
+    );
+  });
+});
+
+describe("the board survives the turn, or the clamp is dead code again", () => {
+  it("SPTE persists sheetPricePerDay and mediaSummary onto fields", () => {
+    const live = readCode("src/lib/spte/live.ts");
+    expect(live).toMatch(/fields\.sheetPricePerDay = verified\.sheetPricePerDay/);
+    expect(live).toMatch(/fields\.mediaSummary = digest\.mediaSummary/);
+  });
+  it("...and seeds them back from fields on the next turn", () => {
+    const live = readCode("src/lib/spte/live.ts");
+    expect(live).toMatch(/d\.sheetPricePerDay = f\.sheetPricePerDay/);
+    expect(live).toMatch(/d\.mediaSummary = f\.mediaSummary/);
+  });
+  it("the composer is TOLD about the board, not only clamped by it", () => {
+    const pass = readCode("src/lib/spte/pass.ts");
+    expect(pass).toMatch(/THEY POSTED A PRICE LIST showing/);
+    expect(pass).toMatch(/THEIR PHOTO SHOWED:/);
+    expect(pass).toMatch(/sheetPlay \+/);
+    expect(pass).toMatch(/mediaPlay \+/);
   });
 });

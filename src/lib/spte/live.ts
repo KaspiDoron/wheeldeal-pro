@@ -295,6 +295,18 @@ function buildDigest(
     // THE STANDING QUOTE. `input.usablePrice` is this message only; the stored
     // digest carries what the shop said before and never repeated.
     quotedPricePerDay: input.usablePrice ?? base.quotedPricePerDay,
+    // THE BOARD, THIS TURN OR ANY EARLIER ONE. A price list photographed on
+    // turn one is still a printed anchor on turn four; the stored seed carries
+    // it and this turn can only ADD to it.
+    sheetPricePerDay:
+      (input.extraction as { imageKind?: string } | null)?.imageKind === "price_sheet" &&
+      typeof input.usablePrice === "number" &&
+      input.usablePrice > 0
+        ? input.usablePrice
+        : base.sheetPricePerDay,
+    mediaSummary:
+      ((input.extraction as { imageSummary?: string } | null)?.imageSummary ?? "").trim() ||
+      base.mediaSummary,
     tone,
     firmCount,
     // "No deposit" settles the deposit question exactly as firmly as "3000
@@ -683,9 +695,23 @@ async function buildTurnContext(
   const state = await Promise.resolve()
     .then(() => io.loadState(input.event.threadKey))
     .catch(() => null);
-  const seed = digestFromStored(
-    (state?.fields as { digest?: unknown } | undefined)?.digest
-  );
+  const seed = ((): ThreadDigest => {
+    const d = digestFromStored((state?.fields as { digest?: unknown } | undefined)?.digest);
+    // THE PRINTED BOARD AND WHAT THE PHOTO SHOWED LIVE ON `fields`, NOT IN THE
+    // DIGEST BLOB - that is where both engines write them (graph/state.ts
+    // applyExtractionToState, and now persistThreadOutcome). Seeding them here
+    // is what carries "the shop posted a list at 300" from turn one into turn
+    // two, which is the difference between the printed-list clamp existing and
+    // being dead code on the engine that actually answers shops.
+    const f = (state?.fields ?? {}) as { sheetPricePerDay?: number; mediaSummary?: string };
+    if (typeof f.sheetPricePerDay === "number" && f.sheetPricePerDay > 0) {
+      d.sheetPricePerDay = f.sheetPricePerDay;
+    }
+    if (typeof f.mediaSummary === "string" && f.mediaSummary.trim()) {
+      d.mediaSummary = f.mediaSummary;
+    }
+    return d;
+  })();
 
   // COMPREHENSION BEFORE DERIVATION: the ledger's third state and the deposit
   // latch both depend on what the model could not settle, so it has to run
@@ -801,6 +827,9 @@ async function buildTurnContext(
       maxRounds: policy.maxRounds,
       priceFarAboveFloor: policy.overlay.priceFarAboveFloor,
       bannedPhrases: policy.overlay.bannedPhrases,
+      // The printed-list clamp the graph engine has always had and this one
+      // never did (see TurnContext.guards.sheetAnchor).
+      sheetAnchor: policy.overlay.sheetAnchor,
     },
     event: input.event.kind === "tick" ? "tick" : "shop-message",
   };
@@ -913,6 +942,19 @@ async function persistThreadOutcome(args: {
     // the two sources so a projection can never walk them backwards.
     fields.rounds = Math.max(fields.rounds ?? 0, digest.round ?? 0);
     fields.firmCount = Math.max(fields.firmCount ?? 0, digest.firmCount ?? 0);
+    // A PRINTED BOARD IS A FIRMER ANCHOR, AND IT HAS TO SURVIVE THE TURN.
+    //
+    // `applyExtractionToState` - the FAILOVER engine - has written these two
+    // since they existed. SPTE re-derived the sheet price per turn from the
+    // current frame and persisted neither, so from turn two onward the engine
+    // that actually answers shops had no idea a board had ever been posted:
+    // the printed-list clamp and the "what the photo showed" memory were both
+    // absent from the only path a traveller is served by. Never walked
+    // backwards - a board photographed once stays photographed.
+    if (typeof verified.sheetPricePerDay === "number" && verified.sheetPricePerDay > 0) {
+      fields.sheetPricePerDay = verified.sheetPricePerDay;
+    }
+    if (digest.mediaSummary) fields.mediaSummary = digest.mediaSummary.slice(0, 500);
     // A deal the agent PRESENTED to the traveller is past negotiation - and a
     // recap the SHOP has confirmed is presented by definition (step 8): the
     // confirm turn already marked the offer presentable, so the phase and the
