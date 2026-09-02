@@ -63,7 +63,16 @@ This lets you paste all other keys inside the app and have them stick.
    works without it, but every hot-path query (threads, outbox, messages by
    number) table-scans - at real usage that is the difference between a
    1-second and a 20-second screen.
-8. Redeploy the Cloud Run web service so the new variables load.
+8. **Optional, and safe to skip:** turn on semantic retrieval. In Supabase go
+   to **Database -> Extensions**, search for `vector`, enable it, then re-run
+   `supabase/schema.sql`. That creates the `corpus_embeddings` sidecar, and the
+   app switches itself on within 60 seconds **with no redeploy** (the schema
+   probe caches a "missing" answer for only a minute). Skipping this costs you
+   nothing: the whole block sits inside an extension guard, so running
+   `schema.sql` without pgvector prints one notice and the app behaves exactly
+   as it does today. Watch it fill on **Admin -> Health -> corpus**: `queued`
+   climbs as shops reply, then falls as the cron embeds them.
+9. Redeploy the Cloud Run web service so the new variables load.
 
 Now sign in to your live app with `kaspidoron@gmail.com` (the owner signs in
 with email only - no phone or terms needed), open **Admin -> Keys**, and you'll

@@ -1837,3 +1837,111 @@ create index if not exists product_events_user_idx
 -- ONLY insights_ok=true rows - legacy null rows serve the in-product prior
 -- but never the commercial artefact.
 alter table public.deal_memory add column if not exists insights_ok boolean;
+
+-- ---------------------------------------------------------------------------
+-- SEMANTIC RETRIEVAL SIDECAR (pgvector) - OPTIONAL, AND LAST ON PURPOSE
+-- ---------------------------------------------------------------------------
+--
+-- docs/VECTOR-SPEC.md is the design; this is phase 1, the CORPUS only. Nothing
+-- reads these rows yet - the reader ships once the corpus is populated and the
+-- owner has seen it fill on Admin -> Health.
+--
+-- WHY A SIDECAR AND NOT A COLUMN. `sbInsert` returns a bare boolean and never
+-- reads the response body, so no caller can tell "column missing" from any
+-- other 4xx - which is why the offers insert needs a four-rung ladder whose
+-- floor rung IS offerBase. A column added there is present in ALL FOUR rungs,
+-- so on a database missing it every rung 400s and every priced offer is lost,
+-- invisibly (the last insert's return is discarded and "offers" is not in
+-- TELEMETRY_TABLES). A sidecar's failure mode is total and LOCAL: the row is
+-- absent, and absence already means "behave exactly as today".
+--
+-- WHY IT IS LAST AND FULLY GUARDED. This file is re-run by every owner. A
+-- `vector`-typed column errors when pgvector is absent and can abort the rest
+-- of the paste, costing tables they already had. Everything below lives inside
+-- one pg_extension branch and can only ever raise a notice.
+--
+-- It deliberately does NOT `create extension`, for the same reason this repo's
+-- retention file does not install pg_cron: enabling an extension is an owner
+-- decision made in the dashboard, and a failed create inside an 1800-line paste
+-- is expensive. Enable it at Supabase -> Database -> Extensions -> "vector",
+-- then re-run this file.
+--
+-- Because the table is created ONLY inside that branch, "corpus_embeddings
+-- exists" means exactly "pgvector was present when this file ran". There is no
+-- half-migrated state where the table is here and the vector column is not, so
+-- the app needs one probe rather than two.
+do $$
+begin
+  if not exists (select 1 from pg_extension where extname = 'vector') then
+    raise notice 'pgvector not installed - semantic retrieval stays OFF and the app behaves exactly as it does today. To enable: Supabase -> Database -> Extensions -> enable "vector", then re-run this file.';
+    return;
+  end if;
+
+  create table if not exists public.corpus_embeddings (
+    id           bigint generated always as identity primary key,
+    source_table text not null,
+    source_id    text not null,
+    -- 'lexical:v1' | 'gemini:text-embedding-004'. A DISTINCT ID IS THE SAFETY
+    -- PROPERTY, not a naming convention: cosine between a hashed-lexical vector
+    -- and a neural one is meaningless rather than merely inaccurate, and it
+    -- does not fail loudly - two random 768-d unit vectors sit near 0 with an
+    -- SD of ~0.036, so a mixed pool returns plausible scores with occasional
+    -- spurious highs. Every read filters on this column, so the comparison is
+    -- not expressible through the interface.
+    embed_model  text not null,
+    -- sha256 of the NORMALIZED snippet. The staleness key (source text changed
+    -- => re-embed) and the skip key (never pay twice for the same sentence) -
+    -- NOT the identity. Hash-as-identity would collapse two people's identical
+    -- sentence into one row, and the erasure walker deletes by user_email, so
+    -- erasing person A would delete a row that also serves person B.
+    content_hash text not null,
+    snippet      text,
+    dim          int not null,
+    -- NULLABLE BY DESIGN: null means "enqueued, not yet embedded". An
+    -- un-embedded row IS the write queue entry - one mechanism, two
+    -- invariants - and a row with no embedding is treated exactly as today
+    -- rather than refused, so a lagging backfill can never disable anything.
+    embedding    vector(768),
+    user_email   text,
+    created_at   timestamptz not null default now()
+  );
+
+  -- LOAD-BEARING, not hygiene. The hot enqueue uses sbInsertClaim and reads a
+  -- 409 as "already enqueued, nothing to do". Without this constraint there is
+  -- no 409, so every turn inserts a duplicate and the backfill pays for the
+  -- same sentence again and again.
+  create unique index if not exists corpus_embeddings_identity_idx
+    on public.corpus_embeddings (embed_model, source_table, source_id);
+
+  create index if not exists corpus_embeddings_hash_idx
+    on public.corpus_embeddings (embed_model, content_hash);
+
+  -- The backfill queue: the only index the cold sweep needs.
+  create index if not exists corpus_embeddings_queue_idx
+    on public.corpus_embeddings (created_at)
+    where embedding is null;
+
+  create index if not exists corpus_embeddings_user_idx
+    on public.corpus_embeddings (user_email);
+
+  alter table public.corpus_embeddings enable row level security;
+
+  -- ANN index: hnsw needs pgvector 0.5.0+, ivfflat is the fallback, and an
+  -- exact scan is fine below roughly 50k rows - so a failure here is a notice,
+  -- never an error.
+  begin
+    create index if not exists corpus_embeddings_ann_idx
+      on public.corpus_embeddings using hnsw (embedding vector_cosine_ops);
+  exception when others then
+    begin
+      create index if not exists corpus_embeddings_ann_idx
+        on public.corpus_embeddings using ivfflat (embedding vector_cosine_ops);
+      raise notice 'hnsw unavailable (pgvector < 0.5.0) - built an ivfflat index instead.';
+    exception when others then
+      raise notice 'No ANN index could be built - exact scan will be used. This is fine below ~50k rows.';
+    end;
+  end;
+
+  raise notice 'pgvector present: corpus_embeddings is ready. The app switches itself on within 60s, with no redeploy.';
+end;
+$$;

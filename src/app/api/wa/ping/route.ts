@@ -199,6 +199,28 @@ export async function GET(req: Request) {
     /* best-effort - never fail the keep-awake on a suggestion */
   }
 
+  // SEMANTIC CORPUS BACKFILL (lib/corpus/sidecar.ts). The turn enqueues a row
+  // with embedding = null after its reply is already on the wire; THIS is where
+  // the embedding calls happen, off the reply path entirely. It runs from the
+  // cron, which has no user scope, so reserveAiCall returns "ungoverned" and
+  // the batch is charged to nobody - charging a traveller for a batch job would
+  // degrade their live negotiation to pay for someone else's corpus.
+  //
+  // Minute 4 of every 5: the taken offsets are %5===0 (webhook re-arm),
+  // %5===2 (WABA holds), %5===3 (media re-read), %15===1 (trip completion) and
+  // %60===2/7 (risk rollup, retention), so this collides with none of them.
+  // As everywhere here, the modulo only sets how often we ASK - the real bounds
+  // are the gate (a database without pgvector does nothing at all) and
+  // BACKFILL_BATCH, which is what keeps the embedding spend per run finite.
+  try {
+    if (Math.floor(Date.now() / 60_000) % 5 === 4) {
+      const { runCorpusBackfill } = await import("@/lib/corpus/sidecar");
+      await runCorpusBackfill().catch(() => null);
+    }
+  } catch {
+    /* best-effort - never fail the keep-awake on the corpus */
+  }
+
   // Extend this ping's reach: kick the self-chaining drain so one cron hit
   // keeps a staggered batch progressing for the following ~30 minutes even
   // between cron intervals. AWAITED to the point of leaving the instance - a

@@ -314,6 +314,10 @@ export async function GET(req: Request) {
     // wa_send_claims is missing, so every atomic pacing guarantee is inert.
     // Any non-zero here is a launch blocker: run supabase/schema.sql.
     "claims-table-missing",
+    // corpus_embeddings absent: the semantic corpus is OFF. Written ONCE (the
+    // row gates its own re-attempt), so any non-zero here means "enable the
+    // pgvector extension and re-run supabase/schema.sql", not a rate.
+    "corpus-gate-missing",
   ];
   // ONE BUDGET SHARED BY TWELVE COUNTERS IS ELEVEN COUNTERS THAT CAN BE STARVED.
   //
@@ -467,6 +471,20 @@ export async function GET(req: Request) {
   );
   const inboundDrops = summarizeInboundDrops(dropRows, DROP_SCAN_LIMIT);
 
+  // THE SEMANTIC CORPUS DEPTH (lib/corpus/gate.ts). Phase 1 of the vector layer
+  // ships the corpus with NO reader, so this tile is the only way to answer
+  // "is it filling?" - and the answer gates whether the reader may be built at
+  // all. Every count is sbCountDark, so an unreadable store reports null: "0
+  // embedded" during an outage would be indistinguishable from "0 embedded
+  // because nothing has run", which is exactly the question being asked.
+  const { corpusDepth } = await import("@/lib/corpus/gate");
+  const corpus = await corpusDepth().catch(() => ({
+    state: "unavailable" as const,
+    queued: null,
+    neural: null,
+    lexical: null,
+  }));
+
   // ---- the numbers the owner needs to see WITHOUT reading a log ------------
   const { pulse, queueDepth, turnLatency, providerErrors, pushBreadcrumbs } = await import(
     "@/lib/ops/vitals"
@@ -474,6 +492,9 @@ export async function GET(req: Request) {
 
   return NextResponse.json({
     retention,
+    // state: "ready" | "missing" (pgvector not enabled / schema.sql not re-run)
+    // | "unavailable" (Supabase did not answer - NOT a migration signal).
+    corpus,
     services,
     guardCounters,
     // A null anywhere in guardCounters means that counter is UNKNOWN, not zero.

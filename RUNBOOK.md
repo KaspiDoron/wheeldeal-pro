@@ -135,6 +135,41 @@ for either.
 4. Set `EVOLUTION_PROXY_TEMPLATE` if the numbers are not already spread across
    hosts.
 
+## Turning the semantic corpus on (optional)
+
+`docs/VECTOR-SPEC.md` is the design. Phase 1 - the corpus - is shipped; the
+readers are not, so nothing about this can change a single outbound message.
+
+**The one action no code can take:** Supabase -> **Database -> Extensions** ->
+enable `vector`, then re-run `supabase/schema.sql`. Within 60 seconds the app
+switches itself on with **no redeploy** (the schema probe caches a negative for
+one minute and a positive for ever). Skipping it costs nothing at all: the whole
+block sits inside an extension guard, so the file prints one notice and the app
+behaves exactly as it does today.
+
+**How to tell it is working** - Admin -> Health, the `corpus` tile:
+
+| field | means |
+|---|---|
+| `state: "ready"` | pgvector is on and the table exists |
+| `state: "missing"` | not enabled, or `schema.sql` was not re-run afterwards |
+| `state: "unavailable"` | Supabase did not answer. NOT a migration signal |
+| `queued` | rows enqueued, waiting for the cron to embed them |
+| `neural` / `lexical` | rows embedded, per model - they are separate spaces |
+
+A healthy corpus has `queued` rising as shops reply and falling every five
+minutes as the `/api/wa/ping` backfill drains it, with `neural` climbing. A
+`queued` that only grows means the embedder is failing: check `GEMINI_TOKEN` in
+Admin -> Keys. `lexical` climbing instead of `neural` is the keyless fallback
+doing its job - the corpus still fills, it is simply the weaker vector.
+
+Any non-zero `corpus-gate-missing` in the events counters means exactly one
+thing: enable the extension and re-run the schema. It is written ONCE and then
+gates its own re-attempt, so it is a state, never a rate.
+
+**Phase 2 starts only when** the tile shows a non-zero `neural` count and a
+draining queue. Until then there is nothing worth retrieving.
+
 ## 4. The 18 reported problems - final reconciliation
 
 Signed off when the owner has spot-checked each in the product.
