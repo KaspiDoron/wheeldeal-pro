@@ -213,16 +213,23 @@ export const PROXYLESS_CLUSTER_THRESHOLD = 5;
 /**
  * The datacenter-IP concentration warning, pure so it is testable.
  *
- * Given each session's host and whether a proxy template is configured, returns
- * the loudest per-host over-concentration (owner report 4, anti-ban A4). Null
- * when a proxy IS configured (every number gets its own residential exit) or no
- * host crosses the threshold.
+ * Takes the hosts of the numbers that are NOT protected by a confirmed
+ * residential exit, and returns the loudest per-host over-concentration (owner
+ * report 4, anti-ban A4), or null when no host crosses the threshold.
+ *
+ * It used to take a second `proxied` boolean and return null the moment ANY
+ * proxy template was configured. That was a lie in the one fleet shape the
+ * alarm exists for: a template is an assertion, `proxy_verified_at` is the
+ * evidence, and a session whose exit was never confirmed still egresses from
+ * the datacenter IP. Pasting a template silenced the alarm for every number,
+ * verified or not. The caller now decides what "protected" means and passes
+ * only the exposed hosts, so the pure function cannot be silenced by a config
+ * value it never sees.
  */
 export function clusterWarning(
-  hosts: Array<string | null>,
-  proxied: boolean
+  exposedHosts: Array<string | null>
 ): { host: string; count: number } | null {
-  if (proxied) return null;
+  const hosts = exposedHosts;
   const byHost = new Map<string, number>();
   for (const h of hosts) {
     const key = (h ?? "").trim() || "(unknown host)";
@@ -283,9 +290,13 @@ export async function transportSummary(): Promise<TransportSummary> {
   } catch {
     readOk = false;
   }
-  const warn = readOk
-    ? clusterWarning(hostRows.map((r) => r.host_url), configured) ?? undefined
-    : undefined;
+  // A number is protected only when an exit is configured AND that session's
+  // exit was CONFIRMED carrying traffic. Anything else is still egressing from
+  // the shared datacenter IP, whatever the config says.
+  const exposed = hostRows
+    .filter((r) => !configured || !r.proxy_verified_at)
+    .map((r) => r.host_url);
+  const warn = readOk ? clusterWarning(exposed) ?? undefined : undefined;
   if (!configured) {
     return {
       configured: false,
@@ -308,10 +319,12 @@ export async function transportSummary(): Promise<TransportSummary> {
       configured: true,
       sessions,
       verified,
-      note:
-        verified === sessions
+      note: warn
+        ? `${verified} of ${sessions} sessions have a confirmed exit, and ${warn.count} unconfirmed numbers share ${warn.host} - a datacenter-IP cluster-ban risk. Verify the exits or spread the numbers across hosts.`
+        : verified === sessions
           ? "Every linked session has a confirmed residential exit."
           : `${verified} of ${sessions} sessions have a confirmed exit; the rest are asserted but unverified.`,
+      ...(warn ? { clusterWarning: warn } : {}),
     };
   }
   {

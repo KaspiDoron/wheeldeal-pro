@@ -192,10 +192,16 @@ pretending they are gone.
 - **Fingerprint refreshed + baked into the Evolution image** (see the pairing table
   and the env note above).
 - **Datacenter-IP cluster banner** (`clusterWarning` / `transportSummary`): when
-  **≥5 unproxied numbers share one host**, the transport tile turns red and names
+  **≥5 EXPOSED numbers share one host**, the transport tile turns red and names
   the host. Datacenter-IP clustering is the classic cluster-ban trigger, and it was
   the one transport state worth a loud alarm (an unconfigured proxy at low numbers
-  is the expected, non-alarming baseline).
+  is the expected, non-alarming baseline). "Exposed" means no CONFIRMED residential
+  exit - `proxy_verified_at` unset - not merely "no template configured". Pasting
+  `EVOLUTION_PROXY_TEMPLATE` used to silence the banner for the whole fleet the
+  instant it was set, verified or not, which is precisely backwards: a template is
+  an assertion, and a number whose exit was never confirmed is still egressing from
+  the shared datacenter IP. The alarm now takes no config flag at all, so no pasted
+  value can quiet it.
 - **Webhook re-arm throttle is now a shared config row** (`WH_REARM_<instance>`),
   not a per-process map — N serverless instances no longer each re-arm once an hour
   (N× the intended `/webhook/set` churn).
