@@ -470,7 +470,18 @@ async function buildSession(
     firm: verified.firm,
   });
   const { loadCoaching } = await import("./coaching");
-  const coaching = await loadCoaching(situation).catch(() => "");
+  // THE SHOP'S OWN WORDS ARE THE QUERY. Coaching used to be ordered by pure
+  // recency inside a coarse pre-filter, so the most relevant thing this repo
+  // had ever been taught could lose its place to whatever was written last.
+  // The English gloss is preferred where one exists, for the same reason every
+  // other detector reads it: the exemplars are English, and comparing English
+  // against raw Thai measures the language, not the meaning.
+  const coachingQuery =
+    (input.inboundEnglish ?? "").trim() ||
+    (input.event.kind === "inbound-text" || input.event.kind === "inbound-image"
+      ? (input.event.shopMessage ?? "").trim()
+      : "");
+  const coaching = await loadCoaching(situation, coachingQuery).catch(() => "");
   return {
     sessionId: input.event.threadKey,
     rfq: input.rfq,
