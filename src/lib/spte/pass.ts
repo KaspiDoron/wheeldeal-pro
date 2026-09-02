@@ -19,7 +19,8 @@ import { planLeverage, leadCard, cheapestCheaperRival } from "../negotiation/lev
 import { normalizeDigits } from "../integrity/translation";
 import { citesPrice } from "../integrity/money-context";
 import { beatRivalTarget } from "../negotiation/beat-rival";
-import { computeRoundTarget } from "../graph/math";
+import { computeRoundTarget, niceRound, niceRoundBelow } from "../graph/math";
+import { money as agentMoney } from "../agents";
 import { askVariantDirective, askVariantFor } from "../negotiation/ask-variant";
 import { disclosureBlock } from "../negotiation/traveller-disclosure";
 import { describeActs } from "../wa/dialogue-acts";
@@ -581,12 +582,37 @@ export function templateFor(ctx: TurnContext, move: MoveKind): string | undefine
       const rival = cheapestCheaperRival(ctx.session.rivals, quoteNow);
       if (rival && typeof quoteNow === "number" && quoteNow > 0) {
         const cur = rival.currency ?? ctx.session.currency ?? "";
-        const target = beatRivalTarget({
+        // A NUMBER A PERSON WOULD SAY OUT LOUD.
+        //
+        // `beatRivalTarget` solved decimals ("189.5/day reads as a machine
+        // wrote it") and stopped there, so the deterministic ask emitted 219
+        // against a rival at 230, 178 against 187, 1378 against 1450. Nobody
+        // haggling in a shop says 1378. `niceRound` exists for exactly this and
+        // was reachable from here the whole time - the prompt path started
+        // using it this round and the template, which is what actually goes out
+        // on every provider failure and every rail rejection, did not.
+        //
+        // `niceRoundBelow` for the clamp, not `niceRound`: rounding to the
+        // NEAREST step turns a beating ask of 219 into 220 and then, against a
+        // rival at 220, back ONTO the rival - a match, not leverage. Rounding
+        // down into the bound is the whole reason that function exists.
+        const raw = beatRivalTarget({
           rivalPricePerDay: rival.pricePerDay,
           quotePerDay: quoteNow,
           floorPerDay: ctx.guards.floorPerDay,
         });
-        const money = (n: number) => `${cur ? `${cur} ` : ""}${n}`;
+        const rounded = raw > 0 ? niceRound(raw) : raw;
+        const target =
+          rounded > 0 && rounded >= rival.pricePerDay
+            ? niceRoundBelow(raw, rival.pricePerDay)
+            : rounded;
+        // THE SHOP'S OWN MONEY, IN SYMBOLS. This printed the currency CODE -
+        // "THB 219/day" - where the failover engine and the traveller's own UI
+        // both print a symbol. A shop reading "THB 219" is reading an invoice,
+        // not a text message from a person. `agents.money` is the one formatter
+        // that already knows every symbol this app supports, and it falls back
+        // to "219 THB" for a currency it has no symbol for.
+        const money = (n: number) => agentMoney(n, cur || undefined);
         return target > 0 && target < rival.pricePerDay
           ? `Thanks! Another shop offered ${money(rival.pricePerDay)}/day for the same ${ctx.session.rfq.vehicleClass} - could you do ${money(target)}/day for ${nDays(days)}?`
           : `Thanks! Another shop offered ${money(rival.pricePerDay)}/day for the same ${ctx.session.rfq.vehicleClass} - could you go lower than that for ${nDays(days)}?`;
@@ -801,7 +827,14 @@ export function templateFor(ctx: TurnContext, move: MoveKind): string | undefine
       if (!depositLine) asks.push("what deposit you need");
       if (!handoverLine) asks.push("whether you deliver or I collect it");
       const askTail = asks.length ? ` And could you also confirm ${listOf(asks)}?` : "";
-      return `Perfect - just to confirm before we lock it in: ${known}. All correct?${askTail}`;
+      // NOT "before we lock it in". This template is deterministic, so that
+      // exact sentence went to every shop that reached a full recap - and it
+      // is the single most booking-sounding line the engine could emit, from
+      // the traveller's own number, to a shop that may then hold a vehicle for
+      // someone who has not decided. The anti-commitment rail now catches the
+      // phrase too, but a rail that has to rescue our own template is a rail
+      // doing the template's job.
+      return `Perfect - just so I have it right: ${known}. All correct?${askTail}`;
     }
     default:
       return undefined; // present / closing-message / silent
