@@ -2589,7 +2589,12 @@ export async function buildTurnFromThread(
   const { buildHistoryWindow } = await import("../wa/history-window");
   const history = buildHistoryWindow(mine.slice(0, 40).reverse());
   const outboundRows = thread.filter((m) => m.direction === "outbound" && (m.body ?? ""));
-  const priorOutbound = outboundRows.map((m) => m.body ?? "");
+  // THE GLOSS, NOT THE LOCALIZED WIRE TEXT - same fix as the inbound path in
+  // agent-loop, and for the same reason: the repetition guard compares these
+  // against an ENGLISH draft, so raw Thai on this side made it inert.
+  const priorOutbound = outboundRows.map(
+    (m) => (m.raw as { englishGloss?: string } | null)?.englishGloss ?? m.body ?? ""
+  );
   // Parallel to priorOutbound, same order and length. SPTE stamps the semantic
   // move in raw.move; the legacy paths use raw.kind. Either identifies a
   // message better than its wording can - see the note on the field.

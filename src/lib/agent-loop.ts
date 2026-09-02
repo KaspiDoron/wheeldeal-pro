@@ -2401,9 +2401,27 @@ export async function processVendorReply(opts: {
     // English rendering when we have one, on the shop's own words when we do
     // not. This changes nothing about what language we SEND in.
     inboundEnglish,
+    // THE GLOSS ON THIS SIDE TOO - the units bug that made the repetition
+    // guard inert on every localized thread.
+    //
+    // `priorInbound` below already does this, and says why. The outbound half
+    // did not, and the asymmetry is load-bearing: `pass.ts` checks the model's
+    // draft against these strings with `isRepetitive`, and the draft is
+    // ENGLISH - localization happens later, in live.ts, after the pass has
+    // returned. So on a Thai thread the guard compared an English draft
+    // against Thai wire text and found nothing in common, whatever the two
+    // messages actually said. `similarity` strips every non-ASCII codepoint
+    // (`[^a-z0-9\s]`, no `u` flag), so the two sides could not have been
+    // compared even in principle.
+    //
+    // The gloss is stamped on the row as `raw.englishGloss` by the same send
+    // that localized it (spte/live.ts), so this is the SAME message in the
+    // SAME language the guard is written in. `lastOutbound` flows from here
+    // into the digest, so the anti-repetition list the prompt shows the model
+    // becomes readable at the same time.
     priorOutbound: thread
       .filter((m) => m.direction === "outbound")
-      .map((m) => m.body ?? "")
+      .map((m) => (m.raw as { englishGloss?: string } | null)?.englishGloss ?? m.body ?? "")
       .filter(Boolean),
     // THE SAME BUG AS THE CONFIRM LOOP, ON THE SAME TURN.
     //
