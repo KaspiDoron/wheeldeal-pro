@@ -144,7 +144,21 @@ export function inviteHeadroom(
   // Exactly-full is a warning: every invited tester still has a socket, and
   // calling that red trains the owner to ignore the tile that is red when a
   // tester genuinely cannot use the product.
-  const state: ChokeState = headroom < 0 ? "alarm" : headroom <= cap ? "warn" : "ok";
+  //
+  // "LESS THAN ONE HOST'S WORTH OF HEADROOM" IS ALWAYS TRUE AT FLEET-OF-ONE.
+  // With a single host, capacity IS cap, so `headroom <= cap` held from the
+  // very first tester to the last: the tile was amber at 2/25 and amber at
+  // 24/25 and said the same sentence throughout, which is no information at
+  // all. An owner running a deliberate one-host beta would have watched it
+  // nag from day one - the exact "trains the owner to ignore it" failure the
+  // paragraph above exists to prevent, produced by the rule below it.
+  //
+  // The original rule is about REDUNDANCY - lose a host, can everyone still
+  // link? - and that question only means something with two or more hosts.
+  // At one host, losing it takes the whole fleet down whatever the headroom
+  // is, so the useful question becomes proportional: are we nearly full?
+  const nearFull = hostCount >= 2 ? cap : Math.max(2, Math.ceil(capacity * 0.2));
+  const state: ChokeState = headroom < 0 ? "alarm" : headroom <= nearFull ? "warn" : "ok";
   const listNote =
     invited >= listMax ? ` The invite list is also at its own ${listMax} ceiling.` : "";
   return {
@@ -157,8 +171,10 @@ export function inviteHeadroom(
         ? `${invited} testers invited against a fleet that holds ${capacity}. ${-headroom} of them can sign in and then FAIL to link WhatsApp. Add hosts or shrink the list.${listNote}`
         : headroom === 0
           ? `Exactly full: ${invited} invited, ${capacity} linkable. Every current tester has a socket and the next invite does not. Stand up the next lane before it goes out.${listNote}`
-          : headroom <= cap
-            ? `Room for ${headroom} more tester(s) before the fleet is full - less than one host's worth. Stand up the next lane now, not after the invites go out.${listNote}`
+          : headroom <= nearFull
+            ? hostCount >= 2
+              ? `Room for ${headroom} more tester(s) before the fleet is full - less than one host's worth. Stand up the next lane now, not after the invites go out.${listNote}`
+              : `Room for ${headroom} more tester(s) on your single host (${capacity} linkable). Nearly full: a second host is the only thing that adds slots.${listNote}`
             : `Room for ${headroom} more tester(s): ${hostCount} host(s) x ${cap} = ${capacity} linkable numbers, ${invited} invited.${listNote}`,
   };
 }

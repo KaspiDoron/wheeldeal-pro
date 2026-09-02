@@ -96,6 +96,42 @@ describe("choke point: invited testers vs fleet capacity", () => {
     expect(h.detail).toMatch(/Stand up the next lane now/);
   });
 
+  it("a ONE-HOST beta is green with real headroom, not permanently amber", async () => {
+    // The rule was `headroom <= cap`, and at one host capacity IS cap - so the
+    // tile was amber at 2/25 and amber at 24/25 with the same sentence on it.
+    // A tile that never changes is not a signal; it is training to ignore the
+    // column. This is the owner's real state: 2 linked, 24 planned, one host.
+    const { inviteHeadroom } = await import("./chokepoints");
+    const h = inviteHeadroom(2, 1, 25, 100);
+    expect(h.state).toBe("ok");
+    expect(h.headroom).toBe(23);
+  });
+
+  it("...and still warns when a one-host fleet is genuinely nearly full", async () => {
+    // The fix must not be so broad that it silences the tile entirely: the
+    // whole point is that it means something when it does fire.
+    const { inviteHeadroom } = await import("./chokepoints");
+    const h = inviteHeadroom(24, 1, 25, 100);
+    expect(h.state).toBe("warn");
+    expect(h.headroom).toBe(1);
+    expect(h.detail).toMatch(/a second host is the only thing that adds slots/);
+  });
+
+  it("exactly full is still a warning at one host", async () => {
+    const { inviteHeadroom } = await import("./chokepoints");
+    const h = inviteHeadroom(25, 1, 25, 100);
+    expect(h.state).toBe("warn");
+    expect(h.detail).toMatch(/Exactly full/);
+  });
+
+  it("the redundancy rule is UNCHANGED with two or more hosts", async () => {
+    // "Less than one host's worth" is about losing a host - a question that
+    // only means anything when there is more than one.
+    const { inviteHeadroom } = await import("./chokepoints");
+    expect(inviteHeadroom(80, 4, 25, 100).state).toBe("warn"); // 20 left < 25
+    expect(inviteHeadroom(30, 4, 25, 100).state).toBe("ok"); // 70 left
+  });
+
   it("ALARMS once invites exceed what the fleet can hold, and counts the broken testers", async () => {
     const { inviteHeadroom } = await import("./chokepoints");
     const h = inviteHeadroom(100, 1, 25, 100); // one host: 25 linkable
