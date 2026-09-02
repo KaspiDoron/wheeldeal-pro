@@ -805,6 +805,10 @@ async function buildTurnContext(
     // Wall clock for the confirm-wait and recap-answer bounds. Live only -
     // replays leave it unset and keep pure turn arithmetic.
     nowMs: io.now(),
+    // THE PERSONA AND THE REGION REACH THE ENGINE THAT ANSWERS SHOPS.
+    // Both were wired only to the failover; see TurnContext.userKey.
+    userKey: input.ctx.sender ?? undefined,
+    region: input.ctx.region || undefined,
     ...(() => {
       const t = buildThreadTail(input);
       return { tail: t.tail, tailElided: t.elided };
@@ -1413,16 +1417,33 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
     // exactly like the graph path. Deterministic re-vary never touches
     // digits, so the rails' number verification survives it. Best-effort:
     // the gates are polish, never the send.
+    // WHOSE MESSAGE THIS IS, AND WHETHER THIS SHOP USES EMOJI AT ALL.
+    //
+    // The emoji rule appended one to EVERY outbound message, which is itself
+    // the fleet pattern it was meant to soften - and it overrode a persona that
+    // may have drawn "never". It now takes the traveller's own appetite, a read
+    // of whether THIS shop has used an emoji with us (people mirror), and a
+    // deterministic seed so a re-park composes the same bytes.
+    const emojiTone = await (async () => {
+      const { hasEmoji } = await import("../graph/uniqueness");
+      const { voiceProfileFor } = await import("../voice");
+      const shopUsesEmoji = (input.priorInbound ?? []).some((m) => hasEmoji(m));
+      return {
+        appetite: input.ctx.sender ? voiceProfileFor(input.ctx.sender).emoji : undefined,
+        shopUsesEmoji,
+        seed: `${input.event.threadKey}|${tc.thread.digest.round ?? 0}|${outcome.move}`,
+      };
+    })();
     try {
       const spec = await getGraphSpec();
       if (!local.gloss) {
         const recent = await io.recentOutboundGlobal(6, 200).catch(() => []);
         const { ensureGloballyUnique, enforceEmojiTone } = await import("../graph/uniqueness");
         const fresh = await ensureGloballyUnique(send, recent);
-        send = enforceEmojiTone(fresh.text, spec.settings.emojiTone);
+        send = enforceEmojiTone(fresh.text, spec.settings.emojiTone, emojiTone);
       } else {
         const { enforceEmojiTone } = await import("../graph/uniqueness");
-        send = enforceEmojiTone(send, spec.settings.emojiTone);
+        send = enforceEmojiTone(send, spec.settings.emojiTone, emojiTone);
       }
     } catch {
       /* gates are polish - the decided message still goes out */

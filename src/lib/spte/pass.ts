@@ -21,6 +21,8 @@ import { citesPrice } from "../integrity/money-context";
 import { beatRivalTarget } from "../negotiation/beat-rival";
 import { computeRoundTarget, niceRound, niceRoundBelow } from "../graph/math";
 import { money as agentMoney } from "../agents";
+import { voiceProfileFor, voiceDirectives } from "../voice";
+import { compileStyleDirectives } from "../copy/promptCompiler";
 import { askVariantDirective, askVariantFor } from "../negotiation/ask-variant";
 import { disclosureBlock } from "../negotiation/traveller-disclosure";
 import { describeActs } from "../wa/dialogue-acts";
@@ -111,6 +113,42 @@ function buildPrompt(ctx: TurnContext): { system: string; user: string } {
     ? `(this thread is long - some middle messages are not shown; the oldest and newest are)\n${tail}`
     : tail;
 
+  // WHO IS WRITING, AND WHAT SHAPE THIS PARTICULAR MESSAGE TAKES.
+  //
+  // THE WHOLE STYLE INSTRUCTION ON THIS ENGINE WAS TWO SENTENCES ("act like a
+  // smart human bargainer" and "1-2 short sentences"), while the FAILOVER
+  // engine stacked a per-user persona AND a per-turn structural draw on every
+  // bargain. Both modules existed, were tested, and had zero callers under
+  // src/lib/spte - so on the path every traveller is actually served by,
+  // twenty-five testers' agents wrote in one indistinguishable voice, which is
+  // the single loudest tell a fleet of personal WhatsApp numbers can emit.
+  //
+  // `voiceProfileFor` is a hash of the traveller's identity, so the same person
+  // always sounds like themselves; `compileStyleDirectives` redraws sentence
+  // order, contractions and the local politeness particle per turn from
+  // (thread, vendor, round). Both are deterministic, so a re-park composes the
+  // same bytes and golden replay is unaffected - and both are absent when
+  // `userKey` is (a replay has no traveller), which keeps the frozen cases
+  // byte-identical.
+  //
+  // `greeting: false`: this is a mid-conversation composer by construction, and
+  // a persona that names an opening habit in the same prompt that forbids
+  // greetings is two contradictory rules, of which a model obeys the concrete
+  // one. That is how "Hey there!" kept appearing on turn four.
+  const persona = ctx.userKey
+    ? `${voiceDirectives(voiceProfileFor(ctx.userKey), { greeting: false })}\n`
+    : "";
+  const styleShape = ctx.userKey
+    ? `${compileStyleDirectives(
+        {
+          threadId: ctx.thread.threadKey,
+          vendorId: ctx.thread.vendorId,
+          nonce: ctx.thread.digest.round ?? 0,
+        },
+        ctx.region
+      )}\n`
+    : "";
+
   const system =
     "You are one traveller haggling on WhatsApp for the cheapest real rental of a specific vehicle. " +
     "Act EXACTLY like a smart human bargainer: warm, brief, never robotic, one clear ask at a time. " +
@@ -144,6 +182,8 @@ function buildPrompt(ctx: TurnContext): { system: string; user: string } {
     "motorbike ends the conversation. Say available, spare, or in stock. " +
     "\"Free\" is only ever correct for something genuinely included at no charge " +
     "(free delivery, free helmet).\n" +
+    persona +
+    styleShape +
     (ctx.session.coaching && ctx.session.coaching.trim()
       ? `${ctx.session.coaching.trim()}\n`
       : "") +

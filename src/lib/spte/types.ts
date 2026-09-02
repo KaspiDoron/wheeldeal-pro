@@ -503,6 +503,26 @@ export interface TurnContext {
    *  wait). ABSENT on replays and unit runs, which then use pure turn
    *  arithmetic - determinism is the property the golden gate needs. */
   nowMs?: number;
+  /**
+   * THE TRAVELLER, FOR THE VOICE PERSONA (lib/voice).
+   *
+   * The strongest tell of a bot fleet is not one odd message - it is a hundred
+   * "different customers" who all write identically. `voiceProfileFor` derives
+   * a stable persona from this key (greeting habit, punctuation energy, emoji
+   * appetite, brevity, one small quirk) so the same person always sounds like
+   * themselves and no two people sound alike.
+   *
+   * It existed, was tested, and was wired ONLY to the graph engine - the
+   * FAILOVER. So on the path every traveller is actually served by, twenty-five
+   * testers' agents wrote in one voice.
+   *
+   * Optional because a replay has no traveller: absent means no persona block,
+   * which keeps the golden suite byte-identical.
+   */
+  userKey?: string;
+  /** The traveller's region, for the local politeness particle and thank-you
+   *  in the per-turn style draw. Absent on replays, same reasoning. */
+  region?: string;
   tail: Array<{ dir: "in" | "out"; text: string; at: string }>;
   /**
    * THE THREAD DID NOT FIT, AND THE MODEL IS TOLD SO.

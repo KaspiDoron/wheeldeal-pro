@@ -188,15 +188,78 @@ export async function ensureGloballyUnique(
 
 const EMOJI_ANY = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2764}]/u;
 
+/** Does this message carry an emoji? Exported so the inbound side can be read
+ *  with the same test the outbound side is shaped by. */
+export function hasEmoji(text: string): boolean {
+  return EMOJI_ANY.test(text || "");
+}
+
+export interface EmojiTone {
+  /** The traveller's persona appetite (lib/voice). "never" means never. */
+  appetite?: "never" | "rare" | "sometimes";
+  /** Has THIS shop used an emoji with us? Mirroring is what people do. */
+  shopUsesEmoji?: boolean;
+  /** Deterministic seed - a re-park must compose the same bytes. */
+  seed?: string;
+}
+
 /**
- * Emoji tone: outbound messages carry EXACTLY one warm emoji (kindness is
- * policy; the composer prompts say "max one"). Adds one when missing; trims
- * every extra beyond the first so the message never reads as emoji spam.
+ * Seeded 0..1 from a string.
+ *
+ * `fnv1a32` + `mulberry32` from copy/hash, which is the seeded-RNG pair the
+ * whole copy layer already draws from - not a third hand-rolled hash. A first
+ * draft used a bare djb2 modulo, and driving it over 80 near-identical seeds
+ * showed the clustering that gives: two different probabilities produced the
+ * identical count, so the mirroring rule would have looked implemented and been
+ * inert. Reusing the primitive that is already well distributed is both less
+ * code and the only version that actually varies.
  */
-export function enforceEmojiTone(text: string, enabled: boolean): string {
+function seededUnit(seed: string): number {
+  return mulberry32(fnv1a32(seed))();
+}
+
+/**
+ * Emoji tone: AT MOST one warm emoji, and not on every message.
+ *
+ * IT USED TO BE EVERY MESSAGE, WHICH IS ITSELF THE PATTERN.
+ *
+ * This appended an emoji unconditionally whenever the setting was on - and the
+ * setting defaults on - so 100% of outbound carried exactly one. Three costs,
+ * all of them the opposite of what the function is for:
+ *
+ *  1. Perfect regularity is a fleet signature. `wa/persona.personaHumanize`
+ *     adds an emoji only ~45% of the time and says why in its own comment
+ *     ("not every message - that is itself a pattern"); this ran BEFORE it, so
+ *     `hasEmoji` was already true and that deliberate variation never once
+ *     fired. The careful rule was dead code behind the blunt one.
+ *  2. It contradicted the traveller's own persona. `voiceProfileFor` can draw
+ *     `emoji: "never"`, and a third of travellers do - then this appended one
+ *     anyway, to every message they ever sent.
+ *  3. `Math.random()` was the ONLY non-seeded randomness in the send chain.
+ *     Everything else is seeded on purpose so a re-park is byte-identical and
+ *     the idempotency hash is stable; this broke that contract silently.
+ *
+ * Now: never for a "never" persona; otherwise at most one, appended only when
+ * the seeded draw says so - and a shop that uses emoji with us raises the odds,
+ * because mirroring is what people actually do. Trimming extras is unchanged.
+ */
+export function enforceEmojiTone(text: string, enabled: boolean, tone?: EmojiTone): string {
   if (!enabled) return text;
+  const strip = (t: string) =>
+    t.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2764}]/gu, "").replace(/\s{2,}/g, " ").trim();
+  // A persona that never uses emoji never uses emoji, including one the model
+  // put there itself. Anything else makes the persona a decoration.
+  if (tone?.appetite === "never") return strip(text);
   if (!EMOJI_ANY.test(text)) {
-    const fresh = EMOJI_POOL[Math.floor(Math.random() * EMOJI_POOL.length)];
+    // No seed means no variation is possible, so keep the historical behaviour
+    // rather than silently going quiet on callers that have not been updated.
+    const roll = tone?.seed ? seededUnit(tone.seed) : 0;
+    const odds = tone?.shopUsesEmoji ? 0.75 : tone?.appetite === "rare" ? 0.3 : 0.5;
+    if (tone?.seed && roll >= odds) return text;
+    const idx = tone?.seed
+      ? Math.floor(seededUnit(`e:${tone.seed}`) * EMOJI_POOL.length)
+      : Math.floor(Math.random() * EMOJI_POOL.length);
+    const fresh = EMOJI_POOL[Math.min(EMOJI_POOL.length - 1, idx)];
     return `${text.replace(/\s+$/, "")} ${fresh}`;
   }
   // Keep only the FIRST emoji - models sometimes stack two or three.
