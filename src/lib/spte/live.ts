@@ -25,7 +25,9 @@ import {
   type TurnComprehension,
 } from "./comprehension";
 import { quoteOnTable } from "./policy";
+import { HISTORY_ELISION, HISTORY_HEAD_LINES } from "../wa/history-window";
 import { normalizeDigits } from "../integrity/translation";
+import { citesPrice, findNumerals } from "../integrity/money-context";
 import { cheapestCheaperRival } from "../negotiation/leverage";
 import { deriveThreadFacts } from "./thread-facts";
 import { getPolicyOverlay, DEFAULT_OVERLAY, type PolicyOverlay } from "../ops/overlay";
@@ -293,6 +295,18 @@ function buildDigest(
     // THE STANDING QUOTE. `input.usablePrice` is this message only; the stored
     // digest carries what the shop said before and never repeated.
     quotedPricePerDay: input.usablePrice ?? base.quotedPricePerDay,
+    // THE BOARD, THIS TURN OR ANY EARLIER ONE. A price list photographed on
+    // turn one is still a printed anchor on turn four; the stored seed carries
+    // it and this turn can only ADD to it.
+    sheetPricePerDay:
+      (input.extraction as { imageKind?: string } | null)?.imageKind === "price_sheet" &&
+      typeof input.usablePrice === "number" &&
+      input.usablePrice > 0
+        ? input.usablePrice
+        : base.sheetPricePerDay,
+    mediaSummary:
+      ((input.extraction as { imageSummary?: string } | null)?.imageSummary ?? "").trim() ||
+      base.mediaSummary,
     tone,
     firmCount,
     // "No deposit" settles the deposit question exactly as firmly as "3000
@@ -324,6 +338,7 @@ function buildDigest(
     // is deliberately NOT OR-ed in here: knowing HOW is not knowing HOW MUCH.
     fulfillmentCostKnown: facts.fulfillmentCostKnown,
     handoverAsks: facts.handoverAsks,
+    momentumNudges: facts.momentumNudges,
     lastOutbound: facts.lastOutbound,
     options: options.length >= 2 ? options : undefined,
     ledger,
@@ -344,6 +359,7 @@ async function buildSession(
   const thisVendor = input.ctx.vendorId ?? "";
   let rivals: SessionSnapshot["rivals"] = [];
   let lowest: SessionSnapshot["lowest"] = null;
+  let brief = "";
   if (email) {
     // SAME VEHICLE. A quote for a different machine is not a rival, and citing
     // one at a shop is an argument we made up.
@@ -389,6 +405,17 @@ async function buildSession(
       durationDays: input.rfq.durationDays,
     });
     lowest = sessionFloor(rows, compareCur);
+    // WHERE EVERY OTHER SHOP STANDS - not just the four we can cite.
+    //
+    // `validRivals` is a LEVERAGE filter: it keeps live, priced,
+    // comparable-currency quotes and drops everything else. That is right for
+    // the rival card and wrong as the agent's only knowledge of the hunt: a
+    // shop that said no, a shop still silent, and "this is the last shop left"
+    // are all facts a human negotiator holds in their head and each one changes
+    // the tactic. Built from the SAME `rows` already in hand, so it adds no
+    // read; bounded in lines and characters so it cannot crowd the prompt.
+    const { buildSessionBrief } = await import("../negotiation/session-brief");
+    brief = buildSessionBrief({ rows, excludeVendorId: thisVendor });
   }
   // Grounded market benchmark (F5): the ONLY market rate allowed into the
   // prompt - web-grounded with a source URL, and ONLY when its currency matches
@@ -450,15 +477,33 @@ async function buildSession(
     benchmark,
     lowest,
     rivals,
+    brief,
     priors,
     coaching,
   };
 }
 
-/** How many transcript lines reach the prompt. The window itself is already
- *  char-budgeted (wa/history-window); this is the second bound, so a long
- *  thread cannot crowd out the blackboard blocks above it. */
-const TAIL_LINES = 8;
+/**
+ * How many transcript lines reach the prompt.
+ *
+ * THIS BOUND WAS THROWING AWAY THE PART THE WINDOW WORKS HARDEST TO KEEP.
+ *
+ * `buildHistoryWindow` is char-budgeted at 4000 and, when a thread overflows,
+ * preserves the four OLDEST lines verbatim - the RFQ and the vehicle-naming
+ * turns, "the part a misunderstanding destroys deals over" in its own words -
+ * marks the elision, and fills the tail newest-backwards. `buildTail` then
+ * parsed that carefully-shaped window back into turns, dropped the elision
+ * marker, and took the last EIGHT lines: on any thread longer than eight
+ * messages the preserved head was discarded, and with it the dates, the vehicle
+ * and any early promise. The engine that is supposed to remember the whole
+ * conversation remembered four exchanges.
+ *
+ * The real bound is the window's character budget, which is already applied
+ * upstream. This stays only as a safety valve for a pathological thread of very
+ * short lines - and when it binds it now keeps the HEAD as well as the tail,
+ * exactly as the window intended.
+ */
+export const TAIL_LINES = 40;
 
 /**
  * THE CONVERSATION, BOTH SIDES OF IT (W4.5).
@@ -477,9 +522,16 @@ const TAIL_LINES = 8;
  * simulator, the older call sites and every existing unit test), so nothing
  * that does not pass `history` changes behaviour.
  */
-export function buildTail(input: GraphTurnInput): TurnContext["tail"] {
+export function buildThreadTail(input: GraphTurnInput): {
+  tail: TurnContext["tail"];
+  elided: boolean;
+} {
   const at = new Date(input.deadlineAt - 40_000).toISOString();
   const parsed: TurnContext["tail"] = [];
+  // The window says so itself when it had to drop the middle. Carried through
+  // as a FLAG rather than as a fake turn: it is not something anyone said, so
+  // it must not enter the repetition corpus or the counter-already-made check.
+  let elided = String(input.history ?? "").includes(HISTORY_ELISION);
   for (const line of String(input.history ?? "").split("\n")) {
     const l = line.trim();
     if (l.startsWith("Shop: ")) parsed.push({ dir: "in", text: l.slice(6).trim(), at });
@@ -487,8 +539,24 @@ export function buildTail(input: GraphTurnInput): TurnContext["tail"] {
     // The elision marker and anything else the window emitted are not turns.
   }
   const kept = parsed.filter((m) => m.text.length > 0);
-  if (kept.length) return kept.slice(-TAIL_LINES);
-  return (input.priorOutbound ?? []).slice(-3).map((text) => ({ dir: "out" as const, text, at }));
+  if (!kept.length) {
+    return {
+      tail: (input.priorOutbound ?? []).slice(-3).map((text) => ({ dir: "out" as const, text, at })),
+      elided: false,
+    };
+  }
+  if (kept.length <= TAIL_LINES) return { tail: kept, elided };
+  // KEEP BOTH ENDS, the way the window does. Taking only the newest lines is
+  // what discarded the RFQ and the vehicle on every long thread.
+  const head = kept.slice(0, HISTORY_HEAD_LINES);
+  const rest = kept.slice(-(TAIL_LINES - HISTORY_HEAD_LINES));
+  elided = true;
+  return { tail: [...head, ...rest], elided };
+}
+
+/** The turns alone - the shape every existing caller and test expects. */
+export function buildTail(input: GraphTurnInput): TurnContext["tail"] {
+  return buildThreadTail(input).tail;
 }
 
 /** Map a closed MoveKind to the outbox meta.kind used by drain/pacing AND by the
@@ -628,9 +696,23 @@ async function buildTurnContext(
   const state = await Promise.resolve()
     .then(() => io.loadState(input.event.threadKey))
     .catch(() => null);
-  const seed = digestFromStored(
-    (state?.fields as { digest?: unknown } | undefined)?.digest
-  );
+  const seed = ((): ThreadDigest => {
+    const d = digestFromStored((state?.fields as { digest?: unknown } | undefined)?.digest);
+    // THE PRINTED BOARD AND WHAT THE PHOTO SHOWED LIVE ON `fields`, NOT IN THE
+    // DIGEST BLOB - that is where both engines write them (graph/state.ts
+    // applyExtractionToState, and now persistThreadOutcome). Seeding them here
+    // is what carries "the shop posted a list at 300" from turn one into turn
+    // two, which is the difference between the printed-list clamp existing and
+    // being dead code on the engine that actually answers shops.
+    const f = (state?.fields ?? {}) as { sheetPricePerDay?: number; mediaSummary?: string };
+    if (typeof f.sheetPricePerDay === "number" && f.sheetPricePerDay > 0) {
+      d.sheetPricePerDay = f.sheetPricePerDay;
+    }
+    if (typeof f.mediaSummary === "string" && f.mediaSummary.trim()) {
+      d.mediaSummary = f.mediaSummary;
+    }
+    return d;
+  })();
 
   // COMPREHENSION BEFORE DERIVATION: the ledger's third state and the deposit
   // latch both depend on what the model could not settle, so it has to run
@@ -724,7 +806,14 @@ async function buildTurnContext(
     // Wall clock for the confirm-wait and recap-answer bounds. Live only -
     // replays leave it unset and keep pure turn arithmetic.
     nowMs: io.now(),
-    tail: buildTail(input),
+    // THE PERSONA AND THE REGION REACH THE ENGINE THAT ANSWERS SHOPS.
+    // Both were wired only to the failover; see TurnContext.userKey.
+    userKey: input.ctx.sender ?? undefined,
+    region: input.ctx.region || undefined,
+    ...(() => {
+      const t = buildThreadTail(input);
+      return { tail: t.tail, tailElided: t.elided };
+    })(),
     // The gloss the app already paid for, finally reaching the composer.
     inbound: { text, english: (input.inboundEnglish ?? "").trim() || undefined, verified },
     legalMoves: [], // computed deterministically inside runTurn (legalMovesFor)
@@ -743,6 +832,9 @@ async function buildTurnContext(
       maxRounds: policy.maxRounds,
       priceFarAboveFloor: policy.overlay.priceFarAboveFloor,
       bannedPhrases: policy.overlay.bannedPhrases,
+      // The printed-list clamp the graph engine has always had and this one
+      // never did (see TurnContext.guards.sheetAnchor).
+      sheetAnchor: policy.overlay.sheetAnchor,
     },
     event: input.event.kind === "tick" ? "tick" : "shop-message",
   };
@@ -855,6 +947,19 @@ async function persistThreadOutcome(args: {
     // the two sources so a projection can never walk them backwards.
     fields.rounds = Math.max(fields.rounds ?? 0, digest.round ?? 0);
     fields.firmCount = Math.max(fields.firmCount ?? 0, digest.firmCount ?? 0);
+    // A PRINTED BOARD IS A FIRMER ANCHOR, AND IT HAS TO SURVIVE THE TURN.
+    //
+    // `applyExtractionToState` - the FAILOVER engine - has written these two
+    // since they existed. SPTE re-derived the sheet price per turn from the
+    // current frame and persisted neither, so from turn two onward the engine
+    // that actually answers shops had no idea a board had ever been posted:
+    // the printed-list clamp and the "what the photo showed" memory were both
+    // absent from the only path a traveller is served by. Never walked
+    // backwards - a board photographed once stays photographed.
+    if (typeof verified.sheetPricePerDay === "number" && verified.sheetPricePerDay > 0) {
+      fields.sheetPricePerDay = verified.sheetPricePerDay;
+    }
+    if (digest.mediaSummary) fields.mediaSummary = digest.mediaSummary.slice(0, 500);
     // A deal the agent PRESENTED to the traveller is past negotiation - and a
     // recap the SHOP has confirmed is presented by definition (step 8): the
     // confirm turn already marked the offer presentable, so the phase and the
@@ -1313,16 +1418,33 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
     // exactly like the graph path. Deterministic re-vary never touches
     // digits, so the rails' number verification survives it. Best-effort:
     // the gates are polish, never the send.
+    // WHOSE MESSAGE THIS IS, AND WHETHER THIS SHOP USES EMOJI AT ALL.
+    //
+    // The emoji rule appended one to EVERY outbound message, which is itself
+    // the fleet pattern it was meant to soften - and it overrode a persona that
+    // may have drawn "never". It now takes the traveller's own appetite, a read
+    // of whether THIS shop has used an emoji with us (people mirror), and a
+    // deterministic seed so a re-park composes the same bytes.
+    const emojiTone = await (async () => {
+      const { hasEmoji } = await import("../graph/uniqueness");
+      const { voiceProfileFor } = await import("../voice");
+      const shopUsesEmoji = (input.priorInbound ?? []).some((m) => hasEmoji(m));
+      return {
+        appetite: input.ctx.sender ? voiceProfileFor(input.ctx.sender).emoji : undefined,
+        shopUsesEmoji,
+        seed: `${input.event.threadKey}|${tc.thread.digest.round ?? 0}|${outcome.move}`,
+      };
+    })();
     try {
       const spec = await getGraphSpec();
       if (!local.gloss) {
         const recent = await io.recentOutboundGlobal(6, 200).catch(() => []);
         const { ensureGloballyUnique, enforceEmojiTone } = await import("../graph/uniqueness");
         const fresh = await ensureGloballyUnique(send, recent);
-        send = enforceEmojiTone(fresh.text, spec.settings.emojiTone);
+        send = enforceEmojiTone(fresh.text, spec.settings.emojiTone, emojiTone);
       } else {
         const { enforceEmojiTone } = await import("../graph/uniqueness");
-        send = enforceEmojiTone(send, spec.settings.emojiTone);
+        send = enforceEmojiTone(send, spec.settings.emojiTone, emojiTone);
       }
     } catch {
       /* gates are polish - the decided message still goes out */
@@ -1376,6 +1498,27 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
   if (reachedWire && outcome.move === "confirm") {
     const w = outcome.digest.pending?.find((p) => p.state === "waiting");
     if (w && w.at == null) w.at = io.now();
+  }
+  // ---- THE CONCESSION LADDER'S MEMORY ---------------------------------------
+  //
+  // What we actually ASKED this shop for, read off the wire. The live engine's
+  // ask was a flat 15% off whatever the shop had just said, recomputed from
+  // scratch every turn, so a firm shop got the identical number three rounds
+  // running. `computeRoundTarget` fixes that but needs `lastTarget`, and the
+  // engine that answers shops was persisting nothing of the sort.
+  //
+  // Measured, not asserted, for the same reason `citedRival` is: the model may
+  // have ignored the target we handed it. The lowest MONEY numeral strictly
+  // below the standing quote is our ask - any rival we cite sits above it by
+  // construction, because the ladder beats a rival rather than matching it.
+  if (reachedWire && send && outcome.move === "bargain") {
+    const standing = quoteOnTable(tc);
+    if (typeof standing === "number" && standing > 0) {
+      const asks = findNumerals(normalizeDigits(send))
+        .filter((n) => n.money && n.value > 0 && n.value < standing)
+        .map((n) => n.value);
+      if (asks.length) outcome.digest.lastAskPerDay = Math.min(...asks);
+    }
   }
 
   // ---- judge enqueue (never inline - a cheap later invocation grades it) -----
@@ -1844,10 +1987,15 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
           // ASCII \d therefore reported citedRival:false on every Ultra
           // local-language send: the owner's leverage KPI read zero exactly
           // where the leverage was working.
-          return (normalizeDigits(send).match(/\d[\d,.]*/g) ?? []).some((n) => {
-            const v = Number(n.replace(/[,.](?=\d{3}\b)/g, "").replace(/,/g, "."));
-            return Number.isFinite(v) && Math.abs(v - target) <= 1;
-          });
+          //
+          // ...AND THE NUMERAL HAS TO BE MONEY. A bare numeral scan counted
+          // dates, durations and engine sizes: a send reading "for the 17 Aug"
+          // recorded citedRival:true against a rival at 17/day, so the KPI that
+          // answers "do the agents actually use other shops' prices" was
+          // inflated by coincidence. Same tolerance, narrower question - and
+          // the same helper the cite-the-rival rail now uses, so the rail and
+          // the instrument can never disagree about what counts as a citation.
+          return citesPrice(normalizeDigits(send), [target]);
         })(),
         // The shop's menu + what it sent, so the option and vision KPIs have a
         // source that is not a guess.

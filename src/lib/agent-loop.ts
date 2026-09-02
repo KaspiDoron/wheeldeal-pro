@@ -14,6 +14,7 @@
 //     humanized content variance.
 
 import "server-only";
+import type { InboundImage } from "./media/orientation";
 import { sbInsert, sbSelect, sbSelectStrict, sbSelectDark, sbUpdate } from "./runtime-config";
 import { finishBeforeResponse } from "./after";
 import { isMediaPlaceholder as isMediaPlaceholderText } from "./wa/coalesce";
@@ -231,7 +232,8 @@ export async function processVendorReply(opts: {
   fromDigits: string;
   text: string;
   waMessageId?: string;
-  images?: { mime: string; base64: string }[];
+  /** Carries EXIF orientation through to the vision call. */
+  images?: InboundImage[];
   // Voice notes: the raw audio (transcribed here) and/or a pre-computed
   // transcript. The webhook downloads the audio; the engine's transcribe node
   // and the media-coherence validator handle the rest.
@@ -310,7 +312,17 @@ export async function processVendorReply(opts: {
     const isPhoneJid = /@s\.whatsapp\.net$|@c\.us$/.test(opts.remoteJid);
     // Phone JIDs must match by digits; a privacy @lid JID cannot be verified
     // against a phone number, so we fail closed (do not attribute).
-    if (!isPhoneJid || originDigits !== from) return;
+    if (!isPhoneJid || originDigits !== from) {
+      // This used to be a BARE return - the one refusal in the whole inbound
+      // path that left no breadcrumb at all, so a shop reply that died here was
+      // invisible to the WA doctor, to the drop counters and to every
+      // diagnostic built to find exactly this.
+      void noteInboundDropped(opts.senderEmail, from, "origin-mismatch", {
+        jid: opts.remoteJid.slice(0, 48),
+        origin: originDigits,
+      });
+      return;
+    }
   }
   const senderFilter = opts.senderEmail
     ? `&raw->>sender=eq.${encodeURIComponent(opts.senderEmail)}`
@@ -344,6 +356,18 @@ export async function processVendorReply(opts: {
     });
   }
   if (!resolved.rfq || !ctx) {
+    // OUR OUTAGE IS NOT "WE NEVER MESSAGED THEM". When the anchor read could
+    // not be answered, declaring `no-rfq-thread` abandons a live negotiation
+    // over a transient blip - and does it silently, because that reason reads
+    // as a deliberate outcome. Report it as the retryable outage it is, so the
+    // recovery sweep picks the reply up on its next pass instead of the thread
+    // going quiet for good.
+    if (resolved.unavailable) {
+      void noteInboundDropped(opts.senderEmail, from, "thread-unreadable", {
+        anchors: resolved.anchors,
+      });
+      return;
+    }
     // Still no anchor: we genuinely never sent this number an RFQ. Trace it so
     // the WA doctor can explain "why no agent reply" instead of going silent.
     void noteInboundDropped(opts.senderEmail, from, "no-rfq-thread", {
@@ -660,8 +684,28 @@ export async function processVendorReply(opts: {
   // to no vehicle (matchesSpec=false -> the offer is dropped, UI stuck on "No
   // price yet"). Instead, extract from the WHOLE unread inbound buffer since our
   // last outbound, chronologically, so one read sees the vehicle AND its price.
-  const { coalesceUnreadInbound } = await import("./wa/coalesce");
+  const { coalesceUnreadInbound, onlyForwardedContent } = await import("./wa/coalesce");
   const extractText = coalesceUnreadInbound(thread, priorAt ?? "", text) || text;
+  // WHOSE PRICE IS THIS? (`contextInfo.isForwarded`, previously unread anywhere
+  // in the codebase.) A shop that FORWARDS a competitor's price board - or a
+  // supplier's rate card - has not quoted us, and the number on that board was
+  // being extracted as the shop's own posted price, banked as an `offers` row,
+  // and cited at a third shop as this shop's quote. Conservative by design: see
+  // `onlyForwardedContent`. The reply still happens - the shop is talking to us
+  // - it is only the ATTRIBUTION of the number that is withheld.
+  const forwardedOnly = onlyForwardedContent(
+    thread.map((m) => {
+      const raw = (m.raw ?? null) as { forwarded?: unknown; media?: unknown } | null;
+      return {
+        direction: m.direction,
+        body: m.body,
+        received_at: m.received_at,
+        forwarded: Boolean(raw?.forwarded),
+        hasMedia: Boolean(raw?.media),
+      };
+    }),
+    priorAt ?? ""
+  );
   // PENDING REPLIES COUNT TOO. A reply parked in wa_outbox with a human
   // "thinking" delay is NOT yet in whatsapp_messages. Without counting it, a
   // SECOND shop message arriving inside that 45-240s window reads the counters
@@ -1576,6 +1620,52 @@ export async function processVendorReply(opts: {
     ]);
     if (!okBasic) await sbInsert("vendor_replies", [replyBase]);
   }
+  // THE SEARCH THIS THREAD BELONGS TO - resolved ONCE, lazily.
+  //
+  // THE THREAD'S OWN SEARCH, NOT THE NEWEST ONE. This read `searches`
+  // newest-first at REPLY time, so a shop answering an hour after the traveller
+  // started a second hunt filed its offer under the NEW search - and cross-shop
+  // leverage is scoped by search_id. A Krabi scooter price could therefore be
+  // cited at a Canggu shop, wearing the new hunt's id. An earlier round of this
+  // same thread already carries the right id; ask it first and fall back to
+  // newest-first only for threads written before the stamp existed. Round one
+  // still falls back to newest-first, which is correct unless the very first
+  // reply arrives after a new hunt began - the residual case, and the one a
+  // search stamp on the thread itself would close.
+  //
+  // Lazy + memoised because TWO sites need it and they are mutually exclusive
+  // per turn: the offers insert (priced turns) and the rival eviction (declines,
+  // which by definition carry no price). Hoisting it eagerly would put two
+  // Postgres reads on EVERY reply turn, including the ones that just say
+  // "we open at 9" - a real cost on the latency-sensitive reply path.
+  let _searchId: number | null | undefined;
+  const resolveSearchId = async (): Promise<number | null> => {
+    if (_searchId !== undefined) return _searchId;
+    let found: number | null = null;
+    if (ctx.sender) {
+      if (ctx.vendorId) {
+        const prior = await sbSelect<{ search_id: number | null }>(
+          "offers",
+          `select=search_id&user_email=eq.${encodeURIComponent(
+            ctx.sender
+          )}&vendor_id=eq.${encodeURIComponent(
+            ctx.vendorId
+          )}&search_id=not.is.null&order=created_at.asc&limit=1`
+        ).catch(() => []);
+        found = prior[0]?.search_id ?? null;
+      }
+      if (found == null) {
+        const s = await sbSelect<{ id: number }>(
+          "searches",
+          `select=id&user_email=eq.${encodeURIComponent(ctx.sender)}&order=created_at.desc&limit=1`
+        ).catch(() => []);
+        found = s[0]?.id ?? null;
+      }
+    }
+    _searchId = found;
+    return found;
+  };
+
   // ---- FUNNEL LEDGER: what this reply proved (src/lib/funnel/stages.ts) ------
   //
   // `replied` was stamped at ingest when the frame was stored; HERE is where the
@@ -1620,6 +1710,32 @@ export async function processVendorReply(opts: {
     } else if (extraction.shopUnavailable === true) {
       await advanceThreadStage(stageArgs, "out_of_stock", "shop said the vehicle is not available");
     }
+    // A SHOP THAT SAID NO STOPS BEING A RIVAL, EVEN WHEN IT SAYS NO WITHOUT A
+    // PRICE - which is the normal shape of a decline. The eviction further down
+    // lives inside `if (usablePrice && matchesSpec !== false)`, so a bare "sorry,
+    // we have nothing" never reached it: the shop's EARLIER quote stayed in the
+    // hot ZSET for the rest of the 18h TTL and kept being cited at other shops.
+    if (
+      ctx.sender &&
+      ctx.vendorId &&
+      (extraction.shopDeclined === true || extraction.shopUnavailable === true)
+    ) {
+      const sid = await resolveSearchId();
+      if (sid != null) {
+        const [{ vehicleKeyFor }, { dropSessionOfferAnyCurrency }] = await Promise.all([
+          import("./market"),
+          import("./rival-cache"),
+        ]);
+        await dropSessionOfferAnyCurrency({
+          searchId: sid,
+          vendorId: ctx.vendorId,
+          vehicleKey: vehicleKeyFor(rfq),
+          // The space this shop's earlier quote is most likely in, for sessions
+          // written before the currency hash existed.
+          fallbackCurrency: cur,
+        }).catch(() => {});
+      }
+    }
   }
   // Verified shop tags (item #13): record what this reply explicitly stated.
   // A tag only ever SHOWS after >= 2 distinct replies confirm it.
@@ -1639,7 +1755,31 @@ export async function processVendorReply(opts: {
   // cheapest/lockable price misleads the user, and filing it under the requested
   // vehicle_key would poison the market rate. It stays in vendor_replies (so the
   // reply is still visible and the agent can clarify), but never an offers row.
-  if (usablePrice && extraction.matchesSpec !== false) {
+  //
+  // ...AND IT HAS TO BE THIS SHOP'S PRICE. A number that reached us only on
+  // forwarded content is somebody else's quote: banking it as an offer files a
+  // competitor's board under this vendor, shows it on the best-price card as
+  // theirs, poisons the market rate, and makes it citable at a third shop. The
+  // reply still goes out and the reply row still records what we read, so the
+  // agent can simply ask whose price it is - what is withheld is the claim that
+  // this shop quoted it.
+  if (usablePrice && extraction.matchesSpec !== false && forwardedOnly) {
+    void sbInsert("agent_events", [
+      {
+        kind: "forwarded-price-unattributed",
+        user_email: ctx.sender ?? null,
+        to_number: from,
+        vendor_id: ctx.vendorId ?? "",
+        vendor_name: ctx.vendorName ?? "",
+        detail: JSON.stringify({
+          price: usablePrice,
+          currency: cur,
+          note: "every frame carrying a number in this burst was FORWARDED - not filed as this shop's offer",
+        }).slice(0, 400),
+      },
+    ]).catch(() => {});
+  }
+  if (usablePrice && extraction.matchesSpec !== false && !forwardedOnly) {
     // Tag the offer with area + vehicle bucket + a delivery signal, so the
     // owner's shop-intelligence warehouse can aggregate real market data.
     const { vehicleKeyFor, regionKeysFor } = await import("./market");
@@ -1675,48 +1815,7 @@ export async function processVendorReply(opts: {
       delivers,
     };
     // Session attribution for exact rival grouping (analytics + deals).
-    // THE THREAD'S OWN SEARCH, NOT THE NEWEST ONE.
-    //
-    // This read `searches` newest-first at REPLY time, so a shop answering an
-    // hour after the traveller started a second hunt filed its offer under the
-    // NEW search - and cross-shop leverage is scoped by search_id. A Krabi
-    // scooter price could therefore be cited at a Canggu shop, wearing the new
-    // hunt's id. The thread knows which search it belongs to; ask it first and
-    // fall back to newest-first only for threads written before the stamp
-    // existed.
-    let searchId: number | null = null;
-    if (ctx.sender) {
-      // THE SEARCH THIS THREAD BELONGS TO, when the thread can tell us.
-      //
-      // This read `searches` newest-first at REPLY time, so a shop answering
-      // after the traveller had started a SECOND hunt filed its offer under the
-      // new search - and cross-shop leverage is scoped by search_id, so a Krabi
-      // price could then be cited at a Canggu shop wearing the new hunt's id.
-      // An earlier round of this same thread already carries the right id;
-      // reuse it rather than re-deriving one from the clock.
-      //
-      // Round one still falls back to newest-first, which is correct unless the
-      // very first reply arrives after a new hunt began - the residual case,
-      // and the one a search stamp on the thread itself would close.
-      if (ctx.vendorId) {
-        const prior = await sbSelect<{ search_id: number | null }>(
-          "offers",
-          `select=search_id&user_email=eq.${encodeURIComponent(
-            ctx.sender
-          )}&vendor_id=eq.${encodeURIComponent(
-            ctx.vendorId
-          )}&search_id=not.is.null&order=created_at.asc&limit=1`
-        ).catch(() => []);
-        searchId = prior[0]?.search_id ?? null;
-      }
-      if (searchId == null) {
-        const s = await sbSelect<{ id: number }>(
-          "searches",
-          `select=id&user_email=eq.${encodeURIComponent(ctx.sender)}&order=created_at.desc&limit=1`
-        ).catch(() => []);
-        searchId = s[0]?.id ?? null;
-      }
-    }
+    const searchId = await resolveSearchId();
     // THE GUARD THAT WAS DECLARED, READ, AND NEVER WRITTEN (owner report 5 #2).
     //
     // `offers.effective_daily_rate` is in the schema and `pickCheapestRival`
@@ -1797,7 +1896,14 @@ export async function processVendorReply(opts: {
         currency: cur,
       }).catch(() => {});
     }
-    if (searchId != null) {
+    // ...AND DO NOT PUT IT STRAIGHT BACK. This write was unconditional, so the
+    // eviction above was a `zrem` immediately followed by a `zadd` of the same
+    // member with the same score. Net effect: nothing was ever evicted, and the
+    // comment above described an intent the code did not carry out. A shop that
+    // has just said no is not leverage, so it does not get re-published.
+    const shopSaidNo =
+      extraction.shopDeclined === true || extraction.shopUnavailable === true;
+    if (searchId != null && !shopSaidNo) {
       const { recordSessionOffer } = await import("./rival-cache");
       await recordSessionOffer({
         searchId,
@@ -2104,6 +2210,31 @@ export async function processVendorReply(opts: {
       !usablePrice && extraction.found === false && !readingIsFailure(draft)
         ? { ...draft, notUsedReason: "No usable price in this image." }
         : draft;
+    // ARM THE DEFERRED RE-READ. A failure that is about the MINUTE - every rung
+    // exhausted, a cut-off answer, an unparseable one - is not a statement about
+    // the photo, and the per-minute budgets reset. The reply has already gone
+    // out, so a later retry costs the traveller nothing and can turn an
+    // unreadable price board into a real price. The retry needs the RFQ and the
+    // message text this read used, and stamping them HERE is what makes the
+    // sweep self-contained: no thread context to re-resolve, no queue table.
+    {
+      const { REREADABLE } = await import("./media/reread");
+      if (REREADABLE.has(mediaReading.outcome) && !mediaReading.fromBurstLeader) {
+        mediaReading = {
+          ...mediaReading,
+          reread: {
+            ...(mediaReading.reread ?? {}),
+            attempts: mediaReading.reread?.attempts ?? 0,
+            // Not an attempt - the ARMING. The sweep's cooldown measures from
+            // here, so the first retry lands after the budgets have reset
+            // rather than in the same exhausted minute.
+            lastAt: mediaReading.reread?.lastAt ?? new Date().toISOString(),
+            rfq,
+            text: (extractText ?? text ?? "").slice(0, 1200),
+          },
+        };
+      }
+    }
     // AWAITED: `void` here meant the stamp rode a detached promise, and on
     // Cloud Run a detached promise dies the instant the response flushes
     // (after.ts documents exactly this) - the other half of every
@@ -2270,9 +2401,27 @@ export async function processVendorReply(opts: {
     // English rendering when we have one, on the shop's own words when we do
     // not. This changes nothing about what language we SEND in.
     inboundEnglish,
+    // THE GLOSS ON THIS SIDE TOO - the units bug that made the repetition
+    // guard inert on every localized thread.
+    //
+    // `priorInbound` below already does this, and says why. The outbound half
+    // did not, and the asymmetry is load-bearing: `pass.ts` checks the model's
+    // draft against these strings with `isRepetitive`, and the draft is
+    // ENGLISH - localization happens later, in live.ts, after the pass has
+    // returned. So on a Thai thread the guard compared an English draft
+    // against Thai wire text and found nothing in common, whatever the two
+    // messages actually said. `similarity` strips every non-ASCII codepoint
+    // (`[^a-z0-9\s]`, no `u` flag), so the two sides could not have been
+    // compared even in principle.
+    //
+    // The gloss is stamped on the row as `raw.englishGloss` by the same send
+    // that localized it (spte/live.ts), so this is the SAME message in the
+    // SAME language the guard is written in. `lastOutbound` flows from here
+    // into the digest, so the anti-repetition list the prompt shows the model
+    // becomes readable at the same time.
     priorOutbound: thread
       .filter((m) => m.direction === "outbound")
-      .map((m) => m.body ?? "")
+      .map((m) => (m.raw as { englishGloss?: string } | null)?.englishGloss ?? m.body ?? "")
       .filter(Boolean),
     // THE SAME BUG AS THE CONFIRM LOOP, ON THE SAME TURN.
     //

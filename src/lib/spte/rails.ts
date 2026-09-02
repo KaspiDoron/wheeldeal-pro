@@ -13,6 +13,7 @@ import { inventsADate } from "../negotiation/traveller-disclosure";
 import type { RailResult, TurnArtifact, TurnContext } from "./types";
 import { quoteOnTable } from "./policy";
 import { normalizeDigits } from "../integrity/translation";
+import { citesPrice } from "../integrity/money-context";
 
 // A drafted message must never AGREE a concrete pickup/delivery time - the
 // traveller confirms that directly (Step 5 hard rule). These patterns catch an
@@ -41,8 +42,20 @@ const TIME_DEFER_LINE = " I'll confirm the exact time with you directly.";
 // bare pattern rejected it - so the rail was quietly replacing good counters
 // with a template. Bare "I agree." still commits; "I agree that/with ..." is
 // conversation.
+//
+// "LOCK IT IN" WAS THE ONE THAT GOT THROUGH, AND IT CAME FROM OUR OWN TEMPLATE.
+//
+// `verify-recap` shipped "just to confirm before we lock it in", and this
+// pattern did not match it: `lock` appears in no alternative, and the `confirm`
+// branch requires a PRONOUN SUBJECT immediately before the verb
+// (`i (?:accept|agree|confirm)`), while the template has an infinitive inside an
+// adverbial phrase. So the one sentence in the whole engine that most sounds
+// like a booking passed the rail built to stop exactly that - deterministically,
+// to every shop that reached a full recap, and a shop may hold a vehicle on it.
+// The template no longer says it; the pattern catches the phrase anyway,
+// because the model can reach for it on its own.
 const COMMIT_RX =
-  /\b(?:i'?ll|i will|we'?ll|we will)\s+(?:take|book|reserve|have)\s+(?:it|that|the\s+\w+)\b|\b(?:it'?s a deal|we have a deal|deal!)|\bbook (?:it|that|me)\b|\b(?:please )?(?:reserve|hold|keep) (?:it|that|one) for (?:me|us)\b|\bput (?:my|our) name\b|\bi (?:accept|agree|confirm)\b(?!\s+(?:that|with))|\bwe (?:accept|agree|confirm)\b(?!\s+(?:that|with))|\blet'?s do it\b|\bi'?m (?:coming|on my way)\b|\bi'?ll come (?:pick|and pick|get)\b|\b(?:i'?ll|we'?ll|i will|we will)\s+(?:go|come)\s+(?:with|for)\s+(?:it|that|the\s+\w+)\b|\bcount me in\b|\bsign me up\b|\b(?:i'?m|we'?re|i am|we are)\s+in\b|\bwe'?ll take (?:it|that)\b|\b(?:that|this)\s+works?\s+for\s+(?:me|us)\s*[-,]?\s*(?:book|reserve|hold)\b|\b(?:confirmed|confirming)\s+(?:the\s+)?(?:booking|reservation|rental)\b|\bi'?ll pay\b|\bwe'?ll pay\b|\b(?:see you|meet you)\s+(?:tomorrow|today|then|at)\b/i;
+  /\b(?:i'?ll|i will|we'?ll|we will)\s+(?:take|book|reserve|have)\s+(?:it|that|the\s+\w+)\b|\b(?:it'?s a deal|we have a deal|deal!)|\bbook (?:it|that|me)\b|\b(?:please )?(?:reserve|hold|keep) (?:it|that|one) for (?:me|us)\b|\bput (?:my|our) name\b|\bi (?:accept|agree|confirm)\b(?!\s+(?:that|with))|\bwe (?:accept|agree|confirm)\b(?!\s+(?:that|with))|\blet'?s do it\b|\bi'?m (?:coming|on my way)\b|\bi'?ll come (?:pick|and pick|get)\b|\b(?:i'?ll|we'?ll|i will|we will)\s+(?:go|come)\s+(?:with|for)\s+(?:it|that|the\s+\w+)\b|\bcount me in\b|\bsign me up\b|\b(?:i'?m|we'?re|i am|we are)\s+in\b|\bwe'?ll take (?:it|that)\b|\b(?:that|this)\s+works?\s+for\s+(?:me|us)\s*[-,]?\s*(?:book|reserve|hold)\b|\b(?:confirmed|confirming)\s+(?:the\s+)?(?:booking|reservation|rental)\b|\bi'?ll pay\b|\bwe'?ll pay\b|\b(?:see you|meet you)\s+(?:tomorrow|today|then|at)\b|\block(?:ing)? (?:it|that|this|them) in\b|\block it down\b|\bfinali[sz](?:e|ing) (?:it|that|the (?:booking|rental|deal))\b/i;
 
 // The ONE move that is allowed to commit, because it exists only after the
 // traveller tapped Lock This Deal (graph/types.ts: "the traveller locked the
@@ -498,12 +511,17 @@ export function runPostRails(ctx: TurnContext, artifact: TurnArtifact): RailResu
       // all), and a rail that cannot read the digits in front of it would
       // reject a draft that cites the rival perfectly well in local script -
       // rejecting correct output is a downgrade, not a guarantee.
-      const nums = (normalizeDigits(text).match(/\d[\d,.]*/g) ?? []).map((n) =>
-        Number(n.replace(/[,.](?=\d{3}\b)/g, "").replace(/,/g, "."))
-      );
-      const cited = nums.some(
-        (n) => Number.isFinite(n) && quotable.some((q) => Math.abs(n - Math.round(q)) <= 1)
-      );
+      //
+      // ...BUT THE NUMERAL HAS TO BE MONEY. This counted ANY numeral within 1
+      // unit of a real rival, so a bargain that never named the rival could
+      // satisfy the rail built to require it: "can you do it for the 17 Aug?"
+      // passed against a rival at 17/day, "we need it for 5 days" against a
+      // rival at 5, "the 125cc one" against 125. A coincidence detector is not
+      // a guarantee. `citesPrice` applies the same tolerance to numerals that
+      // read as prices in the sentence they appear in, and deliberately does
+      // NOT require a currency token - that would reject the owner's own
+      // sentence, "another shop offered 200, can you do 180?".
+      const cited = citesPrice(normalizeDigits(text), quotable);
       if (!cited) {
         return {
           ok: false,

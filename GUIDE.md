@@ -91,17 +91,92 @@ addresses, and real Google reviews.
 Done - searches now return real rental businesses near the hotel, with photos,
 open-now status, phone-based WhatsApp links and live Google reviews.
 
+**The map TILES are separate, and need nothing.** The Google Maps key above is
+used server-side for Places, Geocoding and photos; it never reaches the browser
+and it does not draw the map. The basemap under the pins is keyless
+OpenStreetMap, so there is nothing to sign up for and nothing that can expire.
+
+If you want nicer cartography (the Google-Maps-like Voyager style the app used
+to ship), get a free CARTO basemaps key at **carto.com/basemaps/apikey** -
+instant, no approval queue - restrict it to your domain in CARTO's dashboard,
+and paste it into **Admin -> Keys -> `MAP_TILES_KEY`**. It applies on the next
+page load with no redeploy. Any other provider fits through `MAP_TILE_URL` /
+`MAP_TILE_URL_DARK` / `MAP_TILE_ATTRIBUTION` without a code change.
+
+These four are deliberately NOT masked in the Keys panel. A map key rides in a
+request the browser makes, so anyone can read it in devtools; the protection is
+the domain restriction you set at the provider, not secrecy. Masking it would
+imply a confidentiality the design cannot deliver.
+
+Two things to avoid: the free tiers at Stadia Maps, MapTiler, Jawg and
+Thunderforest all restrict use to non-commercial projects, and WheelDeal sells
+subscriptions. And the keyless OpenStreetMap default is best-effort with no
+SLA - if map traffic grows a lot, add the CARTO key or budget for a paid tile
+plan.
+
 ## 3b. Turn on "Continue with Google" sign-in
 
-1. In the same Google Cloud project: **APIs & Services -> OAuth consent
-   screen** -> External -> fill the 3 required fields -> Save.
-2. **Credentials -> Create credentials -> OAuth client ID -> Web application**.
-3. Under **Authorized JavaScript origins** add your live URL
-   (e.g. `https://rental-app-xxxx.run.app`).
-4. Copy the **Client ID** (ends with `.apps.googleusercontent.com`).
-5. In your app: **Admin -> Keys -> Google OAuth Client ID** -> paste -> Apply.
+If the login page says **"Google sign-in is not configured on this server yet -
+use email below"**, exactly ONE thing is missing: the client ID. (The app picks
+that wording only when the ID is blank; a missing `SESSION_SECRET` says
+something else.)
 
-The "Continue with Google" button now appears on the sign-in page.
+**There is only one key, and no client secret.** WheelDeal uses the Google
+Identity Services ID-token flow, not the redirect flow: the browser gets an ID
+token and the server verifies it against Google's tokeninfo endpoint. So there
+is no client secret to store, no callback route, and **the "Authorized redirect
+URIs" box stays EMPTY**. Anything you put there is ignored.
+
+1. In the same Google Cloud project: **APIs & Services -> OAuth consent
+   screen** -> **External** -> fill app name, user support email and developer
+   contact -> Save. Add your Privacy Policy and Terms URLs (the app serves
+   both) so you can publish.
+2. **Publishing status is the trap.** External + **Testing** means only emails
+   you list under **Test users** can sign in (100 max), and their sessions
+   expire after 7 days. Either add every tester there, or click **PUBLISH APP**.
+   Publishing is safe here: the app requests only `openid`, `email` and
+   `profile`, which are non-sensitive, so **no Google verification review is
+   required**.
+3. **Credentials -> Create credentials -> OAuth client ID -> Web application**.
+4. Under **Authorized JavaScript origins** add EVERY origin the login page is
+   served from - scheme included, no trailing slash, no path:
+   - your live domain (e.g. `https://wheeldeal.pro`)
+   - your `APP_DOMAIN` value, if different
+   - the raw Cloud Run URL, if you ever sign in on it
+   - `http://localhost:3000` for local development
+5. Leave **Authorized redirect URIs** empty (see above).
+6. Copy the **Client ID** (ends with `.apps.googleusercontent.com`). **Ignore
+   the client secret** - this app never uses it.
+7. In your app: **Admin -> Keys -> Google OAuth Client ID** -> paste -> Apply.
+   It is stored encrypted in the Key Vault and takes effect with **no
+   redeploy**. Do not also set an env var: a stale build-time
+   `NEXT_PUBLIC_GOOGLE_CLIENT_ID` is how the two halves end up disagreeing.
+8. Press **Test** on that row. It format-checks only - the real check happens on
+   a live sign-in, and the button says so.
+
+**Wait about a minute** before looking. Two 30-second caches have to expire (the
+Key Vault, and the auth-methods response). Then open `/login` in a fresh private
+tab: the "not configured" line should be gone and an **OR** divider should
+appear above the Google pill. The divider is derived from the button, so seeing
+it means the client ID resolved.
+
+Two failures and what each one means:
+
+- **The button paints but nothing happens, then "Google sign-in is not enabled
+  for this domain yet"** - the page's origin is missing from **Authorized
+  JavaScript origins** (step 4). This is the classic new-domain miss; the app
+  detects it and says so rather than sitting there silently.
+- **"Google credential audience mismatch"** - the client ID the button rendered
+  with is not the one the server holds. Usually two different OAuth clients, or
+  a stale `NEXT_PUBLIC_GOOGLE_CLIENT_ID` baked into the build. Make them
+  identical.
+
+**During the private beta, Google is a credential and not an invitation.** The
+allowlist gate runs BEFORE any account is created, so a tester signing in with
+Google whose email is not on the list gets a 403 and *"WheelDeal is in a
+private, invite-only beta..."*, and no user row is created. Add them in
+**Admin -> "Private beta - invite list"** first - see
+[the tester runbook](./RUNBOOK.md#adding-a-beta-tester).
 
 ---
 
@@ -341,8 +416,12 @@ fails the user over to a healthy host - with NO re-scanning, NO re-linking.
 - Each user "sticks" to one host (saved in `wa_sessions.host_url`) so their
   session stays warm; if that host is down, they migrate to the least-loaded
   healthy host automatically.
-- A per-host cap (Admin -> Keys -> `EVOLUTION_MAX_PER_HOST`, default 40) stops
-  any one free server from being overloaded - new users land on emptier hosts.
+- A per-host cap (Admin -> Keys -> `EVOLUTION_MAX_PER_HOST`, default **25**)
+  stops any one server from being overloaded. At the cap the app **REFUSES** a
+  new link with an honest "at capacity" message rather than placing the
+  traveller on a full box - with several hosts configured, new users land on
+  emptier ones first. The refusal is on the LINK path only: sends, media and
+  connection reads to an already-placed user are never affected by capacity.
 - Owner page -> Keys -> "WhatsApp host pool" shows a live green/red dot and the
   user count for every host. Tap "Test API" on `EVOLUTION_HOSTS` to ping them all.
 
@@ -502,8 +581,10 @@ resources if you exceed a limit), and leave the boot volume at the ~47 GB defaul
 2. Run once in Supabase SQL editor:
    `alter table public.wa_sessions add column if not exists host_url text;`
 
-3. (Optional) `EVOLUTION_MAX_PER_HOST` - users per host before spilling to the
-   next (default 40).
+3. (Optional) `EVOLUTION_MAX_PER_HOST` - paired users per host (default
+   **25**). With more than one host, new users spill to the emptiest; with one
+   host, the next link is REFUSED rather than overfilling the box. Do not raise
+   it above 25 on a 512MB Render `starter` - see SCALING.md.
 
 4. The **WhatsApp host pool** panel (same Keys screen) shows every VM live:
    green/red dot, user count, and the reason if one is ever down. Add/remove hosts

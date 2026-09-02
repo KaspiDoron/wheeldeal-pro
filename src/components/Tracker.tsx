@@ -1,6 +1,7 @@
 "use client";
 
 import type { TrackerStage } from "@/lib/types";
+import { TRACKER_ORDER } from "@/lib/client/stage-order";
 import { useI18n } from "@/lib/i18n";
 
 const FLOW: { key: TrackerStage; label: string }[] = [
@@ -12,17 +13,10 @@ const FLOW: { key: TrackerStage; label: string }[] = [
   { key: "offer-received", label: "Offer" },
 ];
 
-const ORDER: TrackerStage[] = [
-  "queued",
-  "locating-contact",
-  "found",
-  "rfq-sent",
-  "awaiting-response",
-  "replied",
-  "negotiating",
-  "offer-received",
-  "counter-offer",
-];
+// Derived, not re-typed. The hand-written copy of this list already drifted
+// once - it carried "replied" while page.tsx's advance table did not, so the
+// Tracker could draw a rung the card could never reach.
+const ORDER: TrackerStage[] = TRACKER_ORDER;
 
 export function StageBadge({ stage }: { stage: TrackerStage }) {
   // THE BADGES NEVER ENTERED THE t() PIPELINE (owner report 3, item 10):

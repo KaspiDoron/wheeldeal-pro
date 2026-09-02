@@ -11,6 +11,8 @@
 //
 // Pure, so the arithmetic is testable without a provider in the loop.
 
+import type { OrientationInfo } from "./orientation";
+
 /** Per-frame ceiling, in BASE64 characters (~3MB of actual bytes). */
 export const MAX_FRAME_B64_CHARS = 4 * 1024 * 1024;
 /** Whole-request ceiling across frames (~13.5MB of bytes, inside Gemini's ~20MB). */
@@ -21,6 +23,13 @@ export const MAX_FRAMES_PER_CALL = 8;
 export interface BudgetedFrame {
   mime: string;
   base64: string;
+  /**
+   * What EXIF said about how these pixels are stored. Carried through the
+   * budget untouched so the vision call can TELL the model the board is
+   * sideways - measured at fetch time and, until this field existed, thrown
+   * away one line before the only call that could use it.
+   */
+  orientation?: OrientationInfo;
 }
 
 export interface FrameBudget {

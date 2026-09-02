@@ -33,16 +33,31 @@ import {
 import type { AuthMethodsState } from "./useAuthMethods";
 import { GoogleButton } from "./GoogleButton";
 
-/** The divider. Local by design - it has no export and no other call site. */
+/**
+ * The divider. Local by design - it has no export and no other call site.
+ *
+ * Re-cut so it and the Google button read as ONE composition rather than as a
+ * rule with a widget under it:
+ *  - the same max-w-[360px] column as the button, so the line stops where the
+ *    button stops (it used to run the full card width and overhang it);
+ *  - more space above than below, so proximity says the divider belongs to what
+ *    follows it;
+ *  - rules that fade toward the card edges instead of butting into them;
+ *  - font-extrabold, matching the button's label weight.
+ *
+ * Deliberately NOT uppercase and NOT letter-spaced: this string is translated,
+ * and letter-spacing breaks the joins in Arabic.
+ */
 function AuthDivider({ label }: { label: string }) {
   return (
     <div
-      className="my-3 flex items-center gap-3 text-[11px] font-bold text-faint"
+      className="mx-auto mb-2 mt-5 flex w-full max-w-[360px] items-center gap-3.5 text-[11px] font-extrabold text-faint"
       role="separator"
       aria-label={label}
     >
-      <span className="h-px flex-1 bg-line" /> {label}{" "}
-      <span className="h-px flex-1 bg-line" />
+      <span className="wd-or-rule h-px flex-1" />
+      {label}
+      <span className="wd-or-rule wd-or-rule-end h-px flex-1" />
     </div>
   );
 }

@@ -270,10 +270,30 @@ describe("retention completion", () => {
   it("every run writes the 'retention-ran' heartbeat the health tile reads", () => {
     expect(sql).toMatch(/insert into public\.agent_events \(kind, detail\)\s*\n\s*values \('retention-ran'/);
     const health = readCode("src/app/api/admin/health/route.ts");
-    expect(health).toMatch(/kind=eq\.retention-ran/);
+    // BOTH kinds. The app now self-runs the prune from the cron ping, so a
+    // missing heartbeat has two causes with two different owner actions: the
+    // SQL file was never run (the RPC 404s, leaving a 'retention-unavailable'
+    // breadcrumb) or it ran and the schedule stopped.
+    expect(health).toMatch(/kind=in\.\(retention-ran,retention-unavailable\)/);
     expect(health).toMatch(/unreadable: retentionRows === null/);
     const panel = read("src/components/HealthPanel.tsx");
     expect(panel).toMatch(/NEVER RAN - no prune heartbeat exists/);
+    expect(panel).toMatch(/NOT INSTALLED - prune_old_rows does not exist/);
+  });
+
+  it("the app runs the prune itself, so pg_cron is optional rather than required", () => {
+    // A deployment could have ZERO retention with only a red tile to say so:
+    // retention.sql's pg_cron block degrades to a NOTICE nobody reads when the
+    // extension is absent, and a paused free-tier project runs no cron at all.
+    // prune_old_rows is granted to service_role - the key this process holds.
+    const ping = readCode("src/app/api/wa/ping/route.ts");
+    expect(ping).toMatch(/maybeRunRetention/);
+    const ret = readCode("src/lib/retention.ts");
+    expect(ret).toMatch(/sbRpc\("prune_old_rows"/);
+    // The gate is the heartbeat itself - deliberately NOT a wa_send_claims row,
+    // which gcSendClaims deletes at 2h, letting the prune fire ~12x a day.
+    expect(ret).toMatch(/kind=in\.\(\$\{GATE_KINDS\}\)/);
+    expect(ret).not.toMatch(/sbInsertClaim/);
   });
 
   it("response_times stores md5 keys and the reader hashes its probe", () => {

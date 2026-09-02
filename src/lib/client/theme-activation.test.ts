@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { OSM_TILES, TILE_CLASS, resolveMapTiles, tilesForTheme } from "../map-tiles";
 import { readFileSync } from "fs";
 import { join } from "path";
 
@@ -115,16 +116,69 @@ describe("every control changes the theme through the one lib", () => {
 });
 
 describe("the map follows the theme", () => {
-  it("dark cartography is keyed on the live theme", () => {
-    const map = read("src/components/MapView.tsx");
-    expect(map).toMatch(/useAppTheme\(\)/);
-    expect(map).toMatch(/key=\{theme\}/);
-    expect(map).toMatch(/basemaps\.cartocdn\.com\/dark_all/);
+  it("both map surfaces read the live theme and re-key on a provider swap", () => {
+    for (const p of ["src/components/MapView.tsx", "src/components/OriginPinPicker.tsx"]) {
+      const map = read(p);
+      expect(map, p).toMatch(/useAppTheme\(\)/);
+      // Keyed on theme AND url: a keyless single-source basemap changes only
+      // its className between themes, and a provider swap arriving from
+      // /api/config/public must recreate the layer either way.
+      expect(map, p).toMatch(/key=\{`\$\{theme\}\|\$\{tileUrl\}`\}/);
+    }
   });
 
-  it("the canvas behind the tiles and the attribution follow too", () => {
+  it("dark tiles are produced for whichever provider is configured", () => {
+    // EXECUTED, not grepped. The previous version pinned the literal CARTO
+    // dark_all URL - which stopped being the default the day CARTO began
+    // requiring a key and watermarking keyless tiles.
+    const dark = tilesForTheme(OSM_TILES, "dark");
+    const light = tilesForTheme(OSM_TILES, "light");
+    // One source, two treatments: the filter class is the dark cartography.
+    expect(dark.url).toBe(light.url);
+    expect(dark.className).toBe(TILE_CLASS);
+    expect(light.className).toBe("");
+
+    // A keyed provider ships REAL dark cartography and must never be filtered.
+    const carto = resolveMapTiles({ key: "abc123" });
+    expect(carto.darkUrl).toMatch(/dark_all/);
+    expect(carto.filterDark).toBe(false);
+    const cartoDark = tilesForTheme(carto, "dark");
+    expect(cartoDark.url).toMatch(/dark_all/);
+    expect(cartoDark.className).toBe("");
+    expect(tilesForTheme(carto, "light").url).toMatch(/voyager/);
+  });
+
+  it("the keyless default carries no api key and cannot be watermarked", () => {
+    expect(OSM_TILES.url).not.toMatch(/\?|key=/);
+    expect(OSM_TILES.url).toMatch(/^https:\/\/tile\.openstreetmap\.org\//);
+    // OSMF retired the {s}. subdomain form; using it now is a policy breach.
+    expect(OSM_TILES.url).not.toContain("{s}");
+    expect(OSM_TILES.attribution).toContain("OpenStreetMap");
+  });
+
+  it("an explicit url override wins, and a single-source override is filtered", () => {
+    const one = resolveMapTiles({ url: "https://x/{z}/{x}/{y}.png" });
+    expect(one.url).toBe("https://x/{z}/{x}/{y}.png");
+    expect(one.filterDark).toBe(true);
+    const two = resolveMapTiles({
+      url: "https://x/{z}/{x}/{y}.png",
+      darkUrl: "https://x/dark/{z}/{x}/{y}.png",
+    });
+    expect(two.filterDark).toBe(false);
+    expect(tilesForTheme(two, "dark").url).toContain("/dark/");
+  });
+
+  it("the canvas behind the tiles, the filter, and the attribution all follow", () => {
     const css = read("src/app/globals.css");
     expect(css).toMatch(/\[data-theme="dark"\] \.leaflet-container \{ background: #17191d !important; \}/);
     expect(css).toMatch(/\[data-theme="dark"\] \.leaflet-control-attribution \{/);
+    expect(css).toContain(`.${TILE_CLASS} {`);
+    expect(css).toMatch(/filter: invert\(100%\)/);
+  });
+
+  it("the pin picker credits the tile provider - it used to credit nobody", () => {
+    const picker = read("src/components/OriginPinPicker.tsx");
+    expect(picker).not.toMatch(/attributionControl=\{false\}/);
+    expect(picker).toMatch(/attribution=\{tiles\.attribution\}/);
   });
 });

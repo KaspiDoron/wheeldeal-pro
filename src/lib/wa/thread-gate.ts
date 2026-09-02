@@ -72,12 +72,28 @@ export function classifyIngestDetailed(
   if (!rows.length) return { ok: false, reason: "no-outbound" };
   const newestAge = nowMs - Date.parse(rows[0].received_at);
   if (!Number.isFinite(newestAge)) return { ok: false, reason: "no-outbound" };
-  if (rows.some((r) => isDrillAnchor(r.raw))) {
+  // THE NEWEST ANCHOR DECIDES, NOT "ANY ANCHOR ANYWHERE".
+  //
+  // This used to ask `rows.some(isDrillAnchor)`, so ONE drill-shaped row
+  // anywhere in the history permanently demoted the thread to the 3-hour
+  // window - even after a real RFQ had been sent since. During the beta that
+  // was catastrophic: a bug upstream stamped `test-<digits>` on real shops (see
+  // wa/identity.ts), and once stamped, a thread could never recover its 14-day
+  // window no matter how many genuine RFQs followed. Shops that answered the
+  // next morning were gated out and their replies were never stored.
+  //
+  // Reading the MOST RECENT anchor is both more correct and self-healing: the
+  // current nature of a conversation is whatever we last did in it, so a fresh
+  // real RFQ restores the real window, and a fresh drill still retires fast.
+  // Rows arrive newest-first.
+  const anchor = rows.find((r) => isDrillAnchor(r.raw) || isRfqAnchor(r.raw));
+  if (!anchor) return { ok: false, reason: "no-rfq-anchor" };
+  // A row that is BOTH keeps the tighter window - privacy wins the tie.
+  if (isDrillAnchor(anchor.raw)) {
     return newestAge < DRILL_INGEST_WINDOW_MS
       ? { ok: true, reason: "drill-window-active" }
       : { ok: false, reason: "drill-expired" };
   }
-  if (!rows.some((r) => isRfqAnchor(r.raw))) return { ok: false, reason: "no-rfq-anchor" };
   return newestAge < REAL_THREAD_INGEST_WINDOW_MS
     ? { ok: true, reason: "active-thread" }
     : { ok: false, reason: "thread-expired" };

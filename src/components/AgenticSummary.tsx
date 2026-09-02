@@ -165,7 +165,11 @@ export function AgenticSummary({
 
               {reading.text && (
                 <Block label={t("Text lifted from the image")}>
-                  <p className="max-h-32 overflow-y-auto whitespace-pre-wrap text-[11px] leading-snug text-soft">
+                  {/* THE LONGEST UNBROKEN STRING IN THE APP. This is the raw
+                      reading of a price board - a URL, a run of digits, a
+                      Thai line with no spaces - and with no `break-words` it
+                      pushed the whole panel sideways on a 320px phone. */}
+                  <p className="max-h-32 overflow-y-auto whitespace-pre-wrap break-words text-[11px] leading-snug text-soft">
                     {reading.text}
                   </p>
                 </Block>
@@ -245,7 +249,16 @@ function Shell({
         <span className="min-w-0 flex-1 truncate">
           {t("Agentic summary")} - {headline}
         </span>
-        <span className={`shrink-0 transition-transform ${open ? "rotate-90" : ""}`} aria-hidden>
+        {/* THE CHEVRON MUST POINT THE WAY THE TEXT RUNS. "›" and a fixed
+            rotate-90 both assume left-to-right, so in Arabic and Hebrew the
+            collapsed arrow pointed back at the text it was supposed to open.
+            `rtl:-scale-x-100` mirrors it with the document direction; the
+            rotation for the OPEN state is direction-neutral (down either way)
+            only after the mirror, so it is applied on top. */}
+        <span
+          className={`shrink-0 transition-transform rtl:-scale-x-100 ${open ? "rotate-90" : ""}`}
+          aria-hidden
+        >
           ›
         </span>
       </button>

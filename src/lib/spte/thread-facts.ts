@@ -81,6 +81,18 @@ export interface ThreadFacts {
    * the second prices it, and there is no third.
    */
   handoverAsks: number;
+  /**
+   * HOW MANY TIMES WE HAVE NUDGED A QUIET THREAD - from our own stamped moves.
+   *
+   * The bound on this was a regex over our own prose
+   * (`/hi again|checking in|just following up|any chance on that|any update/`),
+   * which is the same mistake `bargainRounds` above already documents: our own
+   * wording is not a verdict about what we did, the STAMP is. It was also a
+   * trap for any future variation - the moment the nudge sentence is drawn from
+   * a family rather than hard-coded, a variant that says "any word from you?"
+   * silently voids the once-only guarantee and the thread gets nudged for ever.
+   */
+  momentumNudges: number;
   /** Our last N outbound bodies, oldest first - the anti-repetition memory. */
   lastOutbound: string[];
 }
@@ -134,6 +146,11 @@ export function deriveThreadFacts(input: ThreadFactsInput): ThreadFacts {
   }).length;
   const bargainRounds = Math.max(input.priorBargainCount ?? 0, derivedRounds);
   const handoverAsks = (kinds ?? []).filter((k) => k === "fulfillment-probe").length;
+  // `auto-momentum` is the outbox meta kind; `momentum` is the raw move. Both
+  // appear in history depending on which writer stamped the row.
+  const momentumNudges = (kinds ?? []).filter(
+    (k) => k === "momentum" || k === "auto-momentum"
+  ).length;
 
   return {
     firmCount,
@@ -143,6 +160,7 @@ export function deriveThreadFacts(input: ThreadFactsInput): ThreadFacts {
     fulfillmentCostKnown,
     bargainRounds,
     handoverAsks,
+    momentumNudges,
     lastOutbound: input.outbound.slice(-5),
   };
 }

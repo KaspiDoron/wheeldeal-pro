@@ -59,11 +59,22 @@ async function collect() {
     try {
       const { betaAllowlist, BETA_ALLOWLIST_MAX } = await import("@/lib/allowlist");
       const list = await betaAllowlist();
-      // betaAllowlist() always appends the owner; inviteHeadroom's contract
-      // says "the owner is not counted", so subtract that row - the tile was
-      // pessimistic by one for its whole life.
+      // THE OWNER HOLDS A SOCKET, SO THE OWNER COUNTS.
+      //
+      // This used to subtract the owner's row, on the stated grounds that
+      // "inviteHeadroom's contract says the owner is not counted" - correcting
+      // a tile that had been pessimistic by one. But the ceiling this tile
+      // compares against is the EVOLUTION FLEET, and hostUserCounts
+      // (evolution.ts) counts every wa_sessions row with status=open, the
+      // owner's among them. So subtracting made the tile optimistic by one
+      // instead, which is the direction that gets a tester invited who signs in
+      // fine and then cannot link - the exact failure this tile exists to
+      // prevent, per its own docstring.
+      //
+      // At 24 testers + the owner on a 25-socket fleet the honest answer is
+      // "exactly full, the next invite has nowhere to go", not "room for 1".
       return inviteHeadroom(
-        Math.max(0, list.length - 1),
+        list.length,
         fleet.hosts.length,
         fleet.cap,
         BETA_ALLOWLIST_MAX

@@ -146,13 +146,21 @@ describe("SPTE localizes - parity with the failover engine", () => {
     const res = await runSpteLiveTurn(input(), io);
     expect(res.delivered).toBe("sent");
     expect(localizeCalls.length).toBe(1);
-    // The message that reaches WhatsApp is the local one - now WITH the
-    // warm-emoji tone policy applied (the live tail gate the audit found
-    // Ultra local-language sends slipped past entirely). Exactly one emoji;
-    // which one is deliberately random, so the pin is structural.
+    // The message that reaches WhatsApp is the local one, and it still passes
+    // through the emoji tone gate (the live tail gate the audit found Ultra
+    // local-language sends slipped past entirely).
+    //
+    // AT MOST one, not exactly one. This asserted `=== 1`, which pinned the
+    // defect rather than the guarantee: the rule appended an emoji to EVERY
+    // outbound message, and perfect regularity across a fleet of personal
+    // numbers is itself the pattern the rule exists to soften. It is now a
+    // seeded draw that respects the traveller's persona (which can be "never")
+    // and rises when the shop uses emoji with us. The invariant that survives -
+    // and the one this test is really about - is that the LOCAL text goes out
+    // and never carries a stack of them.
     expect(sent[0].text.startsWith("ลดเหลือ 450 ได้ไหมครับ")).toBe(true);
     const emojis = [...sent[0].text.matchAll(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2764}]/gu)];
-    expect(emojis.length).toBe(1);
+    expect(emojis.length).toBeLessThanOrEqual(1);
     // ...and `meta` is spread into `whatsapp_messages.raw` by guardAndSend, so
     // this IS raw.englishGloss - the field W1.5 already renders in the thread
     // peek, the activity feed, the deals view and the Ops transcript.

@@ -88,6 +88,7 @@ const DOC_URLS: Record<string, string> = {
   WHATSAPP_PHONE_NUMBER_ID: "https://developers.facebook.com/docs/whatsapp/cloud-api/get-started",
   WHATSAPP_VERIFY_TOKEN: "https://developers.facebook.com/docs/whatsapp/cloud-api/webhooks",
   GOOGLE_MAPS_API_KEY: "https://console.cloud.google.com/google/maps-apis/credentials",
+  MAP_TILES_KEY: "https://carto.com/basemaps/apikey/",
   GOOGLE_OAUTH_CLIENT_ID: "https://console.cloud.google.com/apis/credentials",
   GMAIL_USER: "https://myaccount.google.com/security",
   GMAIL_APP_PASSWORD: "https://myaccount.google.com/apppasswords",
@@ -253,6 +254,40 @@ const KEYS: {
   { name: "VAPID_PUBLIC_KEY", label: "Web Push VAPID public key (reply alerts - auto-generated on first use; paste your own only to override)", scope: "messaging", editable: true },
   { name: "VAPID_PRIVATE_KEY", label: "Web Push VAPID private key (auto-generated with the public key)", scope: "messaging", editable: true },
   { name: "GOOGLE_MAPS_API_KEY", label: "Google Maps API Key", scope: "maps", editable: true },
+  // THE BASEMAP. All four are PUBLIC by construction - the browser fetches the
+  // tiles, so the value rides in a request anyone can read in devtools - hence
+  // `secret: false`. Masking them would imply a confidentiality the design
+  // cannot deliver; the real protection is the provider-side domain
+  // restriction. The default (no key at all) is keyless OpenStreetMap, which
+  // has no watermark and nothing to expire. See lib/map-tiles.
+  {
+    name: "MAP_TILES_KEY",
+    label: "CARTO basemaps key (optional - nicer map cartography; free at carto.com/basemaps/apikey. PUBLIC: restrict it to your domain in CARTO)",
+    scope: "maps",
+    editable: true,
+    secret: false,
+  },
+  {
+    name: "MAP_TILE_URL",
+    label: "Map tile URL template (optional - overrides everything, e.g. https://host/{z}/{x}/{y}.png)",
+    scope: "maps",
+    editable: true,
+    secret: false,
+  },
+  {
+    name: "MAP_TILE_URL_DARK",
+    label: "Dark-mode tile URL template (optional - leave blank to invert the light tiles)",
+    scope: "maps",
+    editable: true,
+    secret: false,
+  },
+  {
+    name: "MAP_TILE_ATTRIBUTION",
+    label: "Map attribution HTML (optional - required by most tile providers' terms)",
+    scope: "maps",
+    editable: true,
+    secret: false,
+  },
   { name: "GOOGLE_OAUTH_CLIENT_ID", label: "Google OAuth Client ID", scope: "auth", editable: true },
   { name: "GMAIL_USER", label: "Gmail address (free SMTP - preferred)", scope: "email", editable: true },
   { name: "GMAIL_APP_PASSWORD", label: "Gmail App Password (Google Account -> Security -> App passwords)", scope: "email", editable: true },

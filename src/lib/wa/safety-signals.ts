@@ -132,6 +132,15 @@ const INBOUND_DETAIL: Record<string, string> = {
     "A reply couldn't be answered because your records were briefly unreadable - it retries automatically.",
   "pause-unreadable":
     "A reply couldn't be answered because your records were briefly unreadable - it retries automatically.",
+  // Same family: the thread lookup itself could not be answered. Distinct from
+  // `no-rfq-thread`, which is the deliberate "we never contacted this number".
+  "thread-unreadable":
+    "A reply couldn't be matched to its shop because your records were briefly unreadable - it retries automatically.",
+  // The message's own chat JID did not match the number we were about to file
+  // it under. Always a refusal to guess, never a lost shop reply - but it used
+  // to leave no trace at all.
+  "origin-mismatch":
+    "A message arrived from a different chat than the one it appeared to belong to, so it was not filed against a shop.",
 };
 
 /**

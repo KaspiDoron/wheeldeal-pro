@@ -5,6 +5,7 @@
 // functional in demo mode. Providers are tried in preference order.
 
 import "server-only";
+import { orientationNotes, type InboundImage } from "./media/orientation";
 import { getConfig, pgTimestamp } from "./runtime-config";
 
 // AI_RPM_<PROVIDER> override cache (~60s): the owner can raise a paid tier's
@@ -1338,11 +1339,17 @@ const GEMINI_VISION_FALLBACKS = [
  * multimodal id - was also the only one they could not fix without a
  * redeploy. GEMINI_VISION_MODEL / GROQ_VISION_MODEL close that gap.
  */
-async function visionLadders(): Promise<{ gemini: string[]; groq: string[]; anthropic: string[] }> {
-  const [gemOverride, groqOverride, antOverride] = await Promise.all([
+async function visionLadders(): Promise<{
+  gemini: string[];
+  groq: string[];
+  anthropic: string[];
+  openai: string[];
+}> {
+  const [gemOverride, groqOverride, antOverride, oaiOverride] = await Promise.all([
     getConfig("GEMINI_VISION_MODEL"),
     getConfig("GROQ_VISION_MODEL"),
     getConfig("ANTHROPIC_VISION_MODEL"),
+    getConfig("OPENAI_VISION_MODEL"),
   ]);
   const withOverride = (override: string | undefined, defaults: string[]) => {
     const o = (override ?? "").trim();
@@ -1355,6 +1362,9 @@ async function visionLadders(): Promise<{ gemini: string[]; groq: string[]; anth
     // accepts image input, and a menu photo the free rungs failed on decides
     // real money. Haiku is the cheap default; the vault override can raise it.
     anthropic: withOverride(antOverride, ["claude-haiku-4-5-20251001"]),
+    // The FOURTH rung. The cheap tier by default - this is a rescue after three
+    // other providers have already failed, not a place to spend the flagship.
+    openai: withOverride(oaiOverride, ["gpt-5.6-luna"]),
   };
 }
 
@@ -1536,6 +1546,81 @@ async function groqVisionAttempt(
   }
 }
 
+/**
+ * THE FOURTH VISION RUNG - OpenAI, already a configured provider, absent from
+ * the ladder entirely.
+ *
+ * Only three rungs accepted images (Gemini, Groq, Anthropic) and ONLY Gemini
+ * accepts PDFs - so on a deployment with no Gemini key, or during a Gemini 429,
+ * every PDF rate card was unreadable and a photographed price board had two
+ * chances. OpenAI supports images, its token is already in the vault, its
+ * failure classification already exists, and adding it costs zero new
+ * dependencies. This is the honest answer to "we need offline OCR": one more
+ * real rung plus the deferred re-read, rather than a native image library the
+ * repo bans on memory grounds.
+ *
+ * Runs LAST, after the paid Anthropic rescue, for the same reason that one runs
+ * last: it is a rescue, not the default spend. Speaks the OpenAI reasoning
+ * dialect (`max_completion_tokens`, default temperature) - sending the classic
+ * sampler params 400s every call on the current models.
+ */
+async function openaiVisionAttempt(
+  key: string,
+  model: string,
+  system: string,
+  userText: string,
+  images: { mime: string; base64: string }[],
+  timeoutMs: number,
+  json: boolean,
+  raiseCeiling = false
+): Promise<VisionAttemptOutcome> {
+  try {
+    const res = await fetchWithTimeout(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${key}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          max_completion_tokens: visionCeiling(images.length, raiseCeiling),
+          ...(json ? { response_format: { type: "json_object" } } : {}),
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: `${system}\n\n${userText}` },
+                ...images.map((img) => ({
+                  type: "image_url",
+                  image_url: { url: `data:${img.mime || "image/jpeg"};base64,${img.base64}` },
+                })),
+              ],
+            },
+          ],
+        }),
+      },
+      timeoutMs
+    );
+    if (!res.ok) {
+      return { failure: visionFailureFromStatus(res.status), error: await errorDetail(res, "openai") };
+    }
+    const data = await res.json();
+    if (String(data.choices?.[0]?.finish_reason ?? "").toLowerCase() === "length") {
+      return { failure: "truncated", error: "generation cut off at the output ceiling (finish_reason=length)" };
+    }
+    const out = data.choices?.[0]?.message?.content?.trim();
+    if (out) return { text: out, tokens: data.usage?.total_tokens ?? 0 };
+    return { failure: "blocked", error: "empty reply" };
+  } catch (e) {
+    return {
+      failure: visionFailureFromThrown(e),
+      error: e instanceof Error ? e.message : "network error",
+    };
+  }
+}
+
 async function anthropicVisionAttempt(
   key: string,
   model: string,
@@ -1625,10 +1710,24 @@ async function anthropicVisionAttempt(
 export async function readImages(
   system: string,
   userText: string,
-  images: { mime: string; base64: string }[],
+  images: InboundImage[],
   opts?: { json?: boolean; budgetMs?: number }
 ): Promise<VisionRead> {
   const json = opts?.json === true;
+  // TELL THE MODEL THE BOARD IS SIDEWAYS.
+  //
+  // Phones are held upright, so a photographed price board routinely arrives
+  // with a rotation in its EXIF and the pixels stored on their side. The
+  // rotation was measured at fetch time (fetchMediaBase64 -> readOrientation)
+  // and then dropped one line before this call: the frame budget rebuilt each
+  // frame as {mime, base64} and the tag went with it. So the one reader that
+  // could act on it was the only layer never told.
+  //
+  // orientationNotes was written for exactly this - "ready to prepend to the
+  // vision user text" - and had zero callers. It returns "" when every image is
+  // upright, so the prompt is byte-identical to today's in the common case.
+  const orientation = orientationNotes(images);
+  const userTextWithOrientation = orientation ? `${orientation}\n\n${userText}` : userText;
   const attempts: VisionAttempt[] = [];
   globalThis.__wd_vision_diag__ = { at: Date.now(), attempts };
   // A SECOND LADDER MUST NOT COST A SECOND BUDGET. The failure-class re-read in
@@ -1639,10 +1738,11 @@ export async function readImages(
   const deadline =
     Date.now() + Math.max(4_000, Math.min(VISION_TOTAL_BUDGET_MS, opts?.budgetMs ?? VISION_TOTAL_BUDGET_MS));
 
-  const [gemini, groq, anthropic, models] = await Promise.all([
+  const [gemini, groq, anthropic, openai, models] = await Promise.all([
     getConfig("GEMINI_TOKEN"),
     getConfig("GROQ_TOKEN"),
     getConfig("ANTHROPIC_TOKEN"),
+    getConfig("OPENAI_TOKEN"),
     visionLadders(),
   ]);
   if (!gemini)
@@ -1668,7 +1768,7 @@ export async function readImages(
   const groqImages = images.filter((i) => (i.mime || "").startsWith("image/"));
 
   const ladder: Array<{
-    provider: "gemini" | "groq" | "anthropic";
+    provider: "gemini" | "groq" | "anthropic" | "openai";
     model: string;
     run: (timeoutMs: number, raiseCeiling?: boolean) => Promise<VisionAttemptOutcome>;
   }> = [];
@@ -1678,7 +1778,7 @@ export async function readImages(
         provider: "gemini",
         model,
         run: (ms, raise) =>
-          geminiVisionAttempt(gemini, model, system, userText, images, ms, json, raise),
+          geminiVisionAttempt(gemini, model, system, userTextWithOrientation, images, ms, json, raise),
       });
     }
   }
@@ -1688,7 +1788,7 @@ export async function readImages(
         provider: "groq",
         model,
         run: (ms, raise) =>
-          groqVisionAttempt(groq, model, system, userText, groqImages, ms, json, raise),
+          groqVisionAttempt(groq, model, system, userTextWithOrientation, groqImages, ms, json, raise),
       });
     }
   } else if (groq && images.length > 0 && groqImages.length === 0) {
@@ -1709,7 +1809,24 @@ export async function readImages(
         provider: "anthropic",
         model,
         run: (ms, raise) =>
-          anthropicVisionAttempt(anthropic, model, system, userText, groqImages, ms, json, raise),
+          anthropicVisionAttempt(anthropic, model, system, userTextWithOrientation, groqImages, ms, json, raise),
+      });
+    }
+  }
+  // THE FOURTH RUNG (owner ask: "handle photos/menus/catalogs" without a native
+  // OCR library, which this repo bans on memory grounds). OpenAI was already a
+  // configured provider with a token in the vault and was absent from the
+  // vision ladder entirely - so a board had three chances where it could have
+  // had four, and on a deployment with no Gemini key a PDF rate card had none.
+  // Last on the ladder: three providers have already failed by the time this
+  // runs, so it is the rescue's rescue.
+  if (openai && groqImages.length > 0) {
+    for (const model of models.openai) {
+      ladder.push({
+        provider: "openai",
+        model,
+        run: (ms, raise) =>
+          openaiVisionAttempt(openai, model, system, userTextWithOrientation, groqImages, ms, json, raise),
       });
     }
   }
@@ -1798,8 +1915,10 @@ export async function readImages(
 export async function chatVision(
   system: string,
   userText: string,
-  images: { mime: string; base64: string }[]
+  images: InboundImage[]
 ): Promise<string | null> {
+  // readImages prepends the orientation note itself, so callers of this
+  // convenience wrapper get it for free.
   const read = await readImages(system, userText, images);
   return read.ok ? read.text : null;
 }

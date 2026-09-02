@@ -82,7 +82,13 @@ describe("the deterministic bargain fallback plays the hand it holds", () => {
     } as unknown as Partial<TurnContext>);
     const fb = fallbackArtifact(noRival);
     expect(fb.move).toBe("bargain");
-    expect(fb.message).toMatch(/better|best price/i);
+    // THE PROPERTY, NOT ONE FAMILY MEMBER'S WORDING. This pinned the literal
+    // "better|best price", which was safe while the branch had exactly one
+    // sentence - and one sentence, sent by every traveller to every shop for
+    // ever, is the fleet pattern this round is removing. What must hold is that
+    // the fallback still ASKS for movement, in a question.
+    expect(fb.message).toMatch(/\?\s*$/);
+    expect(fb.message).toMatch(/better|best|lower|room|stretch|rate|price/i);
   });
 });
 

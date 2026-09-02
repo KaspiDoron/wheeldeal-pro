@@ -657,8 +657,21 @@ deploy; each one names the surface that answers it.
 7. **Blue ticks** - the test shop should see its message marked read a few
    seconds before the agent's reply arrives. `wa-read-failed` events mean the
    receipt call is failing (check the Evolution build).
-8. **Cluster risk** - the same launch card turns red when ≥5 unproxied numbers
-   share one Evolution host. At the beta's size it should be silent.
+8. **Cluster risk** - the same launch card turns red when >=5 unproxied numbers
+   share one Evolution host. **At a 25-tester beta on ONE host it will be
+   permanently red, and that is correct rather than noise**: 25 personal numbers
+   egressing from a single datacenter IP is precisely the shape WhatsApp's
+   cluster heuristic targets. This section previously said "at the beta's size
+   it should be silent", which was written when the beta was smaller and is now
+   simply false. A tile that is always red trains the owner to ignore it, so
+   treat it as a standing owner ACTION - set `EVOLUTION_PROXY_TEMPLATE`, or add
+   a second Evolution host and let the numbers spread - not as a status to
+   watch. Note also what the alarm cannot see: it reads `wa_sessions.host_url`
+   only, and that table has no phone column, so it counts how many numbers share
+   a host and never which COUNTRIES they are from. The dial prefix lives on a
+   different path entirely (`linkedNumberFor` -> `app_users.phone`, and the
+   `host-geo-mismatch` event written at placement), and the two halves of the
+   geo-cluster signal never meet.
 9. **Retention + the RPC lockdown** - run `supabase/retention.sql` once, then
    confirm `select public.prune_old_rows(90);` returns a JSON summary and that
    `api_usage_daily` has rows. The same file revokes that function from

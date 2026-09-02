@@ -127,8 +127,8 @@ const DEFAULTS: SecurityPolicies = {
   // behavioural guards.
   day_cap: 220,
   // Fast, human-jittered spacing: 12-28s between sends. A full ultra budget of
-  // 40 conversations clears in ~10-15 min; free (10) in ~3 min; pro (30) in
-  // ~8 min. Perfectly-regular intervals are a bot signature, so the jitter is
+  // 24 conversations clears in ~6-9 min; free (10) in ~3 min; pro (20) in
+  // ~6 min. Perfectly-regular intervals are a bot signature, so the jitter is
   // as important as the floor. This is the single strongest ban lever - raise
   // both numbers (DB override) if a number ever shows soft-restriction signs.
   min_gap_seconds: 12,

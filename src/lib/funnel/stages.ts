@@ -28,6 +28,7 @@
 
 import { sbInsert, sbSelect, sbUpdateReturning } from "../runtime-config";
 import { digitsOnly } from "../phone";
+import { identityKey, numberFilter } from "../wa/phone-key";
 
 /**
  * The progression vocabulary, in funnel order. Mapping to the owner's 9 steps:
@@ -193,7 +194,21 @@ export async function advanceThreadStage(
   const email = (args.userEmail ?? "").trim();
   const digits = digitsOnly(args.toNumber ?? "");
   if (!email || !digits) return { advanced: false, reason: "noop" };
-  const threadKey = `${email}:${digits}`;
+  // ONE SHOP, ONE THREAD KEY - whatever spelling the caller happens to hold.
+  //
+  // This used to be `${email}:${digitsOnly(toNumber)}`, and the two callers do
+  // not agree on spelling: `contacted` is stamped with the number Google Places
+  // gave us (often the NATIONAL form, 081236954642) while `replied` is stamped
+  // with the number the inbound JID gave us (always INTERNATIONAL,
+  // 6281236954642). thread_key is the primary key, so those produced TWO rows -
+  // the outbound one carrying vendor_id and stuck at `contacted`, and a second,
+  // vendor-less one at `replied` that no surface could join to a card. The
+  // traveller saw a shop that had plainly answered still listed under
+  // "Awaiting reply".
+  //
+  // identityKey (the national tail) survives country-code and leading-zero
+  // variation, so both spellings now land on the same row.
+  let threadKey = `${email}:${identityKey(args.toNumber) || digits}`;
 
   // Cheap pre-read: telemetry's `from`, plus the steady-state short-circuit
   // (an inbound-per-second thread must not PATCH-per-second). Enforcement does
@@ -207,6 +222,23 @@ export async function advanceThreadStage(
     );
     rowExists = rows.length > 0;
     from = rows[0]?.stage ?? null;
+    if (!rowExists) {
+      // ADOPT A PRE-EXISTING ROW rather than splitting alongside it. Threads
+      // created before the key was canonicalised still carry an exact-digits
+      // key, and a shop can only ever have one. numberFilter matches every
+      // spelling, so this finds it whichever side wrote it first; on a miss we
+      // keep the canonical key and create the row below.
+      const legacy = await sbSelect<{ thread_key: string; stage: string | null }>(
+        "negotiation_threads",
+        `select=thread_key,stage&user_email=eq.${encodeURIComponent(email)}` +
+          `${numberFilter("to_number", args.toNumber)}&limit=1`
+      );
+      if (legacy[0]?.thread_key) {
+        threadKey = legacy[0].thread_key;
+        rowExists = true;
+        from = legacy[0].stage ?? null;
+      }
+    }
   } catch {
     /* unreadable - fall through to the guarded PATCH, which fails closed */
   }

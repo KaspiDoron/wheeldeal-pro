@@ -161,10 +161,29 @@ export const I18N_EXTRAS: string[] = [
   // photo was blank". Each says what actually happened now, so each needs a
   // translation - a traveller reading in Thai got the honest English or
   // nothing.
-  "Your agent is re-reading this one",
-  "Too long to read in one go - re-reading",
-  "One price here looks wrong - checking",
+  // ...AND THEY DRIFTED. These three headlines were REPLACED in
+  // `media/reading.readingHeadline` (a collapsed row may not promise a retry
+  // that already finished inside the turn), and this list kept the superseded
+  // wording - so the catalogue held three strings nothing renders while the
+  // three that DO render were absent from it. A non-English traveller therefore
+  // got raw English at exactly the moment a reading failed, which is the moment
+  // the honest taxonomy exists for. The live strings, verbatim:
+  "Our reader could not handle this one",
+  "Too long for our reader to finish",
+  "One price here cannot be right",
   "Could not read this one yet",
+  // src/components/MessageBubble.tsx - the understanding panels for a message
+  // with no photo. `vendor_replies` had stored these facts per reply since the
+  // schema shipped and nothing rendered them; a voice transcript was stamped at
+  // ingest and selected by nobody; a forwarded board was read as this shop's
+  // own price with nothing on screen to say otherwise.
+  "What your agent read here",
+  "What your agent heard",
+  "Forwarded - this may be another shop's price, not theirs",
+  "Not the vehicle you asked for",
+  "Matches your spec",
+  "They have one - no price yet",
+
   "Nothing readable in this one",
   "Your agent could not read this one yet - our reader answered with something we could not use. That is our side failing, not your photo, and it is being retried.",
   "This board is longer than our reader was allowed to answer, so its reading was cut off part-way. That is our limit, not your photo - your agent is reading it again with more room.",

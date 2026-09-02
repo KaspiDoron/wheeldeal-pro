@@ -86,7 +86,9 @@ src/
                      lifetime, blocked/erased checks; ADMIN_EMAILS role gate
 supabase/schema.sql        run on setup, idempotent (RLS on, service-role only)
 supabase/perf-indexes.sql  run once per database
-supabase/retention.sql     run once; nightly prune + de-identify + heartbeat
+supabase/retention.sql     run once; prune + de-identify + heartbeat + the
+                           anon revoke. The app calls prune_old_rows itself
+                           hourly (lib/retention.ts), so pg_cron is optional
 ```
 
 ## Key mechanics
@@ -147,7 +149,9 @@ Bootstrap env vars in GCP Secret Manager: `SUPABASE_URL`,
 `SESSION_SECRET`), `REDIS_URL` (fleet-wide rate limits + AI RPM). Run ALL
 THREE SQL files: `supabase/schema.sql`, `supabase/perf-indexes.sql`,
 `supabase/retention.sql` (the health panel's retention tile stays red until
-the nightly prune has actually run). Evolution runs against its OWN database -
+the prune has actually run; the app self-runs it hourly from the cron ping, so
+pg_cron is optional - but the FILE is mandatory, because it also revokes the
+anon grant on `prune_old_rows`). Evolution runs against its OWN database -
 never the app's Supabase project. Its save-data posture (render.yaml, owner
 report 8): `CONTACTS=false`, `MESSAGE_UPDATE=false`, but `NEW_MESSAGE=true` +
 `CHATS=true` - the missed-reply recovery sweep reads a 10-row tail per chat
@@ -177,9 +181,37 @@ there, then merge into `master` with `--no-ff`.
 A change to `render.yaml` does nothing until it reaches `master` AND somebody
 applies it - the Blueprint does not follow a feature branch.
 
-> Earlier versions of this section named `claude/rental-negotiation-app-pc33ux`
-> and then `claude/rental-agents-legal-setup-o7rgcv`, both retired. If you
-> rename or retire a branch, grep the repo for its name before you delete it.
+**CI runs on every `claude/**` branch, by pattern.** It used to name one
+development branch explicitly, and the name it carried was of a branch this
+section had already retired - so the branch actually being developed on was not
+in the trigger and its commits were never gated. A pattern cannot go stale when
+a branch is renamed, and `deploy-workflow.test.ts` now fails if a concrete
+branch name reappears in that list. Widening the trigger cannot widen deploys:
+the `deploy` job admits only `refs/heads/main` and `refs/heads/master`.
+
+> **DO NOT DELETE `claude/rental-negotiation-app-pc33ux`. RENDER DEPLOYS FROM
+> IT.** Earlier versions of this section called it retired, and that is now
+> false: Render's Blueprint record is pinned to that name, and RE-CREATING the
+> branch as a mirror of `master` is what finally made Manual Sync work after
+> months of 404s. Render therefore ships whatever that ref points at, so it must
+> be refreshed after every merge:
+>
+> ```
+> git push origin master:refs/heads/claude/rental-negotiation-app-pc33ux
+> ```
+>
+> `deploy-branch-truth.test.ts` fails if it drifts from `master`. Deleting it
+> would silently break the Evolution crons again. (This was nearly deleted
+> during the CI cleanup on the reasoning that it was "retired and fully merged";
+> merged is the wrong question - the right one is whether anything READS it.)
+>
+> `claude/rental-agents-legal-setup-o7rgcv` is genuinely retired and carries no
+> commits absent from `master`. `claude/wheeldeal-audit-fixes-x7uog5` carries
+> 341 commits that are NOT in `master` - an abandoned July line `master` has
+> since superseded by ~139k lines - so it is stale rather than merged and
+> discarding it is a deliberate owner decision, not routine cleanup. Neither was
+> deleted from here: this environment's git proxy refuses a delete refspec with
+> HTTP 403 and the available GitHub tooling exposes no delete-branch call.
 
 ### The Render Blueprint is OPTIONAL - do not treat it as the deploy path
 

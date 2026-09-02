@@ -173,9 +173,40 @@ describe("one ping runs at a time, and it feeds the risk dashboard", () => {
 
 describe("admission control and the recovery roster", () => {
   it("the inbound gate's patience fits under Cloud Run's 90s ceiling", () => {
+    // THE PROPERTY, NOT THE NUMBER. This asserted the literal `20_000`, which
+    // is how it kept passing while the thing it names stopped being true: the
+    // gate and the turn are SEQUENTIAL, commit ee10961 raised TURN_WALL_MS from
+    // 45s to 72s, and 20 + 72 = 92 against a 90s request timeout. A pin on one
+    // side of a sum cannot see the other side move.
+    //
+    // Now it reads BOTH constants and the deploy flag, and does the arithmetic.
+    // Any of the three moving in a way that breaks the ceiling fails here.
     const gate = readCode("src/lib/wa/inbound-gate.ts");
-    expect(gate).toMatch(/MAX_WAIT_MS = 20_000/);
-    expect(gate).not.toMatch(/MAX_WAIT_MS = 8_000/);
+    const loop = readCode("src/lib/agent-loop.ts");
+    const deploy = readCode(".github/workflows/deploy-gcp.yml");
+
+    const num = (src: string, re: RegExp, what: string) => {
+      const m = src.match(re);
+      expect(m, `could not read ${what}`).toBeTruthy();
+      return Number(m![1].replace(/_/g, ""));
+    };
+    const waitMs = num(gate, /MAX_WAIT_MS = ([\d_]+)/, "MAX_WAIT_MS");
+    const turnMs = num(loop, /TURN_WALL_MS = ([\d_]+)/, "TURN_WALL_MS");
+    const timeoutS = num(deploy, /--timeout (\d+)/, "Cloud Run --timeout");
+
+    // Headroom for webhook auth, payload parse, the response write and the
+    // opportunistic drain the route runs afterward.
+    const HEADROOM_MS = 5_000;
+    expect(
+      waitMs + turnMs + HEADROOM_MS,
+      `gate ${waitMs}ms + turn ${turnMs}ms must leave ${HEADROOM_MS}ms under the ` +
+        `${timeoutS}s Cloud Run request timeout. A turn killed at the ceiling strands ` +
+        `its reply behind a 10-minute claim lease plus the sweep rotation.`
+    ).toBeLessThanOrEqual(timeoutS * 1000);
+
+    // ...and the gate is still worth having: patience below the 8s it was
+    // raised from buys latency and no smoothing.
+    expect(waitMs).toBeGreaterThan(8_000);
   });
 
   it("the recovery sweep's roster is the linked fleet, not the loudest senders", () => {

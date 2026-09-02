@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { GsiLoadError, gsiButtonWidth, loadGsi, resetGsi, GSI_SRC } from "./gsi";
+import { GSI_SRC, GsiLoadError, gsiButtonWidth, gsiLocale, gsiSrcFor, loadGsi, resetGsi } from "./gsi";
 
 // WHY THIS FILE EXISTS
 //
@@ -46,8 +46,13 @@ function installFakeDom() {
     createElement: () => makeScript(),
     // The loader reuses a tag another mount already added; the fake reports the
     // ones that were actually appended.
+    // PREFIX semantics, because the production selector is `script[src^="..."]`:
+    // the tag now carries an `hl` locale, and a second mount in a different
+    // language must still reuse the one tag rather than append a second SDK.
+    // Modelling this as an exact match is how the stub used to pass while the
+    // real DOM would have loaded Google's script twice.
     querySelector: (sel: string) =>
-      sel.includes(GSI_SRC) ? (appended.find((s) => s.src === GSI_SRC) ?? null) : null,
+      sel.includes(GSI_SRC) ? (appended.find((s) => s.src.startsWith(GSI_SRC)) ?? null) : null,
   };
 }
 
@@ -174,5 +179,63 @@ describe("the button width is measured, never assumed", () => {
   it("returns nothing when the container has not been measured yet", () => {
     expect(gsiButtonWidth(0)).toBeUndefined();
     expect(gsiButtonWidth(Number.NaN)).toBeUndefined();
+  });
+});
+
+describe("GSI speaks the APP's language, not the device's", () => {
+  // The owner photographed an English app offering "Continuar com o Google".
+  // GSI localises to the browser locale and nothing told it otherwise, so the
+  // single control on the login page that is not ours was also the only one
+  // that ignored the language selector.
+
+  it("maps this app's language codes straight through", () => {
+    for (const code of ["en", "es", "fr", "de", "it", "pt", "nl", "ru", "uk", "pl", "tr", "he"]) {
+      expect(gsiLocale(code)).toBe(code);
+    }
+  });
+
+  it("accepts a regional tag", () => {
+    expect(gsiLocale("pt-BR")).toBe("pt-br");
+    expect(gsiLocale("zh-Hant")).toBe("zh-hant");
+  });
+
+  it("falls back to English, NOT to the device, for anything unrecognisable", () => {
+    // Falling back to the browser is the bug. An unknown code means we do not
+    // know what to ask for, and English is the app's own default - the device's
+    // guess is what produced Portuguese in an English app.
+    for (const bad of ["", "   ", null, undefined, "english", "e", "../../evil", "en_US"]) {
+      expect(gsiLocale(bad as string)).toBe("en");
+    }
+  });
+
+  it("puts the locale on the script URL as hl", () => {
+    expect(gsiSrcFor("he")).toBe(`${GSI_SRC}?hl=he`);
+    expect(gsiSrcFor("nonsense")).toBe(`${GSI_SRC}?hl=en`);
+  });
+
+  it("loads the script in the requested language", async () => {
+    installFakeDom();
+    resetGsi();
+    const p = loadGsi(1000, "he");
+    publishApi();
+    appended[0].fire("load");
+    await p;
+    expect(appended).toHaveLength(1);
+    expect(appended[0].src).toBe(`${GSI_SRC}?hl=he`);
+  });
+
+  it("a second mount in another language reuses the ONE tag", async () => {
+    // The memo means only the first load can carry `hl`; the per-button
+    // `locale` option is what covers a later change. What must NOT happen is a
+    // second copy of Google's SDK in the document.
+    installFakeDom();
+    resetGsi();
+    const first = loadGsi(1000, "en");
+    publishApi();
+    appended[0].fire("load");
+    await first;
+    resetGsi(); // a remount, e.g. after switching language
+    await loadGsi(1000, "he");
+    expect(appended).toHaveLength(1);
   });
 });

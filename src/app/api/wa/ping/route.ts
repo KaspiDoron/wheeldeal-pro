@@ -150,6 +150,41 @@ export async function GET(req: Request) {
     /* best-effort - never fail the keep-awake on the sweep */
   }
 
+  // RETENTION PRUNE (retention.ts). `supabase/retention.sql` tries to schedule
+  // prune_old_rows via pg_cron, but the schedule block degrades to a NOTICE
+  // when the extension is absent and a paused free-tier project runs no cron at
+  // all - so a deployment could have ZERO retention with only a red tile to say
+  // so, and nothing the app could do about it. prune_old_rows is granted to
+  // service_role, which is the key this process holds, so the one periodic
+  // runner that actually exists in production can just call it. Hourly at an
+  // offset minute; maybeRunRetention's own ~20h heartbeat gate is what decides
+  // whether any work happens, so this modulo only sets how often we ASK.
+  try {
+    if (Math.floor(Date.now() / 60_000) % 60 === 7) {
+      const { maybeRunRetention } = await import("@/lib/retention");
+      await maybeRunRetention().catch(() => null);
+    }
+  } catch {
+    /* best-effort - housekeeping must never fail the keep-awake */
+  }
+
+  // DEFERRED MEDIA RE-READ (media/reread.ts). Every vision rung exhausted is a
+  // statement about the MINUTE - a 429, a timeout, a provider blip - not about
+  // the photo, and the per-minute budgets reset. The reply already went out
+  // (nothing about media ever blocks a reply), so retrying later costs the
+  // traveller nothing and can turn an unreadable price board into a real price.
+  // ~Every 5 min; the per-photo attempt/cooldown/age rules are the real bound,
+  // so this modulo only sets how often we ASK, and the sweep is capped at
+  // REREAD_BATCH photos so vision spend stays bounded per run.
+  try {
+    if (Math.floor(Date.now() / 60_000) % 5 === 3) {
+      const { sweepMediaRereads } = await import("@/lib/media/reread-sweep");
+      await sweepMediaRereads().catch(() => null);
+    }
+  } catch {
+    /* best-effort - housekeeping must never fail the keep-awake */
+  }
+
   // TRIP-COMPLETION SUGGESTION (bookings.ts): a rental whose window has passed
   // gets ONE "did you return it?" push - never an auto-complete (the funnel
   // does not assert what nobody witnessed). ~Every 15 min; the per-booking

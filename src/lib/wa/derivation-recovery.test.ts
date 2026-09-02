@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
+import { identityKey } from "./phone-key";
+import { digitsOnly } from "../phone";
 
 // STORED MUST MEAN ANSWERED. Qui Motorbike Rental's three price messages
 // existed in WhatsApp, and even a copy stored in whatsapp_messages would have
@@ -115,8 +117,35 @@ describe("card state follows the WIRE, not the derivation", () => {
   it("...and joins them to vendors via our own outbound anchors", () => {
     expect(activity).toMatch(/vendorByDigits/);
     expect(activity).toMatch(
-      /for \(const m of inboundRows\) bumpState\(vendorByDigits\[digitsOnly\(m\.from_number\)\], "active"\);/
+      /for \(const m of inboundRows\) bumpState\(vendorByDigits\[identityKey\(m\.from_number\)\], "active"\);/
     );
+  });
+
+  it("the join key SURVIVES the spelling gap between outbound and inbound", () => {
+    // THE BUG THIS REPLACES A GREP FOR. The map is built from OUTBOUND
+    // to_number - the spelling Google Places gave us, often national
+    // (081236954642) - and read with INBOUND from_number, which the WhatsApp
+    // JID always renders international (6281236954642). Keyed on raw digits
+    // those never meet, so a shop that genuinely replied produced no
+    // lastInboundAt and no "active" state: six cards stuck on "Awaiting reply"
+    // while the replies sat in whatsapp_messages. Executed, not grepped -
+    // the previous version of this test pinned the broken line.
+    const outboundSpelling = "081236954642"; // what we stored when we messaged
+    const inboundSpelling = "6281236954642"; // what the reply's JID carries
+    expect(digitsOnly(outboundSpelling)).not.toBe(digitsOnly(inboundSpelling));
+    expect(identityKey(outboundSpelling)).toBe(identityKey(inboundSpelling));
+
+    // ...and the map round-trips, which is the property the route depends on.
+    const vendorByDigits: Record<string, string> = {};
+    vendorByDigits[identityKey(outboundSpelling)] = "vendor-arka";
+    expect(vendorByDigits[identityKey(inboundSpelling)]).toBe("vendor-arka");
+  });
+
+  it("a leading-zero national form and its +62 twin are ONE shop", () => {
+    // The three Indonesian spellings a Bali shop's number appears in.
+    const forms = ["6281236954642", "081236954642", "81236954642"];
+    const keys = new Set(forms.map((f) => identityKey(f)));
+    expect(keys.size).toBe(1);
   });
 
   it("the last-message panel shows the stored reply even before the turn runs", () => {

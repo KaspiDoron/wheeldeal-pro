@@ -2,6 +2,7 @@
 // heuristic when no LLM key is configured, so the product is always functional.
 
 import "server-only";
+import type { InboundImage } from "./media/orientation";
 import { article, nDays } from "./copy/matrix";
 import { deriveReturnDate } from "./rental-window";
 import { chat, extractJson } from "./ai";
@@ -1655,7 +1656,7 @@ const VISION_REREAD_MIN_LEFT_MS = 26_000;
 export async function extractOffer(
   rfq: StructuredRFQ,
   text: string,
-  images: { mime: string; base64: string }[] = [],
+  images: InboundImage[] = [],
   history?: string,
   region?: string,
   /**

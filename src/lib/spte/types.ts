@@ -184,6 +184,19 @@ export interface SessionSnapshot {
      */
     derivedFromDays?: number;
   }>;
+  /**
+   * WHERE EVERY OTHER SHOP IN THIS HUNT STANDS - one bounded, anonymised block
+   * (negotiation/session-brief).
+   *
+   * `rivals` above is the LEVERAGE set: live, priced, comparable-currency
+   * quotes, capped at four. Everything else about the hunt was dropped on the
+   * floor, so the agent answering shop B could not know that shop C had said
+   * no, that shop D was still silent, or that B was the last shop left - and
+   * each of those inverts how hard a human would push. Built from the session
+   * rows the engine already loads, so it costs no extra read; empty string when
+   * this is the only shop in the hunt.
+   */
+  brief?: string;
   /** Priors banked from past successful deals (self-improvement loop). */
   priors?: { medianAchieved?: number; typicalDiscountPct?: number; sampleSize: number } | null;
   /** Few-shot TONE/tactic coaching (owner teaching + Ops learning + distilled
@@ -257,6 +270,39 @@ export interface ThreadDigest {
    */
   alternativeOffer?: import("../vehicle/substitution").AlternativeOffer | null;
   round: number;
+  /**
+   * THE PRICE THE SHOP PRINTED, carried across turns.
+   *
+   * `graph/state.ts` (the FAILOVER engine) has written `fields.sheetPricePerDay`
+   * and `fields.mediaSummary` since they existed. SPTE - the engine that
+   * actually answers shops - re-derived the sheet price per turn from the
+   * current frame and persisted neither, so from turn two onward the primary
+   * engine had no idea the shop had posted a board at all: the printed-list
+   * anchor and the "what the photo showed" memory were both absent from the
+   * only path a traveller is ever served by.
+   */
+  sheetPricePerDay?: number;
+  /** What the last photo showed, in the reader's words. Same story as above. */
+  mediaSummary?: string;
+  /**
+   * THE NUMBER WE LAST ASKED THIS SHOP FOR - measured on the wire, not asserted.
+   *
+   * The live engine's ask was `Math.round(quoteNow * 0.85)`: a flat 15% off
+   * whatever the shop had just said, recomputed from scratch every turn. So a
+   * shop that held firm at 300 got asked for 255 in round 0, 255 in round 1 and
+   * 255 in round 2 - three identical messages that read as a bot, and no
+   * concession the shop could reciprocate. `graph/math.computeRoundTarget` is
+   * the real ladder (it concedes upward across rounds, never re-asks below an
+   * earlier ask, and clamps strictly below a cited rival) and it needs to know
+   * what we asked last time. The graph engine keeps that in
+   * `fields.lastTarget`; the engine that actually answers shops kept nothing.
+   *
+   * Derived from the SENT text rather than from the target we handed the model,
+   * for the same reason `citedRival` is: the model may not have used it. The
+   * lowest money numeral strictly below the standing quote is our ask - the
+   * rival we cite is by construction ABOVE it (beat, never match).
+   */
+  lastAskPerDay?: number;
   tone?: "friendly" | "curt" | "eager" | "reluctant";
   /**
    * THE MODEL'S DURABLE READING OF THIS THREAD (A4). Persisted; every meaning
@@ -275,6 +321,9 @@ export interface ThreadDigest {
   fulfillmentCostKnown?: boolean;
   /** How many handover questions we have already put (stamped moves). */
   handoverAsks?: number;
+  /** How many times we have nudged this quiet thread (stamped moves). The
+   *  once-only bound reads this, not a regex over our own wording. */
+  momentumNudges?: number;
   lastOutbound?: string[]; // our last 5 messages - the anti-repetition memory
   /** Every tier this shop has offered, accumulated across the whole thread. */
   options?: VehicleOption[];
@@ -457,7 +506,39 @@ export interface TurnContext {
    *  wait). ABSENT on replays and unit runs, which then use pure turn
    *  arithmetic - determinism is the property the golden gate needs. */
   nowMs?: number;
+  /**
+   * THE TRAVELLER, FOR THE VOICE PERSONA (lib/voice).
+   *
+   * The strongest tell of a bot fleet is not one odd message - it is a hundred
+   * "different customers" who all write identically. `voiceProfileFor` derives
+   * a stable persona from this key (greeting habit, punctuation energy, emoji
+   * appetite, brevity, one small quirk) so the same person always sounds like
+   * themselves and no two people sound alike.
+   *
+   * It existed, was tested, and was wired ONLY to the graph engine - the
+   * FAILOVER. So on the path every traveller is actually served by, twenty-five
+   * testers' agents wrote in one voice.
+   *
+   * Optional because a replay has no traveller: absent means no persona block,
+   * which keeps the golden suite byte-identical.
+   */
+  userKey?: string;
+  /** The traveller's region, for the local politeness particle and thank-you
+   *  in the per-turn style draw. Absent on replays, same reasoning. */
+  region?: string;
   tail: Array<{ dir: "in" | "out"; text: string; at: string }>;
+  /**
+   * THE THREAD DID NOT FIT, AND THE MODEL IS TOLD SO.
+   *
+   * `wa/history-window` marks its elision explicitly - "never silent" is its
+   * own stated rule - and `buildTail` parsed the marker away, so the composer
+   * saw a contiguous-looking transcript with a hole in the middle and no way to
+   * know. A model that believes it has the whole conversation will confidently
+   * re-ask something the shop answered in the part it cannot see. Carried as a
+   * flag rather than a fake turn: nobody said it, so it must not enter the
+   * repetition corpus or the counter-already-made check.
+   */
+  tailElided?: boolean;
   inbound: {
     text: string;
     /**
@@ -504,6 +585,17 @@ export interface TurnContext {
     priceFarAboveFloor?: number;
     /** overlay.bannedPhrases - scrubbed from the finished draft by the rails. */
     bannedPhrases?: string[];
+    /**
+     * overlay.sheetAnchor - how far below a PRINTED price list an ask may go.
+     *
+     * A posted board is a firmer anchor than a spoken quote: a deep lowball
+     * against a list the shop has printed and hung on the wall insults them and
+     * kills the deal ("that's OK, take it there"). The graph engine has clamped
+     * against it since the overlay shipped; the engine that actually answers
+     * shops never saw it, because the sheet price it needed evaporated between
+     * turns. Defaults to the overlay's own 0.8 when unset.
+     */
+    sheetAnchor?: number;
   };
   /** Event that triggered this turn - a real inbound, a wakeup, or a swarm poke. */
   event: "shop-message" | "tick" | "rival-improved";

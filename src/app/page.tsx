@@ -19,6 +19,7 @@ import {
   trackerStageForLedger,
   LEDGER_TERMINAL_CARD_STAGES,
 } from "@/lib/client/ledger-stage";
+import { stageRank } from "@/lib/client/stage-order";
 import { vehicleLabel } from "@/lib/labels";
 import { Icon } from "@/components/icons";
 import { Filters, DEFAULT_FILTERS, type FilterState } from "@/components/Filters";
@@ -147,7 +148,8 @@ import { MassBargainPreview } from "@/components/MassBargainPreview";
 import { VirtualVendorList } from "@/components/VirtualVendorList";
 import { QuotesRail } from "@/components/QuotesRail";
 import { HorizontalVendorRail } from "@/components/HorizontalVendorRail";
-import { loadPublicConfig } from "@/lib/client/public-config";
+import { loadPublicConfig, PUBLIC_CONFIG_FALLBACK } from "@/lib/client/public-config";
+import { subscribePulse, subscribePulseHealth, setPulsePeriod } from "@/lib/client/pulse-store";
 
 const MapView = dynamic(() => import("@/components/MapView"), {
   ssr: false,
@@ -442,11 +444,13 @@ export default function Home() {
   // by default so a shop's WhatsApp reply surfaces in the app within seconds
   // (owner: "it should be instant") - the focus/visibility wake forces an
   // immediate refresh on top of this.
-  const [pollCfg, setPollCfg] = useState({ activityMs: 6000, repliesMs: 6000, tagsMs: 120000 });
+  const [pollCfg, setPollCfg] = useState(PUBLIC_CONFIG_FALLBACK.poll);
   useEffect(() => {
     let alive = true;
     void loadPublicConfig().then((d) => {
-      if (alive && d.poll?.activityMs) setPollCfg(d.poll);
+      if (!alive || !d.poll?.activityMs) return;
+      setPollCfg(d.poll);
+      setPulsePeriod(d.poll.pulseMs);
     });
     return () => {
       alive = false;
@@ -1249,20 +1253,6 @@ export default function Home() {
       > = d.lastByVendor && typeof d.lastByVendor === "object" ? d.lastByVendor : {};
       // Forward-only stage ranking - the DB state can only ADVANCE a card, never
       // rewind it, and never overrides a terminal decline / no-contact.
-      const STAGE_ORDER: Record<string, number> = {
-        queued: 0,
-        "locating-contact": 1,
-        found: 2,
-        "no-response": 2,
-        // In flight: past "found", not yet delivered. Ranked so the DB rollup
-        // can advance it once the send lands but can never rewind it to "found".
-        sending: 2,
-        "rfq-sent": 3,
-        "awaiting-response": 4,
-        negotiating: 5,
-        "offer-received": 6,
-        "counter-offer": 7,
-      };
       const stageForState = (s: "messaged" | "active" | "offer") =>
         s === "offer" ? "offer-received" : s === "active" ? "negotiating" : "awaiting-response";
       // J: vendorIds where the agent has countered the shop's quote this session
@@ -1285,7 +1275,7 @@ export default function Home() {
         // "awaiting-response" by the mere existence of its RFQ row - only a real
         // reply (active/offer) revives it.
         !(cur === "no-response" && target === "awaiting-response") &&
-        (STAGE_ORDER[target] ?? -1) > (STAGE_ORDER[cur ?? "queued"] ?? -1);
+        stageRank(target) > stageRank(cur);
       // J: relabel a card's stage to "counter-offer" once the agent has countered
       // this shop's quote - applied LAST (after offer seeding) at every return
       // site so the priced offer still shows; canAdvance keeps it off terminal
@@ -1739,6 +1729,22 @@ export default function Home() {
   // back from WhatsApp), bump this nonce - both pollers below depend on it,
   // so they re-run their tick IMMEDIATELY instead of waiting a full interval.
   const [syncNonce, setSyncNonce] = useState(0);
+  const [pulseHealthy, setPulseHealthy] = useState(true);
+  // The cadence the heavy polls actually run at. With a working pulse these are
+  // a safety floor (they still carry the opportunistic drain and the
+  // missed-webhook reconciler); without one they ARE the freshness mechanism
+  // again and go back to the old tighter numbers.
+  const effectivePoll = useMemo(
+    () =>
+      pulseHealthy
+        ? pollCfg
+        : {
+            ...pollCfg,
+            activityMs: Math.min(pollCfg.activityMs, 6000),
+            repliesMs: Math.min(pollCfg.repliesMs, 8000),
+          },
+    [pulseHealthy, pollCfg]
+  );
   useEffect(() => {
     const wake = () => {
       if (!document.hidden) setSyncNonce((n) => n + 1);
@@ -1753,10 +1759,26 @@ export default function Home() {
       if (e.data?.type === "wd-refresh") setSyncNonce((n) => n + 1);
     };
     navigator.serviceWorker?.addEventListener?.("message", onSwMessage);
+    // THE PULSE. Focus and push are wakes we get for free; neither fires while
+    // the traveller is sitting on this screen watching a shop that has just
+    // replied. /api/pulse is one indexed row per source and one integer back,
+    // so it can run every 2.5s for less database work than a single activity
+    // poll - and when it moves, the heavy fetches run at once instead of at the
+    // end of their interval. That is the difference between a reply appearing
+    // in ~3s and in ~20s, and it is why the intervals below could be relaxed to
+    // a safety floor rather than tightened.
+    const unsubscribe = subscribePulse(() => setSyncNonce((n) => n + 1));
+    // ...and if the pulse itself goes dark, the intervals below must tighten
+    // back up. They were relaxed BECAUSE the pulse wakes them; leaving them
+    // relaxed over a dead pulse would make the board staler than it was before
+    // any of this existed.
+    const unhealth = subscribePulseHealth(setPulseHealthy);
     return () => {
       document.removeEventListener("visibilitychange", wake);
       window.removeEventListener("focus", wake);
       navigator.serviceWorker?.removeEventListener?.("message", onSwMessage);
+      unsubscribe();
+      unhealth();
     };
   }, []);
 
@@ -1790,9 +1812,9 @@ export default function Home() {
       }
     };
     void tick();
-    const id = setInterval(() => void tick(), pollCfg.activityMs);
+    const id = setInterval(() => void tick(), effectivePoll.activityMs);
     return () => clearInterval(id);
-  }, [session, vendors.length, refreshQueue, pollCfg.activityMs, syncNonce]);
+  }, [session, vendors.length, refreshQueue, effectivePoll.activityMs, syncNonce]);
 
   // Reply-VERIFIED shop tags (item #13): one batched fetch per result set,
   // plus a slow refresh while the search is on screen - a shop's second
@@ -2182,7 +2204,7 @@ export default function Home() {
       }
     };
     tick();
-    const id = setInterval(tick, pollCfg.repliesMs);
+    const id = setInterval(tick, effectivePoll.repliesMs);
     return () => {
       cancelled = true;
       clearInterval(id);
@@ -2192,7 +2214,7 @@ export default function Home() {
       repliesAbort.current = null;
       inFlight.current = false;
     };
-  }, [session, waiting, rfq, searchEpoch, pollCfg.repliesMs, syncNonce]);
+  }, [session, waiting, rfq, searchEpoch, effectivePoll.repliesMs, syncNonce]);
 
   function runFunnel(list: Vendor[], _activeRfq: StructuredRFQ) {
     timers.current.forEach(clearTimeout);
@@ -3118,7 +3140,18 @@ export default function Home() {
       // under "Active offers" after it had said it had nothing to rent - the
       // replied bucket below carries the honest per-stage line for both.
       if (v.offer && v.stage !== "out-of-stock" && v.stage !== "declined") deals.push(v);
-      else if (v.lastInboundAt || v.stage === "negotiating" || v.stage === "counter-offer")
+      // "replied" IS THE REPLIED BUCKET. It was missing from this predicate,
+      // so a card the ledger had correctly advanced to `replied` fell through
+      // to the catch-all and rendered under "Awaiting reply" - the app
+      // contradicting itself, because the counter above keys on lastInboundAt
+      // and DID move. The stage is the strongest evidence there is here: it is
+      // written by advanceThreadStage on a real stored inbound.
+      else if (
+        v.lastInboundAt ||
+        v.stage === "replied" ||
+        v.stage === "negotiating" ||
+        v.stage === "counter-offer"
+      )
         replied.push(v);
       // Cancelled BY THE USER with nothing ever sent: terminal, and counted
       // nowhere else. `sentText` is the test rather than the stage, because

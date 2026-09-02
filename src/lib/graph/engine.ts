@@ -1691,6 +1691,11 @@ export function liveGraphIO(send: LiveSend): GraphIO {
           depositType?: string;
           depositNote?: string;
           fulfillment?: string;
+          firmCount?: number;
+          declined?: boolean;
+          shopUnavailable?: boolean;
+          rounds?: number;
+          presented?: boolean;
           digest?: { firmCount?: number };
         };
         // SAME VEHICLE OR IT IS NOT A RIVAL - for THREAD rows too. The offers
@@ -1716,7 +1721,33 @@ export function liveGraphIO(send: LiveSend): GraphIO {
           // sibling re-bargain needs the number to build a thread key, and the
           // firm ladder to know which shops have already refused twice.
           toNumber: t.to_number ?? undefined,
-          firmCount: typeof fx.digest?.firmCount === "number" ? fx.digest.firmCount : undefined,
+          // THE FIRM LADDER, READ FROM WHERE IT IS ACTUALLY WRITTEN.
+          //
+          // This read `fields.digest.firmCount`, and firmCount is NOT a
+          // persisted digest field - `persistableDigest` deliberately omits it
+          // because it is projected per turn from the durable comprehension.
+          // Both engines write the durable copy to `fields.firmCount`
+          // (graph/state.ts applyExtractionToState, spte/live.ts
+          // persistThreadOutcome). So this was undefined on every row ever
+          // built, and `planSiblingRebargain`'s "a shop that has said last
+          // price twice has answered" guard could never fire: the swarm would
+          // re-open a conversation the shop had closed, which is precisely the
+          // promise this app makes. The digest path is kept as a fallback for
+          // any row that does carry it.
+          firmCount:
+            typeof fx.firmCount === "number"
+              ? fx.firmCount
+              : typeof fx.digest?.firmCount === "number"
+                ? fx.digest.firmCount
+                : undefined,
+          // THE SESSION BRIEF'S FACTS (ask 5). Already in `fields`, already
+          // loaded, and thrown away by this projection until now - so knowing
+          // that shop C said no, that shop D is still silent, or that this is
+          // the last shop left costs no extra query at all.
+          declined: fx.declined === true ? true : undefined,
+          outOfStock: fx.shopUnavailable === true ? true : undefined,
+          rounds: typeof fx.rounds === "number" && fx.rounds > 0 ? fx.rounds : undefined,
+          presented: fx.presented === true ? true : undefined,
         });
       }
       for (const o of offers) {
@@ -1768,6 +1799,13 @@ export function liveGraphIO(send: LiveSend): GraphIO {
           // the firm ladder in the one path that skipped it.
           toNumber: existing?.toNumber ?? numberByVendor.get(o.vendor_id),
           firmCount: existing?.firmCount,
+          // The session brief's facts survive the replacement for exactly the
+          // same reason: this branch rebuilds the row wholesale, so anything it
+          // does not carry is lost for every shop whose price lives in offers.
+          declined: existing?.declined,
+          outOfStock: existing?.outOfStock,
+          rounds: existing?.rounds,
+          presented: existing?.presented,
         });
       }
 
@@ -2551,7 +2589,12 @@ export async function buildTurnFromThread(
   const { buildHistoryWindow } = await import("../wa/history-window");
   const history = buildHistoryWindow(mine.slice(0, 40).reverse());
   const outboundRows = thread.filter((m) => m.direction === "outbound" && (m.body ?? ""));
-  const priorOutbound = outboundRows.map((m) => m.body ?? "");
+  // THE GLOSS, NOT THE LOCALIZED WIRE TEXT - same fix as the inbound path in
+  // agent-loop, and for the same reason: the repetition guard compares these
+  // against an ENGLISH draft, so raw Thai on this side made it inert.
+  const priorOutbound = outboundRows.map(
+    (m) => (m.raw as { englishGloss?: string } | null)?.englishGloss ?? m.body ?? ""
+  );
   // Parallel to priorOutbound, same order and length. SPTE stamps the semantic
   // move in raw.move; the legacy paths use raw.kind. Either identifies a
   // message better than its wording can - see the note on the field.

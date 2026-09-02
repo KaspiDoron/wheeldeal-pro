@@ -17,6 +17,9 @@ const calls: { selects: Call[]; updates: Call[]; inserts: Call[] } = {
   inserts: [],
 };
 let selectResult: { stage: string | null }[] = [];
+/** Served ONLY to the spelling-tolerant legacy lookup (the one filtering on
+ *  user_email + to_number rather than thread_key). */
+let legacyRow: { thread_key: string; stage: string | null } | null = null;
 let updateResult: Record<string, unknown>[] = [];
 let insertOk = true;
 
@@ -39,6 +42,11 @@ function filterMatches(filter: string, stage: string | null): boolean {
 vi.mock("../runtime-config", () => ({
   sbSelect: async (table: string, query: string) => {
     calls.selects.push({ table, query });
+    // The legacy-adoption read: keyed on the user + every spelling of the
+    // number, NOT on thread_key.
+    if (query.includes("user_email=eq.") && !query.includes("thread_key=eq.")) {
+      return legacyRow ? [legacyRow] : [];
+    }
     if (db) return db.exists ? [{ stage: db.stage }] : [];
     return selectResult;
   },
@@ -68,6 +76,7 @@ beforeEach(() => {
   calls.updates.length = 0;
   calls.inserts.length = 0;
   selectResult = [];
+  legacyRow = null;
   updateResult = [];
   insertOk = true;
   db = undefined;
@@ -210,7 +219,13 @@ describe("advanceThreadStage - write discipline", () => {
     expect(threadInserts).toHaveLength(1);
     const row = threadInserts[0].rows![0] as Record<string, unknown>;
     expect(row).toMatchObject({
-      thread_key: "t@x.com:66812345678",
+      // The IDENTITY key (national tail), not the raw digits. `contacted` is
+      // stamped with Google's spelling and `replied` with the JID's, and raw
+      // digits made those two different primary keys - so the ledger split
+      // into a vendor-less `replied` row beside a stuck `contacted` one, and
+      // the traveller's card stayed on "Awaiting reply" for a shop that had
+      // plainly answered.
+      thread_key: "t@x.com:812345678",
       user_email: "t@x.com",
       to_number: "66812345678",
       stage: "selected",
@@ -302,5 +317,80 @@ describe("the funnel walk - the whole ledger against a real filter evaluator", (
       (await advanceThreadStage(ARGS, "selected", "fresh Ask", { restart: true })).advanced
     ).toBe(false);
     expect(db.stage).toBe("dead");
+  });
+});
+
+describe("one shop is one thread row, whatever spelling the caller holds", () => {
+  // THE SPLIT. `contacted` is stamped with the number Google Places returned
+  // (often the national form) and `replied` with the number the inbound JID
+  // carried (always international). thread_key is the PRIMARY KEY, so raw
+  // digits produced two rows: the outbound one holding vendor_id and frozen at
+  // `contacted`, and a second, vendor-less one at `replied` that no card could
+  // join to. The app said "Awaiting reply" about a shop that had answered.
+  const EMAIL = "t@x.com";
+  const GOOGLE_FORM = "081236954642"; // how we stored it when we messaged
+  const JID_FORM = "6281236954642"; // how the reply arrives
+
+  it("both spellings produce the SAME thread_key", async () => {
+    const { advanceThreadStage } = await import("./stages");
+
+    selectResult = [];
+    await advanceThreadStage(
+      { userEmail: EMAIL, toNumber: GOOGLE_FORM },
+      "contacted",
+      "rfq delivered"
+    );
+    const first = (
+      calls.inserts.find((c) => c.table === "negotiation_threads")!.rows![0] as {
+        thread_key: string;
+      }
+    ).thread_key;
+
+    calls.inserts.length = 0;
+    selectResult = [];
+    await advanceThreadStage(
+      { userEmail: EMAIL, toNumber: JID_FORM },
+      "replied",
+      "inbound stored"
+    );
+    const second = (
+      calls.inserts.find((c) => c.table === "negotiation_threads")!.rows![0] as {
+        thread_key: string;
+      }
+    ).thread_key;
+
+    expect(first).toBe(second);
+  });
+
+  it("a row written under the OLD exact-digits key is adopted, not duplicated", async () => {
+    const { advanceThreadStage } = await import("./stages");
+    // Nothing at the canonical key...
+    selectResult = [];
+    // ...but a pre-canonicalisation row exists under the raw-digits key.
+    legacyRow = { thread_key: `${EMAIL}:${GOOGLE_FORM}`, stage: "contacted" };
+    updateResult = [{ thread_key: `${EMAIL}:${GOOGLE_FORM}` }];
+
+    const res = await advanceThreadStage(
+      { userEmail: EMAIL, toNumber: JID_FORM },
+      "replied",
+      "inbound stored"
+    );
+
+    expect(res.advanced).toBe(true);
+    // No second thread row was created...
+    expect(calls.inserts.filter((c) => c.table === "negotiation_threads")).toHaveLength(0);
+    // ...and the PATCH went to the row that already exists.
+    expect(calls.updates[0].filter).toContain(encodeURIComponent(`${EMAIL}:${GOOGLE_FORM}`));
+  });
+
+  it("with no legacy row, the canonical key is used and a row is created", async () => {
+    const { advanceThreadStage } = await import("./stages");
+    selectResult = [];
+    legacyRow = null;
+    await advanceThreadStage({ userEmail: EMAIL, toNumber: JID_FORM }, "replied", "inbound");
+    const row = calls.inserts.find((c) => c.table === "negotiation_threads")!.rows![0] as {
+      thread_key: string;
+    };
+    expect(row.thread_key).toBe(`${EMAIL}:236954642`);
   });
 });
