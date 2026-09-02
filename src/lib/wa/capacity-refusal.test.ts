@@ -172,17 +172,93 @@ describe("the multi-host path applies the same rules, not different ones", () =>
   });
 });
 
+describe("EXECUTED: capacity governs who JOINS, never who may be spoken to", () => {
+  // THE DEFECT THIS EXISTS FOR. A capacity refusal returned to a SERVE call is
+  // not a refusal: `resolveHost` fronts `evo()`, which fronts fifteen endpoints
+  // - sending, media download, connection state, mark-read - and a null there
+  // surfaces as {ok:false, status:0}, which the send path deliberately treats
+  // as an AMBIGUOUS transport failure. A blocked spec put the refusal inside
+  // that shared resolver, which would have turned one full fleet into a
+  // fleet-wide WhatsApp outage wearing the costume of a network blip.
+  const A = { url: "https://a", dialPrefixes: [] as string[] };
+  const B = { url: "https://b", dialPrefixes: [] as string[] };
+
+  it("a FULL fleet still answers a serve call - placeHost would refuse it", async () => {
+    const { placeHost, serveHost } = await import("./host-placement");
+    const counts = { "https://a": 99, "https://b": 99 };
+    expect(placeHost({ hosts: [A, B], counts, cap: 25 })).toBeNull();
+    expect(serveHost({ hosts: [A, B], counts })).not.toBeNull();
+  });
+
+  it("the stored host wins whatever the cap says", async () => {
+    const { serveHost } = await import("./host-placement");
+    expect(
+      serveHost({ hosts: [A, B], stored: "https://a", counts: { "https://a": 500 } })?.url
+    ).toBe("https://a");
+  });
+
+  it("one configured host is the only answer that can be right", async () => {
+    const { serveHost } = await import("./host-placement");
+    expect(serveHost({ hosts: [A], counts: { "https://a": 9999 } })?.url).toBe("https://a");
+    // ...including when the stored host is one we no longer configure.
+    expect(serveHost({ hosts: [A], stored: "https://gone", counts: {} })?.url).toBe("https://a");
+  });
+
+  it("with no stored host it falls to the least loaded, not the first", async () => {
+    const { serveHost } = await import("./host-placement");
+    expect(serveHost({ hosts: [A, B], counts: { "https://a": 20, "https://b": 3 } })?.url).toBe(
+      "https://b"
+    );
+  });
+
+  it("no hosts configured is still null - that is a real 'not set up'", async () => {
+    const { serveHost } = await import("./host-placement");
+    expect(serveHost({ hosts: [], counts: {} })).toBeNull();
+  });
+
+  it("the resolver uses it, and only the link path can be refused", () => {
+    const evo = readCode("src/lib/evolution.ts");
+    expect(evo).toMatch(/if \(!chosen && !forPlacement\) return serveHost<Host>\(/);
+    expect(evo.match(/forPlacement: true/g)?.length).toBe(1);
+  });
+
+  it("an UNREADABLE session row can never produce a refusal", () => {
+    // `sbSelect` has no rejection path at all - no connection, any non-2xx and
+    // a parse throw all return [] - so `stored` read permissively made a
+    // Supabase blip indistinguishable from "never linked", and the occupant
+    // exemption silently stopped applying to a user who was already placed.
+    const evo = readCode("src/lib/evolution.ts");
+    expect(evo).toMatch(/const storedRes = await sbSelectStrict<\{ host_url: string \| null \}>/);
+    expect(evo).toMatch(/storedRes\.error === "unavailable"/);
+    expect(evo).toMatch(/if \(storedUnreadable && !forPlacement && hosts\.length === 1\) return hosts\[0\];/);
+  });
+
+  it("a pairing in flight holds its slot, bounded by staleness", () => {
+    // A number mid-pairing has a real socket on the box. Counting only
+    // status=open under-counted a host by exactly the number of links in
+    // flight - and a link burst is when the cap matters most.
+    const evo = readCode("src/lib/evolution.ts");
+    expect(evo).toMatch(/status=eq\.connecting&updated_at=gte\./);
+    expect(evo).toMatch(/const CONNECTING_SLOT_TTL_MS = 15 \* 60_000;/);
+  });
+});
+
 describe("at capacity says so, instead of blaming the configuration", () => {
   const evo = readCode("src/lib/evolution.ts");
 
   it("the two null causes get two different messages", () => {
-    const at = evo.indexOf("const host = await resolveHost(email, phone);");
+    const at = evo.indexOf("const host = await resolveHost(email, phone, { forPlacement: true });");
     expect(at).toBeGreaterThan(-1);
-    const branch = evo.slice(at, at + 900);
+    const branch = evo.slice(at, at + 1200);
     expect(branch).toMatch(/const configured = await getHosts\(\);/);
     expect(branch).toMatch(/configured\.length/);
     expect(branch).toMatch(/at capacity right now/);
     expect(branch).toMatch(/The WhatsApp connector is not set up yet\./);
+    // ...and the difference is machine-readable now, not merely worded
+    // differently. Three refusals shared one `{ok:false, error}` shape and
+    // could be told apart only by matching English prose, while the owner's
+    // action differs for each: add a host, paste a key, wait for a restart.
+    expect(branch).toMatch(/atCapacity: configured\.length > 0,/);
   });
 
   it("the capacity message is something a TESTER can act on", () => {

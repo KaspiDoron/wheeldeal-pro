@@ -25,7 +25,7 @@ import { routableOrigin } from "./request-origin";
 import { digitsOnly } from "./phone";
 import { boundedSet } from "./bounded-map";
 import { parseDialPrefixes, affinityFor, AFFINITY_MISMATCH } from "./wa/host-region";
-import { placeHost } from "./wa/host-placement";
+import { placeHost, serveHost } from "./wa/host-placement";
 import { isHardSendFailure, isAmbiguousSendFailure } from "./wa/send-classify";
 import { readOrientationFromBase64 } from "./media/orientation";
 import type { InboundImage } from "./media/orientation";
@@ -895,15 +895,47 @@ declare global {
   // eslint-disable-next-line no-var
   var __wd_wa_counts__: { data: Record<string, number>; exp: number } | undefined;
 }
+/**
+ * HOW LONG A PAIRING MAY HOLD A SLOT BEFORE WE STOP COUNTING IT.
+ *
+ * A number mid-pairing has a real socket and a real device registration on the
+ * box, so `status=eq.open` alone under-counts the host by exactly the number of
+ * links in flight - and a link burst is precisely when the cap matters. But a
+ * pairing that was abandoned (the QR expired, the tester wandered off) would
+ * park that slot for ever if it counted unconditionally, so it counts only
+ * while it is plausibly still live. Comfortably longer than PAIRING_TTL_MS and
+ * shorter than a shift.
+ */
+const CONNECTING_SLOT_TTL_MS = 15 * 60_000;
+
 async function hostUserCounts(): Promise<Record<string, number>> {
   const cache = globalThis.__wd_wa_counts__;
   if (cache && cache.exp > Date.now()) return cache.data;
-  const rows = await sbSelect<{ host_url: string | null }>(
-    "wa_sessions",
-    "select=host_url&status=eq.open&limit=50000"
-  );
+  // A PAIRING IN FLIGHT IS A SOCKET ON THE BOX.
+  //
+  // This counted `status=eq.open` only, while `connectInstance` writes
+  // "connecting" with a real host_url (saveSession, below) - so every link in
+  // progress was invisible to the cap, and a simultaneous pairing burst could
+  // over-subscribe a host by exactly the number of people linking at once.
+  // The staleness bound is what keeps an abandoned pairing from parking the
+  // slot for ever; the same `updated_at` filter shape as the idle sweep.
+  const staleBefore = new Date(Date.now() - CONNECTING_SLOT_TTL_MS).toISOString();
+  const [open, connecting] = await Promise.all([
+    sbSelect<{ host_url: string | null }>(
+      "wa_sessions",
+      "select=host_url&status=eq.open&limit=50000"
+    ),
+    sbSelect<{ host_url: string | null }>(
+      "wa_sessions",
+      `select=host_url&status=eq.connecting&updated_at=gte.${encodeURIComponent(
+        staleBefore
+      )}&limit=50000`
+    ),
+  ]);
   const counts: Record<string, number> = {};
-  for (const r of rows) if (r.host_url) counts[r.host_url] = (counts[r.host_url] ?? 0) + 1;
+  for (const r of [...open, ...connecting]) {
+    if (r.host_url) counts[r.host_url] = (counts[r.host_url] ?? 0) + 1;
+  }
   globalThis.__wd_wa_counts__ = { data: counts, exp: Date.now() + 10_000 };
   return counts;
 }
@@ -1021,20 +1053,60 @@ async function noteHostGeoMismatch(email: string, hostUrl: string, digits: strin
   }
 }
 
-async function resolveHost(email: string, phoneHint?: string | null): Promise<Host | null> {
+/**
+ * WHICH HOST IS THIS USER ON - and, on exactly one call site, may we place them?
+ *
+ * THE DISTINCTION IS STRUCTURAL, NOT CONDITIONAL. A capacity refusal returned
+ * from here is a `null`, and `evo()` turns a null host into
+ * `{ok:false, status:0}` - which the send path deliberately classifies as a
+ * SOFT, ambiguous transport failure. `evo()` is the shared caller behind
+ * fifteen endpoints: sending, media download, connection state, mark-read. So a
+ * refusal on that path is not a refusal, it is a fleet-wide WhatsApp outage
+ * wearing the costume of a network blip, and no amount of care inside the
+ * placement rule can make that safe.
+ *
+ * `forPlacement` is therefore the whole design. Only `connectInstance` - the
+ * single link entry point, and the only caller that passes a phone - asks "may
+ * this user be PLACED". Everyone else is asking "where is this user already",
+ * and can never receive a capacity answer at all.
+ */
+async function resolveHost(
+  email: string,
+  phoneHint?: string | null,
+  opts?: { forPlacement?: boolean }
+): Promise<Host | null> {
   const hosts = await getHosts();
   if (hosts.length === 0) return null;
+  const forPlacement = opts?.forPlacement === true;
 
   // ALREADY PLACED USERS COME FIRST, AND THE CAP DOES NOT APPLY TO THEM.
   //
   // Read before anything else, because it is the answer on every call except a
   // link: the cap governs PLACEMENT, and evicting a user who is already on a
   // full host would break sends for someone who is not the problem.
-  const rows = await sbSelect<{ host_url: string | null }>(
+  // ...AND "WE COULD NOT READ THE ROW" IS NOT "THEY HAVE NEVER LINKED".
+  //
+  // This used the permissive `sbSelect`, which has NO rejection path at all -
+  // no connection, any non-2xx and a parse throw all return []. So one Supabase
+  // wobble made `stored` undefined, which is indistinguishable from an
+  // unplaced user, and the occupant exemption above silently stopped applying:
+  // on a full fleet, `placeHost` returned null for someone whose only problem
+  // was that we could not read a row. This file's own doctrine says a safety
+  // gate reads strict and branches on the error (runtime-config), and its
+  // neighbours already do - `storedStatus` returns "unknown", `hasSessionRow`
+  // returns true on unavailable.
+  const storedRes = await sbSelectStrict<{ host_url: string | null }>(
     "wa_sessions",
     `select=host_url&email=eq.${encodeURIComponent(email.toLowerCase())}&limit=1`
   );
-  const stored = rows[0]?.host_url;
+  const storedUnreadable = !("rows" in storedRes) && storedRes.error === "unavailable";
+  const stored = "rows" in storedRes ? storedRes.rows[0]?.host_url : undefined;
+  // AN UNREADABLE ROW MAY NEVER PRODUCE A REFUSAL. On a serve call we still owe
+  // this user a host, and with a single configured host that host is the only
+  // answer that can be right. On a PLACEMENT call we fall through to the normal
+  // rule, because placing someone we cannot verify is the one case where
+  // guessing is worse than saying no.
+  if (storedUnreadable && !forPlacement && hosts.length === 1) return hosts[0];
 
   // THE PLACEMENT DECISION ITSELF LIVES IN `wa/host-placement`, as a pure
   // function. It has produced three separate defects - the single-host cap
@@ -1069,6 +1141,18 @@ async function resolveHost(email: string, phoneHint?: string | null): Promise<Ho
   if (chosen && digits && affinityFor(chosen, digits) === AFFINITY_MISMATCH) {
     void noteHostGeoMismatch(email, chosen.url, digits);
   }
+  // THE REFUSAL ONLY EXISTS ON THE LINK PATH.
+  //
+  // `placeHost` returns null for exactly one reason a serve call cares about:
+  // the fleet is at capacity for a user it does not recognise as an occupant.
+  // That is a real answer to "may we place them" and a catastrophic one to
+  // "where are they" - the caller behind it might be a send, a media download
+  // or a connection-state read, and a null there reads downstream as an
+  // ambiguous transport failure rather than as a cap. So a serve call that
+  // lands here takes the host anyway: the stored one when we know it, else the
+  // single configured host, else the least-loaded. Capacity governs who JOINS
+  // the fleet; it has never governed who may be spoken to.
+  if (!chosen && !forPlacement) return serveHost<Host>({ hosts, stored, counts });
   // Reserve a slot immediately so concurrent new users spread out instead of
   // stampeding onto the same emptiest host before the DB count catches up.
   if (chosen && chosen.url !== stored) bumpHostCount(chosen.url);
@@ -1647,6 +1731,12 @@ export async function connectInstance(
   /** True when the Evolution host itself is down/restarting (crash-loop, not a
    *  user problem) - the client shows an honest "server restarting" state. */
   hostDown?: boolean;
+  /** THE FLEET IS FULL - a capacity refusal, not a fault. Distinguished from
+   *  "the connector is not set up" and from `hostDown`, both of which sat in
+   *  the same `{ok:false, error}` shape and could only be told apart by
+   *  string-matching the prose. The owner's action differs for each: add a
+   *  host, paste a key, or wait for a restart. */
+  atCapacity?: boolean;
   error?: string;
 }> {
   const instance = instanceNameFor(email);
@@ -1654,7 +1744,10 @@ export async function connectInstance(
   // else in practice (every later call finds `host_url` stored), so this is
   // the only site where passing the phone changes which box a user lands on -
   // and therefore whether their number transmits from its own region.
-  const host = await resolveHost(email, phone);
+  // THE ONE CALL THAT MAY BE REFUSED. Every other caller of resolveHost is
+  // asking where this user already is; this one is asking to place them, and
+  // is the only site that passes `forPlacement`.
+  const host = await resolveHost(email, phone, { forPlacement: true });
   if (!host) {
     // TWO DIFFERENT FACTS, ONE SENTENCE. resolveHost returns null both when no
     // Evolution host is configured AT ALL and when every configured host is at
@@ -1666,6 +1759,10 @@ export async function connectInstance(
     const configured = await getHosts();
     return {
       ok: false,
+      // ...and the two facts are now machine-readable, not merely differently
+      // worded. A caller that wants to page the owner on "the beta is full"
+      // must not have to regex an English sentence to find out.
+      atCapacity: configured.length > 0,
       error: configured.length
         ? "WhatsApp linking is at capacity right now - every connection slot is in use. Try again shortly, or ask the owner to add a host."
         : "The WhatsApp connector is not set up yet.",

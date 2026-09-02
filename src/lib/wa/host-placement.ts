@@ -20,6 +20,46 @@ import { rankHostsForNumber, type RegionalHost } from "./host-region";
 // All three are shape errors in a decision tree. They are cheap to see when the
 // tree is a pure function and invisible when it is spread through a closure.
 
+/**
+ * WHICH HOST TO TALK TO A USER ON, when we are not placing them.
+ *
+ * THE PEER OF `placeHost`, AND THE REASON THE CAP IS SAFE. `placeHost` answers
+ * "may this user JOIN the fleet" and returns null for a real capacity refusal.
+ * That null is catastrophic on any other question: `resolveHost` fronts
+ * `evo()`, which fronts fifteen endpoints - sending, media download,
+ * connection state, mark-read - and a null there surfaces as
+ * `{ok:false, status:0}`, which the send path deliberately treats as an
+ * AMBIGUOUS transport failure. So a capacity refusal on a serve call is not a
+ * refusal, it is a fleet-wide outage wearing the costume of a network blip.
+ *
+ * Hence: capacity governs who JOINS, never who may be spoken to. This function
+ * always returns a host when one is configured. It is pure and lives beside the
+ * placement rule for the same reason that one was extracted - a decision tree
+ * inside a closure that needs Supabase, the key vault and live health probes is
+ * a decision tree nothing can test, and this file's header already records
+ * three defects that shape produced.
+ */
+export function serveHost<H extends RegionalHost = RegionalHost>(input: {
+  hosts: H[];
+  /** The host this user is already on, from wa_sessions - the best answer. */
+  stored?: string | null;
+  /** Paired users per host url, for the least-loaded fallback. */
+  counts: Record<string, number>;
+}): H | null {
+  const { hosts, stored, counts } = input;
+  if (hosts.length === 0) return null;
+  // The stored host is the truth whenever we have it: it is where this user's
+  // socket and device registration actually are, cap and health irrelevant.
+  if (stored) {
+    const own = hosts.find((h) => h.url === stored);
+    if (own) return own;
+  }
+  // One host is the only answer that can be right.
+  if (hosts.length === 1) return hosts[0];
+  // Otherwise the least-loaded, which is where a new session would have gone.
+  return [...hosts].sort((a, b) => (counts[a.url] ?? 0) - (counts[b.url] ?? 0))[0] ?? null;
+}
+
 export interface PlacementInput<H extends RegionalHost = RegionalHost> {
   /** Every configured host, in EVOLUTION_HOSTS order. */
   hosts: H[];

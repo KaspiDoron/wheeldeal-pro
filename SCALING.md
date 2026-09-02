@@ -83,6 +83,16 @@ field is region-neutral, which is what every line meant before this existed.
   It used to do the latter (`underCap.length ? underCap : pickFrom`), which
   meant the cap did nothing at the exact moment it mattered: with a single
   configured host, every tester landed on one box regardless.
+- **The refusal exists on the LINK path and nowhere else.** `resolveHost` is
+  also what every send, media download, connection-state read and mark-read
+  resolves through (`evo()` alone fronts fifteen endpoints), and a capacity
+  `null` there surfaces as `{ok:false, status:0}` - which the send path treats
+  as an ambiguous TRANSPORT failure. So a refusal on that path would not be a
+  refusal, it would be a fleet-wide WhatsApp outage wearing the costume of a
+  network blip. Only `connectInstance` passes `forPlacement`; every other
+  caller is asking "which host is this user already on" and always gets an
+  answer (`serveHost`, in `wa/host-placement`). Capacity governs who JOINS the
+  fleet; it has never governed who may be spoken to.
 - **Memory is the real ceiling, and 40 was over it.** Evolution's own
   documented production floor is 2 vCPU / 2 GB. A 512 MB Render `starter` -
   what `render.yaml` ships - holds roughly 30-50 sockets, and

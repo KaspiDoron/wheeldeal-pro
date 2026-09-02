@@ -195,11 +195,19 @@ describe("the fleet actually routes on it", () => {
   });
 
   it("the number reaches placement from the one caller that has it", () => {
-    expect(evo).toMatch(/async function resolveHost\(email: string, phoneHint\?: string \| null\)/);
-    // connectInstance is where a user is actually placed.
+    expect(evo).toMatch(/async function resolveHost\(\s*email: string,\s*phoneHint\?: string \| null,/);
+    // connectInstance is where a user is actually placed - and it is the ONE
+    // caller allowed to receive a capacity refusal, so it is the one that
+    // passes `forPlacement`. Every other caller is asking where the user
+    // already is, and a null there would be a fleet-wide outage rather than a
+    // cap (evo() alone fronts fifteen endpoints).
     const at = evo.indexOf("export async function connectInstance(");
     expect(at).toBeGreaterThan(-1);
-    expect(evo.slice(at, at + 1800)).toMatch(/resolveHost\(email, phone\)/);
+    expect(evo.slice(at, at + 2400)).toMatch(
+      /resolveHost\(email, phone, \{ forPlacement: true \}\)/
+    );
+    // ...and nowhere else asks for placement.
+    expect(evo.match(/forPlacement: true/g)?.length).toBe(1);
     // ...and a placement with no hint still resolves the stored number rather
     // than silently ranking everything neutral.
     expect(evo).toMatch(/digitsOnly\(phoneHint \?\? ""\) \|\| \(await linkedNumberFor\(email\)\)/);
