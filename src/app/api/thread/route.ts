@@ -76,7 +76,7 @@ export async function GET(req: Request) {
         note: "Your agent has not messaged this shop yet.",
       });
     const digits = sent.to_number;
-    const [outs, ins, recip] = await Promise.all([
+    const [outs, ins, recip, replyFacts] = await Promise.all([
       sbSelect<{ id: number; body: string; received_at: string; raw: { englishGloss?: string; kind?: string } | null }>(
         "whatsapp_messages",
         // Number matching is TOLERANT on every side of the transcript: outbound
@@ -104,6 +104,8 @@ export async function GET(req: Request) {
           contact?: { name?: string | null; digits?: string | null };
           product?: import("@/lib/wa/message-text").WaProductCard;
           quoted?: { text?: string | null };
+          transcript?: { text?: string | null };
+          forwarded?: { score?: number };
         } | null;
       }>(
         "whatsapp_messages",
@@ -130,7 +132,38 @@ export async function GET(req: Request) {
           session.email
         )}&limit=1${numberFilter("to_number", digits)}`
       ).catch(() => []),
+      // WHAT THE AGENT UNDERSTOOD IN A TEXT-ONLY REPLY.
+      //
+      // The single biggest untapped asset on this surface. `vendor_replies`
+      // has stored per-reply found / price_per_day / matches_spec / confidence
+      // since the schema shipped, and NOTHING ever joined it back to a
+      // transcript row - so a photo got an "Agentic summary" panel and the
+      // sentence "300 baht per day, 3 days minimum" got nothing at all, even
+      // though the app had read it, priced it and acted on it. Same read
+      // window as the transcript; joined on the reply text the loop stored.
+      sbSelect<{
+        reply_text: string | null;
+        found: boolean | null;
+        price_per_day: number | null;
+        matches_spec: boolean | null;
+        confidence: string | null;
+        currency: string | null;
+        created_at: string;
+      }>(
+        "vendor_replies",
+        `select=reply_text,found,price_per_day,matches_spec,confidence,currency,created_at&user_email=eq.${encodeURIComponent(
+          session.email
+        )}&vendor_id=eq.${encodeURIComponent(vendorId)}&order=created_at.desc&limit=60`
+      ).catch(() => []),
     ]);
+    // Keyed on the stored reply text - the loop writes `text.slice(0, 4000)`,
+    // so the transcript row's own body is the join key. Newest wins: a shop
+    // that repeats itself gets the most recent reading.
+    const factsByText = new Map<string, (typeof replyFacts)[number]>();
+    for (const f of replyFacts) {
+      const k = (f.reply_text ?? "").trim();
+      if (k && !factsByText.has(k)) factsByText.set(k, f);
+    }
     const messages = [
       ...outs.map((m) => ({
         id: `o${m.id}`,
@@ -168,6 +201,32 @@ export async function GET(req: Request) {
         // message the media arrived on (lib/media/reading), so the transcript
         // can prove the understanding instead of asserting it.
         reading: m.raw?.reading,
+        // The spoken words of a voice note. Stamped at ingest and selected by
+        // nobody: the traveller only ever saw it because the BODY had been
+        // rewritten to "(voice note) <spoken>", so a panel could not show what
+        // was heard as a distinct thing from what was typed.
+        transcript: m.raw?.transcript?.text ?? undefined,
+        // THIS WAS FORWARDED. A shop passing on a competitor's price board is
+        // not quoting us, and the traveller is owed that distinction before
+        // they read the number as this shop's own.
+        forwarded: m.raw?.forwarded ? true : undefined,
+        // WHAT THE AGENT UNDERSTOOD IN A TEXT-ONLY REPLY - the vendor_replies
+        // facts, finally joined. Only attached when there is no media reading
+        // on the row: a photo's own reading is richer and must not be
+        // second-guessed by the text pass beside it.
+        replyRead: m.raw?.reading
+          ? undefined
+          : (() => {
+              const f = factsByText.get((m.body ?? "").trim());
+              if (!f) return undefined;
+              return {
+                found: f.found ?? undefined,
+                pricePerDay: f.price_per_day ?? undefined,
+                currency: f.currency ?? undefined,
+                matchesSpec: f.matches_spec ?? undefined,
+                confidence: f.confidence ?? undefined,
+              };
+            })(),
       })),
     ]
       .sort((a, b) => Date.parse(a.at) - Date.parse(b.at))

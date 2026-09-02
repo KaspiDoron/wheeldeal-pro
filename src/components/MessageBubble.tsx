@@ -52,6 +52,77 @@ export interface ThreadMsg {
   };
   /** What this message replied to ("^ This one is 125 cc" needs its referent). */
   quoted?: string;
+  /**
+   * The spoken words of a voice note.
+   *
+   * Stamped at ingest and selected by nobody: the traveller only ever saw it
+   * because the BODY had been rewritten to "(voice note) <spoken>", so there
+   * was no way to show what was HEARD as a distinct thing from what was typed.
+   */
+  transcript?: string;
+  /**
+   * THE SHOP FORWARDED THIS. A competitor's price board passed on is not this
+   * shop quoting us, and the traveller is owed that distinction before they
+   * read the number as this shop's own.
+   */
+  forwarded?: boolean;
+  /**
+   * WHAT THE AGENT UNDERSTOOD IN A TEXT-ONLY REPLY.
+   *
+   * `vendor_replies` has stored found / price_per_day / matches_spec /
+   * confidence per reply since the schema shipped, and nothing joined it back
+   * to a transcript row - so a photo got an understanding panel and the
+   * sentence "300 baht per day, 3 days minimum" got nothing, even though the
+   * app had read it, priced it and acted on it.
+   */
+  replyRead?: {
+    found?: boolean;
+    pricePerDay?: number;
+    currency?: string;
+    matchesSpec?: boolean;
+    confidence?: string;
+  };
+}
+
+/**
+ * WHAT THE AGENT UNDERSTOOD IN A MESSAGE WITH NO PHOTO.
+ *
+ * A photo has had an "Agentic summary" panel under it since owner report 5.
+ * The sentence "300 baht per day, 3 days minimum" - which the app read, priced
+ * and acted on - had NOTHING, because the annotation gate required `m.media`.
+ * Same evidence-not-assertion discipline as the photo panel: it prints the
+ * stored facts and nothing else, and it renders at all only when facts exist.
+ */
+function TextRead({ read }: { read: NonNullable<ThreadMsg["replyRead"]> }) {
+  const { t } = useI18n();
+  const price =
+    typeof read.pricePerDay === "number" && read.pricePerDay > 0
+      ? `${read.currency ? `${read.currency} ` : ""}${read.pricePerDay}`
+      : null;
+  // Nothing to show is not a panel. A box saying "we understood nothing" over a
+  // reply we simply never priced would be a claim we cannot support.
+  if (!price && read.found !== true && read.matchesSpec == null) return null;
+  return (
+    <div className="mt-1 rounded-xl bg-black/10 px-2 py-1.5">
+      <div className="text-[9px] font-extrabold uppercase tracking-wide opacity-70">
+        🧠 {t("What your agent read here")}
+      </div>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] font-bold">
+        {price && (
+          <span className="break-words">
+            {t("Price")}: {price}/{t("day")}
+          </span>
+        )}
+        {read.matchesSpec === false && (
+          <span className="opacity-90">{t("Not the vehicle you asked for")}</span>
+        )}
+        {read.matchesSpec === true && <span className="opacity-90">{t("Matches your spec")}</span>}
+        {!price && read.found === true && (
+          <span className="opacity-90">{t("They have one - no price yet")}</span>
+        )}
+      </div>
+    </div>
+  );
 }
 
 const clock = (iso: string) =>
@@ -167,11 +238,17 @@ export function MessageBubble({ m }: { m: ThreadMsg }) {
     <div className={`flex ${out ? "justify-end" : "justify-start"}`}>
       <div
         className={`max-w-[85%] rounded-2xl px-3 py-2 text-[12px] font-semibold leading-snug ${
+          // LOGICAL CORNERS, NOT PHYSICAL ONES. The tail marks the side the
+          // message came FROM, and the row that positions it is already
+          // logical (`justify-end` flips under `dir="rtl"`). A physical
+          // `rounded-br`/`rounded-bl` does not, so in Arabic and Hebrew every
+          // bubble grew its tail on the wrong side - pointing away from the
+          // speaker in the two languages where it matters most.
           out
             ? m.kind === "human-manual"
-              ? "rounded-br-md bg-savings text-white"
-              : "rounded-br-md bg-brandblue text-white"
-            : "rounded-bl-md bg-card text-strong"
+              ? "rounded-ee-md bg-savings text-white"
+              : "rounded-ee-md bg-brandblue text-white"
+            : "rounded-es-md bg-card text-strong"
         }`}
       >
         {m.kind === "human-manual" && (
@@ -209,7 +286,7 @@ export function MessageBubble({ m }: { m: ThreadMsg }) {
           </a>
         )}
         {m.contact && (m.contact.name || m.contact.digits) && (
-          <div className="mt-1 rounded-xl bg-black/10 px-2 py-1.5 text-[11px] font-bold">
+          <div className="mt-1 rounded-xl bg-black/10 px-2 py-1.5 text-[11px] font-bold break-words">
             👤 {m.contact.name || t("Contact")}
             {m.contact.digits ? ` · +${m.contact.digits}` : ""}
           </div>
@@ -219,7 +296,7 @@ export function MessageBubble({ m }: { m: ThreadMsg }) {
             <div className="text-[9px] font-extrabold uppercase tracking-wide opacity-70">
               🛍️ {t("From the shop's catalog")}
             </div>
-            <div className="text-[12px] font-extrabold">{m.product.title}</div>
+            <div className="text-[12px] font-extrabold break-words">{m.product.title}</div>
             {m.product.price != null && (
               <div className="text-[11px] font-bold opacity-90">
                 {m.product.currency ? `${m.product.currency} ` : ""}
@@ -227,15 +304,39 @@ export function MessageBubble({ m }: { m: ThreadMsg }) {
               </div>
             )}
             {m.product.description && (
-              <div className="text-[10px] font-normal opacity-80">{m.product.description}</div>
+              <div className="text-[10px] font-normal opacity-80 break-words">
+                {m.product.description}
+              </div>
             )}
           </div>
         )}
         {m.quoted && (
-          <div className="mt-1 rounded-lg border-l-2 border-white/40 bg-black/10 px-2 py-1 text-[10px] font-normal opacity-85">
+          <div className="mt-1 rounded-lg border-l-2 border-white/40 bg-black/10 px-2 py-1 text-[10px] font-normal opacity-85 break-words">
             {m.quoted}
           </div>
         )}
+        {/* WHAT WE HEARD, as its own thing. The transcript is stamped at ingest
+            and was selected by nobody: the traveller only ever saw it because
+            the body had been rewritten to "(voice note) <spoken>". */}
+        {m.transcript && (
+          <div className="mt-1 rounded-xl bg-black/10 px-2 py-1.5">
+            <div className="text-[9px] font-extrabold uppercase tracking-wide opacity-70">
+              🎧 {t("What your agent heard")}
+            </div>
+            <p className="whitespace-pre-wrap break-words text-[11px] font-normal opacity-90">
+              {m.transcript}
+            </p>
+          </div>
+        )}
+        {/* THIS IS NOT THIS SHOP'S PRICE. A forwarded competitor board read as
+            an own quote is the same class of error as an ungrounded price, and
+            the traveller is owed the distinction before they act on the number. */}
+        {m.forwarded && (
+          <div className="mt-1 rounded-xl bg-black/10 px-2 py-1 text-[10px] font-bold opacity-85">
+            ↪️ {t("Forwarded - this may be another shop's price, not theirs")}
+          </div>
+        )}
+        {m.replyRead && <TextRead read={m.replyRead} />}
         {showText ? (
           <div className={`whitespace-pre-wrap break-words ${m.media ? "mt-1" : ""}`}>
             <WaText text={displayText} />
