@@ -66,6 +66,15 @@ export function HealthPanel() {
   // W9: retention is a nightly database job the app cannot see directly -
   // pg_cron degrades to a NOTICE nobody reads when the extension is missing,
   // so this tile reads the heartbeat row prune_old_rows writes on every run.
+  // The semantic corpus (docs/VECTOR-SPEC.md phase 1). Its state is the ONLY
+  // way to answer "is it filling?", and that answer is what gates whether the
+  // readers may be built at all - so it needs a tile, not just an API field.
+  const [corpus, setCorpus] = useState<{
+    state: "ready" | "missing" | "unavailable";
+    queued: number | null;
+    neural: number | null;
+    lexical: number | null;
+  } | null>(null);
   const [retention, setRetention] = useState<{
     lastRanAt: string | null;
     unreadable: boolean;
@@ -99,6 +108,7 @@ export function HealthPanel() {
       setWebhookSilent(Boolean(d.webhookSilent));
       setWebhookLastAt(typeof d.webhookLastAcceptedAt === "string" ? d.webhookLastAcceptedAt : null);
       setRetention(d.retention ?? null);
+      setCorpus(d.corpus ?? null);
       setVitals(
         d.heartbeat
           ? {
@@ -249,6 +259,13 @@ export function HealthPanel() {
                 .filter(
                   ([k]) => !(k === "inbound-dropped" && inboundDrops && !inboundDrops.unreadable)
                 )
+                // corpus-gate-missing is NOT a send guardrail. It is a feature
+                // that has not been switched on, and it has its own tile below.
+                // Leaving it in this strip put a benign, expected, permanent
+                // state next to counters that mean "messages are being
+                // dropped" - which is how an owner learns to ignore the strip,
+                // the exact failure the adjacent tiles exist to prevent.
+                .filter(([k]) => k !== "corpus-gate-missing")
                 .map(([k, n]) => (
                   <span
                     key={k}
@@ -363,6 +380,57 @@ export function HealthPanel() {
                   {retention.notInstalled
                     ? "The app tried to run the prune itself and Supabase answered 404 - the function has never been created. Run supabase/retention.sql once in the Supabase SQL editor; the app takes it from there hourly, so pg_cron is optional."
                     : "Run supabase/retention.sql once (it also revokes anon access to the prune function). After that the app runs the prune itself from the cron ping - until it runs, transcripts and events grow without bound and the privacy policy's retention promise is not being kept."}
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* THE SEMANTIC CORPUS (docs/VECTOR-SPEC.md phase 1). Shipped with no
+              reader on purpose, so this tile is the only way to see whether it
+              is filling - and that is exactly what decides whether phase 2 is
+              worth building. NOT RED when it is off: pgvector is optional, and
+              a permanently-red tile for a feature nobody enabled is noise. */}
+          {corpus && (
+            <div
+              className={`rounded-2xl border-2 p-2.5 text-[11px] font-bold ${
+                corpus.state === "ready"
+                  ? "border-savings bg-savings-soft text-savings"
+                  : corpus.state === "unavailable"
+                    ? "border-brandred bg-brandred-soft text-brandred"
+                    : "border-line bg-card2 text-soft"
+              }`}
+            >
+              <div className="font-extrabold">
+                Semantic corpus:{" "}
+                {corpus.state === "unavailable"
+                  ? "UNKNOWN - Supabase did not answer"
+                  : corpus.state === "missing"
+                    ? "OFF - pgvector is not enabled"
+                    : corpus.queued === null
+                      ? "on, but the counts could not be read"
+                      : `${corpus.neural ?? 0} embedded, ${corpus.queued} queued`}
+              </div>
+              {corpus.state === "ready" && corpus.queued !== null && (
+                <p className="mt-1 font-normal leading-snug">
+                  {(corpus.lexical ?? 0) > 0
+                    ? `${corpus.lexical} of those used the keyless fallback vector - check GEMINI_TOKEN if that number is the one growing. `
+                    : ""}
+                  A healthy corpus has &quot;queued&quot; rising as shops reply and falling every
+                  five minutes as the cron embeds them.
+                </p>
+              )}
+              {corpus.state === "missing" && (
+                <p className="mt-1 font-normal leading-snug">
+                  Optional, and safe to leave off - everything behaves exactly as it does today.
+                  To switch it on: Supabase -&gt; Database -&gt; Extensions -&gt; enable
+                  &quot;vector&quot;, then re-run supabase/schema.sql. It starts within a minute,
+                  with no redeploy.
+                </p>
+              )}
+              {corpus.state === "unavailable" && (
+                <p className="mt-1 font-normal leading-snug">
+                  An outage is not a migration signal - this says the probe could not reach the
+                  database, not that the corpus is missing. It will answer again on its own.
                 </p>
               )}
             </div>

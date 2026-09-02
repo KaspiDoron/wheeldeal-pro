@@ -20,7 +20,37 @@ registry entry; the guarded 180-day delete in `prune_old_rows`; the governed
 `gemini_embed` counters; the stage-A hook in `spte/live.ts`; the backfill tick
 on `/api/wa/ping`; and the corpus tile on `/api/admin/health`.
 
-**Not shipped, on purpose:** every reader. No coaching re-ranking, no question
+**Phase 2 shipped (the first reader): semantic coaching selection.**
+`lib/corpus/retrieve.ts` holds the invariant - `rankBySimilarity` returns a
+SUBSEQUENCE of its input by object identity, so retrieval cannot introduce a
+candidate; an unscored row is kept, never refused; and a null, NaN-bearing or
+wrong-width query ranks nothing rather than ordering by garbage. `loadCoaching`
+now caches the four PostgREST reads and ranks per turn against the shop's own
+words (its English gloss where one exists), so the same pool produces a
+different block for a stock question than for a price-board photo - where
+recency gave both turns the same five lines.
+
+Two decisions inside it worth stating:
+
+- **It uses the FREE lexical vector.** Both sides are embedded in-process at
+  ranking time, so they are in one space by construction, the corpus is not
+  read at all, and the reply path gains no round trip and spends none of the
+  traveller's AI allowance. The 33% governed-call increase the owner approved
+  is therefore still UNSPENT - it buys the neural query, which belongs with the
+  reader that needs cross-thread recall rather than this one.
+- **Ranked exemplars are number-stripped** (9.2), and the owner's LESSONS are
+  not - a lesson like "a 7-day quote is not a daily rate" is about the figure.
+
+**Still not shipped, on purpose:** the other two readers.
+
+**Question suppression** and **rival narrowing** are deferred with reasons
+rather than forgotten. Suppression overlaps the repetition guard that already
+ships and whose units bug was only just fixed - stacking a second suppressor on
+top before the first has been watched in production is how a silence nobody
+ordered gets built. Rival narrowing is the worst risk/reward on the list: a
+false positive DROPS a real rival, which costs the traveller money, and the
+deterministic declined / out-of-stock eviction already covers the cases that
+were actually observed. No coaching re-ranking, no question
 suppression, no rival narrowing, no prompt change, no live embed in the
 comprehension fan-out, and no KNN database function. Nothing in phase 1 can
 alter a single outbound message, which is what makes "verified before retrieval"

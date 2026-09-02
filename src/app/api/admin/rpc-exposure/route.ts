@@ -75,9 +75,28 @@ export async function GET() {
         detail:
           "ANYONE HOLDING THE PUBLIC ANON KEY CAN CALL prune_old_rows AND DELETE YOUR HISTORY. Open the Supabase SQL editor and run supabase/retention.sql (or supabase/security-fix.sql for the one-line repair) now.",
       };
-    } else if ([401, 403, 404].includes(res.status)) {
-      // 401/403 = permission refused, 404 = PostgREST will not even name a
-      // function this role cannot execute. Both mean the anon key is locked out.
+    } else if (res.status === 401) {
+      // 401 IS NOT A REFUSAL, IT IS A REJECTED KEY - and reading it as "locked"
+      // was this probe manufacturing the exact reassurance it exists to refuse.
+      //
+      // PostgREST answers 401 when the apikey is missing, malformed, revoked or
+      // from a DIFFERENT project: the request never reached a permission
+      // decision, so it says nothing whatever about whether the grant on
+      // prune_old_rows was revoked. A database with the hole WIDE OPEN answers
+      // 401 to a bad key exactly as a locked one does. The tables probe below
+      // already called the same status "unknown"; the two cannot both be right.
+      //
+      // 403 is the real refusal (authenticated, then denied), and 404 is
+      // PostgREST declining to name a function this role cannot execute - and a
+      // bad key could never reach either, because it would have 401'd first.
+      rpc = {
+        state: "unknown",
+        detail:
+          "The anon key was REJECTED outright (401), so this proves nothing about the grant - a wide-open database answers a bad key the same way. Set NEXT_PUBLIC_SUPABASE_ANON_KEY to the current publishable key for THIS project and re-check.",
+      };
+    } else if ([403, 404].includes(res.status)) {
+      // 403 = authenticated and then denied; 404 = PostgREST will not even name
+      // a function this role cannot execute. Both are real refusals.
       rpc = {
         state: "locked",
         detail: `The anon key cannot call prune_old_rows (Supabase answered ${res.status}).`,
@@ -108,7 +127,10 @@ export async function GET() {
       tables = {
         state: "unknown",
         exposed: [],
-        detail: `The anon key could not list the API schema (Supabase answered ${res.status}).`,
+        detail:
+          res.status === 401
+            ? "The anon key was REJECTED outright (401) - it is missing, revoked, or from another project, so nothing here was measured. Set NEXT_PUBLIC_SUPABASE_ANON_KEY and re-check."
+            : `The anon key could not list the API schema (Supabase answered ${res.status}).`,
       };
     } else {
       const doc = (await res.json().catch(() => null)) as {
