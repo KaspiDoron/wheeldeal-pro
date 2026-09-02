@@ -149,6 +149,11 @@ export function persistableDigest(d: ThreadDigest): Partial<ThreadDigest> {
     facts: d.facts.slice(-MAX_FACTS),
     ...(typeof d.quotedPricePerDay === "number" ? { quotedPricePerDay: d.quotedPricePerDay } : {}),
     round: d.round,
+    // The concession ladder's memory. Durable or the ladder restarts at round 0
+    // every turn, which is exactly the flat-percentage behaviour it replaces.
+    ...(typeof d.lastAskPerDay === "number" && d.lastAskPerDay > 0
+      ? { lastAskPerDay: d.lastAskPerDay }
+      : {}),
     ...(d.tone ? { tone: d.tone } : {}),
     ...(d.confirmAsked?.length ? { confirmAsked: d.confirmAsked } : {}),
     ...(d.awaitingConfirmation ? { awaitingConfirmation: d.awaitingConfirmation } : {}),
@@ -243,6 +248,8 @@ export function digestFromStored(stored: unknown): ThreadDigest {
         ? s.quotedPricePerDay
         : undefined,
     round: typeof s.round === "number" && s.round >= 0 ? s.round : 0,
+    lastAskPerDay:
+      typeof s.lastAskPerDay === "number" && s.lastAskPerDay > 0 ? s.lastAskPerDay : undefined,
     tone: s.tone,
     confirmAsked: Array.isArray(s.confirmAsked)
       ? (s.confirmAsked.filter((x) => typeof x === "string") as ConfirmSubject[])

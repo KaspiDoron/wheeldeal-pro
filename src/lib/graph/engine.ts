@@ -1691,6 +1691,7 @@ export function liveGraphIO(send: LiveSend): GraphIO {
           depositType?: string;
           depositNote?: string;
           fulfillment?: string;
+          firmCount?: number;
           digest?: { firmCount?: number };
         };
         // SAME VEHICLE OR IT IS NOT A RIVAL - for THREAD rows too. The offers
@@ -1716,7 +1717,25 @@ export function liveGraphIO(send: LiveSend): GraphIO {
           // sibling re-bargain needs the number to build a thread key, and the
           // firm ladder to know which shops have already refused twice.
           toNumber: t.to_number ?? undefined,
-          firmCount: typeof fx.digest?.firmCount === "number" ? fx.digest.firmCount : undefined,
+          // THE FIRM LADDER, READ FROM WHERE IT IS ACTUALLY WRITTEN.
+          //
+          // This read `fields.digest.firmCount`, and firmCount is NOT a
+          // persisted digest field - `persistableDigest` deliberately omits it
+          // because it is projected per turn from the durable comprehension.
+          // Both engines write the durable copy to `fields.firmCount`
+          // (graph/state.ts applyExtractionToState, spte/live.ts
+          // persistThreadOutcome). So this was undefined on every row ever
+          // built, and `planSiblingRebargain`'s "a shop that has said last
+          // price twice has answered" guard could never fire: the swarm would
+          // re-open a conversation the shop had closed, which is precisely the
+          // promise this app makes. The digest path is kept as a fallback for
+          // any row that does carry it.
+          firmCount:
+            typeof fx.firmCount === "number"
+              ? fx.firmCount
+              : typeof fx.digest?.firmCount === "number"
+                ? fx.digest.firmCount
+                : undefined,
         });
       }
       for (const o of offers) {

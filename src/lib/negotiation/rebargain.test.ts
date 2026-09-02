@@ -302,6 +302,44 @@ describe("sessionTable -> planSiblingRebargain, executed end to end", () => {
     ).toEqual([]);
   });
 
+  it("READS THE FIRM COUNT FROM WHERE THE ENGINES WRITE IT: fields.firmCount", async () => {
+    // The two cases above seed `fields.digest.firmCount` - a shape NOTHING in
+    // the app produces. `persistableDigest` deliberately omits firmCount (it is
+    // projected per turn from the durable comprehension), and both engines
+    // write the durable copy to `fields.firmCount`: graph/state.ts
+    // applyExtractionToState and spte/live.ts persistThreadOutcome. So the
+    // projection read undefined on every row ever built, and the planner's "a
+    // shop that has said last price twice has answered" guard could never fire.
+    // The swarm would re-open a conversation the shop had closed - the one
+    // thing this app promises it will not do.
+    seed({ fulfillment: "pickup", firmCount: 2 });
+    const rows = await io.sessionTable("t@example.com", "cheapest", "motorbike-125");
+    expect(rows.find((r) => r.vendorId === "dearer")?.firmCount).toBe(2);
+
+    expect(
+      planSiblingRebargain({
+        rows,
+        excludeVendorId: "cheapest",
+        newLowPerDay: 200,
+        currency: "THB",
+      })
+    ).toEqual([]);
+  });
+
+  it("a shop that has held firm ONCE is still re-bargainable from fields.firmCount", async () => {
+    seed({ fulfillment: "pickup", firmCount: 1 });
+    const rows = await io.sessionTable("t@example.com", "cheapest", "motorbike-125");
+    expect(rows.find((r) => r.vendorId === "dearer")?.firmCount).toBe(1);
+    expect(
+      planSiblingRebargain({
+        rows,
+        excludeVendorId: "cheapest",
+        newLowPerDay: 200,
+        currency: "THB",
+      }).map((t) => t.vendorId)
+    ).toEqual(["dearer"]);
+  });
+
   it("a PRICED thread row keeps winning - the offers branch never runs for it", async () => {
     // Guards the fix from the opposite direction: the thread row already
     // carries both fields, and short-circuiting must not change.

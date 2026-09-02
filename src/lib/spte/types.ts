@@ -257,6 +257,25 @@ export interface ThreadDigest {
    */
   alternativeOffer?: import("../vehicle/substitution").AlternativeOffer | null;
   round: number;
+  /**
+   * THE NUMBER WE LAST ASKED THIS SHOP FOR - measured on the wire, not asserted.
+   *
+   * The live engine's ask was `Math.round(quoteNow * 0.85)`: a flat 15% off
+   * whatever the shop had just said, recomputed from scratch every turn. So a
+   * shop that held firm at 300 got asked for 255 in round 0, 255 in round 1 and
+   * 255 in round 2 - three identical messages that read as a bot, and no
+   * concession the shop could reciprocate. `graph/math.computeRoundTarget` is
+   * the real ladder (it concedes upward across rounds, never re-asks below an
+   * earlier ask, and clamps strictly below a cited rival) and it needs to know
+   * what we asked last time. The graph engine keeps that in
+   * `fields.lastTarget`; the engine that actually answers shops kept nothing.
+   *
+   * Derived from the SENT text rather than from the target we handed the model,
+   * for the same reason `citedRival` is: the model may not have used it. The
+   * lowest money numeral strictly below the standing quote is our ask - the
+   * rival we cite is by construction ABOVE it (beat, never match).
+   */
+  lastAskPerDay?: number;
   tone?: "friendly" | "curt" | "eager" | "reluctant";
   /**
    * THE MODEL'S DURABLE READING OF THIS THREAD (A4). Persisted; every meaning

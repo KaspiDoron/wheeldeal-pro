@@ -26,7 +26,7 @@ import {
 } from "./comprehension";
 import { quoteOnTable } from "./policy";
 import { normalizeDigits } from "../integrity/translation";
-import { citesPrice } from "../integrity/money-context";
+import { citesPrice, findNumerals } from "../integrity/money-context";
 import { cheapestCheaperRival } from "../negotiation/leverage";
 import { deriveThreadFacts } from "./thread-facts";
 import { getPolicyOverlay, DEFAULT_OVERLAY, type PolicyOverlay } from "../ops/overlay";
@@ -1377,6 +1377,27 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
   if (reachedWire && outcome.move === "confirm") {
     const w = outcome.digest.pending?.find((p) => p.state === "waiting");
     if (w && w.at == null) w.at = io.now();
+  }
+  // ---- THE CONCESSION LADDER'S MEMORY ---------------------------------------
+  //
+  // What we actually ASKED this shop for, read off the wire. The live engine's
+  // ask was a flat 15% off whatever the shop had just said, recomputed from
+  // scratch every turn, so a firm shop got the identical number three rounds
+  // running. `computeRoundTarget` fixes that but needs `lastTarget`, and the
+  // engine that answers shops was persisting nothing of the sort.
+  //
+  // Measured, not asserted, for the same reason `citedRival` is: the model may
+  // have ignored the target we handed it. The lowest MONEY numeral strictly
+  // below the standing quote is our ask - any rival we cite sits above it by
+  // construction, because the ladder beats a rival rather than matching it.
+  if (reachedWire && send && outcome.move === "bargain") {
+    const standing = quoteOnTable(tc);
+    if (typeof standing === "number" && standing > 0) {
+      const asks = findNumerals(normalizeDigits(send))
+        .filter((n) => n.money && n.value > 0 && n.value < standing)
+        .map((n) => n.value);
+      if (asks.length) outcome.digest.lastAskPerDay = Math.min(...asks);
+    }
   }
 
   // ---- judge enqueue (never inline - a cheap later invocation grades it) -----

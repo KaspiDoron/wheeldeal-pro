@@ -19,6 +19,7 @@ import { planLeverage, leadCard, cheapestCheaperRival } from "../negotiation/lev
 import { normalizeDigits } from "../integrity/translation";
 import { citesPrice } from "../integrity/money-context";
 import { beatRivalTarget } from "../negotiation/beat-rival";
+import { computeRoundTarget } from "../graph/math";
 import { askVariantDirective, askVariantFor } from "../negotiation/ask-variant";
 import { disclosureBlock } from "../negotiation/traveller-disclosure";
 import { describeActs } from "../wa/dialogue-acts";
@@ -42,6 +43,29 @@ export function pickRoute(ctx: TurnContext): ModelRoute {
   return highStakes
     ? { tier: "M", reason: "high-stakes" }
     : { tier: "F", reason: "default" };
+}
+
+/**
+ * THE NUMBER THE SPECIFIC-NUMBER ARM NAMES - the real concession ladder.
+ *
+ * Exported so it can be driven directly: it is the whole of the live engine's
+ * bargaining arithmetic, and it used to be four lines buried inside a 400-line
+ * prompt builder that no test could reach.
+ */
+export function askTargetFor(ctx: TurnContext): number | undefined {
+  const quoteNow = quoteOnTable(ctx);
+  if (typeof quoteNow !== "number" || quoteNow <= 0) return undefined;
+  const rival = cheapestCheaperRival(ctx.session.rivals, quoteNow)?.pricePerDay;
+  return computeRoundTarget({
+    quoted: quoteNow,
+    floorPrice: ctx.guards.floorPerDay,
+    rivalPrice: rival,
+    rounds: ctx.thread.digest.round ?? 0,
+    // What we asked LAST time, measured off the wire and persisted by live.ts.
+    // Absent on round one and on threads written before it existed, which is
+    // exactly the "no previous ask" case the ladder handles.
+    lastTarget: ctx.thread.digest.lastAskPerDay,
+  });
 }
 
 function buildPrompt(ctx: TurnContext): { system: string; user: string } {
@@ -375,20 +399,27 @@ function buildPrompt(ctx: TurnContext): { system: string; user: string } {
   // when we hold one (BEAT, NEVER MATCH - the same helper the rival card uses,
   // so the two can never name different figures), otherwise the ordinary
   // floor-clamped cut.
-  const askTarget = (() => {
-    const rival = cheapestCheaperRival(s.rivals, quoteNow)?.pricePerDay;
-    if (rival) {
-      return beatRivalTarget({
-        rivalPricePerDay: rival,
-        quotePerDay: quoteNow,
-        floorPerDay: ctx.guards.floorPerDay,
-      });
-    }
-    if (typeof quoteNow === "number" && quoteNow > 0) {
-      return Math.max(ctx.guards.floorPerDay ?? 0, Math.round(quoteNow * 0.85)) || undefined;
-    }
-    return undefined;
-  })();
+  //
+  // THE REAL LADDER, NOT A FLAT PERCENTAGE. The no-rival arm was
+  // `Math.round(quoteNow * 0.85)` - 15% off whatever the shop had just said,
+  // recomputed from scratch on every turn. Three consequences, all of them the
+  // opposite of how a human bargains:
+  //
+  //   - a shop that holds firm at 300 gets asked for 255, then 255, then 255.
+  //     Identical numbers read as a bot, and offer the shop nothing to
+  //     reciprocate.
+  //   - there is no concession. A negotiation where one side never moves is not
+  //     a negotiation, and it is exactly what makes shops stop replying.
+  //   - the number is ugly. 255 is not a figure a person says out loud;
+  //     `niceRound` exists for precisely this and was never reached.
+  //
+  // `graph/math.computeRoundTarget` is the ladder the failover engine has always
+  // used: it opens near the floor, concedes upward across rounds, never re-asks
+  // BELOW an earlier ask, clamps strictly below a cited rival (beat, never
+  // match - it calls the same `beatRivalTarget` this branch used to call
+  // directly), and finishes through `niceRound`/`niceRoundBelow`. It is pure and
+  // was already reachable from here; the live engine simply never called it.
+  const askTarget = askTargetFor(ctx);
   const askShape = ctx.legalMoves.includes("bargain")
     ? `${askVariantDirective(askVariant, {
         quotePerDay: quoteNow,
