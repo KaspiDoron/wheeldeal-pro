@@ -321,6 +321,9 @@ export interface ThreadDigest {
   fulfillmentCostKnown?: boolean;
   /** How many handover questions we have already put (stamped moves). */
   handoverAsks?: number;
+  /** How many times we have nudged this quiet thread (stamped moves). The
+   *  once-only bound reads this, not a regex over our own wording. */
+  momentumNudges?: number;
   lastOutbound?: string[]; // our last 5 messages - the anti-repetition memory
   /** Every tier this shop has offered, accumulated across the whole thread. */
   options?: VehicleOption[];

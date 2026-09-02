@@ -66,6 +66,7 @@ describe("meaning projects from the model's durable reading", () => {
       deliveryOffered: false,
       fulfillmentCostKnown: false,
       handoverAsks: 0,
+      momentumNudges: 0,
       bargainRounds: 0,
       lastOutbound: [],
     });

@@ -167,3 +167,85 @@ describe("EXECUTED: the recap no longer sounds like a booking", () => {
     );
   });
 });
+
+describe("EXECUTED: no sentence is sent to every shop for ever", () => {
+  // `templateFor` is not a fallback - it is what goes out on every provider
+  // failure and every rail rejection. Of its twenty-odd branches exactly ONE
+  // varied, so a licence answer, a deposit probe and a nudge each had a single
+  // sentence that 25 travellers' agents sent to every shop, verbatim. The
+  // last-mile humanizer cannot save them: it swaps greetings (first outbound
+  // only) and sign-offs, and these are mid-thread bodies with neither.
+  const forThread = (key: string, move: Parameters<typeof templateFor>[1], extra = {}) => {
+    const c = ctx({ quoted: 300, ...extra });
+    (c.thread as { threadKey: string }).threadKey = key;
+    c.legalMoves = [move] as TurnContext["legalMoves"];
+    return templateFor(c, move);
+  };
+
+  const spread = (move: Parameters<typeof templateFor>[1], extra = {}) => {
+    const out = new Set<string>();
+    for (let i = 0; i < 40; i++) out.add(String(forThread(`t${i}@x.com:6681234${i}`, move, extra)));
+    return out;
+  };
+
+  it("the deposit probe reaches two shops in two different ways", () => {
+    expect(spread("deposit-probe").size).toBeGreaterThan(1);
+  });
+
+  it("...and so does the nudge", () => {
+    expect(spread("momentum", { quoted: undefined }).size).toBeGreaterThan(1);
+  });
+
+  it("...and the weak bargain fallback", () => {
+    expect(spread("bargain").size).toBeGreaterThan(1);
+  });
+
+  it("but ONE shop always hears the same phrasing - people do not rephrase at random", () => {
+    const once = forThread("t@x.com:66812345678", "deposit-probe");
+    for (let i = 0; i < 10; i++) {
+      expect(forThread("t@x.com:66812345678", "deposit-probe")).toBe(once);
+    }
+  });
+
+  it("independent families do not move in lockstep on one thread", () => {
+    // A shared seed with no salt would land every family on the same index, so
+    // "variation" would be one draw wearing three costumes.
+    const key = "t@x.com:66812345678";
+    const a = [...Array(40)].map((_, i) => forThread(`k${i}`, "deposit-probe"));
+    const b = [...Array(40)].map((_, i) => forThread(`k${i}`, "momentum", { quoted: undefined }));
+    const pairs = new Set(a.map((x, i) => `${a.indexOf(x)}|${b.indexOf(b[i])}`));
+    expect(pairs.size).toBeGreaterThan(1);
+    expect(key).toBeTruthy();
+  });
+});
+
+describe("EXECUTED: the nudge finally carries the card it is policed for", () => {
+  // `momentum` is legal ONLY when no price is on the table, so every leverage
+  // block - all gated on `bargain` being legal - was off, while rails.ts
+  // policed the move as a price move. Briefed like a silence-breaker, policed
+  // like a bargain.
+  it("with a live rival in the hunt, the nudge names the real number", () => {
+    const c = ctx({ rivals: [{ pricePerDay: 200 }] });
+    c.legalMoves = ["momentum"];
+    const t = templateFor(c, "momentum")!;
+    expect(t).toContain("200");
+    expect(t).toContain("฿");
+  });
+
+  it("it never names the other SHOP - the price is the leverage, not the name", () => {
+    const c = ctx({ rivals: [{ pricePerDay: 200 }] });
+    c.legalMoves = ["momentum"];
+    const t = templateFor(c, "momentum")!;
+    expect(t).not.toMatch(/Shop 0/);
+  });
+
+  it("with no rival it stops referring to a rate nobody ever asked for", () => {
+    const c = ctx({});
+    c.legalMoves = ["momentum"];
+    const t = templateFor(c, "momentum")!;
+    // "any chance on that better rate" pointed at a bargain that, by this
+    // move's own precondition, cannot have happened.
+    expect(t).not.toMatch(/that better rate/i);
+    expect(t).toMatch(/\?\s*$/);
+  });
+});

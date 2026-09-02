@@ -338,6 +338,7 @@ function buildDigest(
     // is deliberately NOT OR-ed in here: knowing HOW is not knowing HOW MUCH.
     fulfillmentCostKnown: facts.fulfillmentCostKnown,
     handoverAsks: facts.handoverAsks,
+    momentumNudges: facts.momentumNudges,
     lastOutbound: facts.lastOutbound,
     options: options.length >= 2 ? options : undefined,
     ledger,

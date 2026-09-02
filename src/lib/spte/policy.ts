@@ -430,6 +430,19 @@ const EMPTY_LEDGER: ThreadLedger = { claims: [], known: [], outstanding: [], owe
  * check-in is a nudge while two is pestering.
  */
 function alreadyNudged(ctx: TurnContext): boolean {
+  // THE STAMP, NOT OUR OWN WORDING.
+  //
+  // This was a regex over our own prose, which is the same mistake
+  // `thread-facts.bargainRounds` already documents at length: our wording is
+  // not a verdict about what we did, the stamped MOVE is. It was also a trap
+  // for any variation - the moment the nudge sentence is drawn from a family
+  // instead of hard-coded, a variant saying "any word from you?" matches none
+  // of those five phrases, the once-only guarantee silently lapses, and the
+  // thread gets nudged for ever. Which is exactly what this round is doing to
+  // that sentence.
+  if ((ctx.thread.digest.momentumNudges ?? 0) > 0) return true;
+  // Fallback for UNSTAMPED history only, same role as BARGAIN_TEXT_RX: rows
+  // written before the move was stamped still have to be readable.
   return (ctx.thread.digest.lastOutbound ?? []).some((m) =>
     /\b(hi again|checking in|just following up|any chance on that|any update)\b/i.test(m ?? "")
   );

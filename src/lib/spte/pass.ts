@@ -21,6 +21,7 @@ import { citesPrice } from "../integrity/money-context";
 import { beatRivalTarget } from "../negotiation/beat-rival";
 import { computeRoundTarget, niceRound, niceRoundBelow } from "../graph/math";
 import { money as agentMoney } from "../agents";
+import { fnv1a32, mulberry32 } from "../copy/hash";
 import { voiceProfileFor, voiceDirectives } from "../voice";
 import { compileStyleDirectives } from "../copy/promptCompiler";
 import { askVariantDirective, askVariantFor } from "../negotiation/ask-variant";
@@ -503,6 +504,19 @@ function buildPrompt(ctx: TurnContext): { system: string; user: string } {
   // honest leverage on turn four.
   const mediaPlay = dg.mediaSummary ? `THEIR PHOTO SHOWED: ${dg.mediaSummary}\n` : "";
 
+  // THE NUDGE GETS THE CARD TOO. Every leverage block above is gated on
+  // `bargain` being legal, and `momentum` is only pushed when it is NOT - so a
+  // silence-breaking turn reached the model with no leverage whatsoever while
+  // the rails policed it as a price move. `cheapestCheaperRival` cannot help
+  // here (it needs a quote to be cheaper THAN, and momentum is only legal with
+  // no quote), so the card is the session's own live rival board.
+  const momentumPlay =
+    ctx.legalMoves.includes("momentum") && s.rivals.length > 0 && s.rivals[0].pricePerDay > 0
+      ? `THIS THREAD HAS GONE QUIET AND YOU HOLD A REAL CARD: another shop in this same search has quoted ${s.rivals[0].pricePerDay} ${
+          s.rivals[0].currency ?? s.currency
+        }/day. Name that figure to restart the conversation and ask for their best price - never name the other shop.\n`
+      : "";
+
   // Kept as its own line only when there is nothing stronger to lead with.
   const durationLeverage =
     !lead && !atLow && round <= 0 && days >= 3 && ctx.legalMoves.includes("bargain")
@@ -526,6 +540,7 @@ function buildPrompt(ctx: TurnContext): { system: string; user: string } {
     askShape +
     sheetPlay +
     mediaPlay +
+    momentumPlay +
     firmNote +
     depositCounterNote +
     questionNote +
@@ -605,6 +620,33 @@ function vehicleLine(ctx: TurnContext): string {
 /** The safe templated message for a move, or undefined when a template would
  *  have to invent facts (present/closing need real data; pickup-location needs
  *  the consented stay resolver). */
+/**
+ * ONE SENTENCE, SENT TO EVERY SHOP, FOR EVER.
+ *
+ * `templateFor` is not a fallback - it is what actually goes out on every
+ * provider failure and every rail rejection, and `verify-recap` is
+ * deterministic by design. Of its twenty-odd branches exactly ONE varied
+ * (`restock-probe`, with a djb2 hand-rolled inline), so a licence question, a
+ * deposit probe, a nudge and a weak bargain each had a single sentence that
+ * twenty-five travellers' agents sent to every shop that asked, verbatim,
+ * indefinitely. The last-mile humanizer cannot save them either: it swaps
+ * GREETINGS (first outbound only) and sign-offs, and these are all mid-thread
+ * bodies with neither.
+ *
+ * Seeded on the thread, so one shop always hears the same phrasing from the
+ * same traveller - a person does not rephrase themselves at random - while two
+ * shops in the same hunt hear different ones. `fnv1a32` + `mulberry32` is the
+ * pair the copy layer already draws from; the inline djb2 is retired rather
+ * than copied a second time.
+ *
+ * `salt` separates families that share a thread, so the licence draw and the
+ * deposit draw are independent rather than always landing on the same index.
+ */
+function seededFamily(ctx: TurnContext, salt: string, family: readonly string[]): string {
+  const rng = mulberry32(fnv1a32(`${ctx.thread.threadKey}|${salt}`));
+  return family[Math.floor(rng() * family.length) % family.length];
+}
+
 export function templateFor(ctx: TurnContext, move: MoveKind): string | undefined {
   const v = ctx.inbound.verified;
   const days = ctx.session.rfq.durationDays;
@@ -658,8 +700,16 @@ export function templateFor(ctx: TurnContext, move: MoveKind): string | undefine
           : `Thanks! Another shop offered ${money(rival.pricePerDay)}/day for the same ${ctx.session.rfq.vehicleClass} - could you go lower than that for ${nDays(days)}?`;
       }
       return v.pricePerDay
-        ? `Thanks! Any chance you can do a bit better for ${nDays(days)}?`
-        : `Could you share your best price for ${nDays(days)}?`;
+        ? seededFamily(ctx, "bargain-soft", [
+            `Thanks! Any chance you can do a bit better for ${nDays(days)}?`,
+            `Appreciate it! Is there any room on that for ${nDays(days)}?`,
+            `Thanks for that! Could you stretch a little for ${nDays(days)}?`,
+          ])
+        : seededFamily(ctx, "bargain-ask", [
+            `Could you share your best price for ${nDays(days)}?`,
+            `What would your best price be for ${nDays(days)}?`,
+            `Could you let me know your best rate for ${nDays(days)}?`,
+          ]);
     }
     case "confirm-vehicle":
       // The gate already phrased the question from the traveller's own declared
@@ -741,9 +791,17 @@ export function templateFor(ctx: TurnContext, move: MoveKind): string | undefine
       // license asks get the exact policy lines; any other question gets an
       // honest, safe redirect to the one thing we always want - the daily rate.
       if (v.askedLicensePhoto)
-        return `Sure - I'll share a photo of my license once we finalize the rate and rental details 👍 What's your best price per day?`;
+        return seededFamily(ctx, "licence-photo", [
+          `Sure - I'll share a photo of my license once we finalize the rate and rental details 👍 What's your best price per day?`,
+          `Of course - happy to send my license photo once we've agreed the rate and the details. What's your best price per day?`,
+          `No problem at all - I'll send the license photo as soon as the rate and details are settled. What would your best price per day be?`,
+        ]);
       if (v.askedLicense)
-        return `Yes, I have a valid international driving license for this. What would your best price per day be?`;
+        return seededFamily(ctx, "licence", [
+          `Yes, I have a valid international driving license for this. What would your best price per day be?`,
+          `Yes - I hold a valid international driving license for this category. What's your best price per day?`,
+          `I do, yes - a valid international driving license for this. What would your best daily rate be?`,
+        ]);
       // ACKNOWLEDGE WHAT THEY ACTUALLY DID.
       //
       // This branch used to open "Good question!" unconditionally and then ask
@@ -793,20 +851,20 @@ export function templateFor(ctx: TurnContext, move: MoveKind): string | undefine
       if (passportCounterDue(ctx)) return composePassportCounter(ctx.thread.threadKey);
       // Non-commitment guardrail (issue 5): learn the terms while making clear
       // we are still comparing shops - never imply a guaranteed booking.
-      return `Thanks! We're finalizing our pick between a few shops today - could you let me know your deposit? Cash amount or passport?`;
+      return seededFamily(ctx, "deposit", [
+        `Thanks! We're finalizing our pick between a few shops today - could you let me know your deposit? Cash amount or passport?`,
+        `Thanks! Still comparing a couple of shops - what deposit do you ask for, cash or passport?`,
+        `Appreciate it! Before we decide between a few places, what's your deposit - a cash amount, or passport?`,
+      ]);
     case "restock-probe": {
       // OUT OF STOCK IS NORMAL. No disappointment, no pressure, no goodbye -
       // just the one question worth asking. Seeded per thread so shops do not
       // all receive the same sentence, and stable for golden replays.
-      const FAMILY = [
+      return seededFamily(ctx, "restock", [
         `No worries at all, thanks for letting me know! Any idea when you'll have one available again?`,
         `Ah okay, thanks for telling me! When do you expect to have one back?`,
         `That's alright - thanks for the honesty! Do you know when you'll have one back in stock?`,
-      ];
-      let h = 5381;
-      const seed = ctx.thread.threadKey;
-      for (let i = 0; i < seed.length; i++) h = ((h << 5) + h + seed.charCodeAt(i)) | 0;
-      return FAMILY[Math.abs(h) % FAMILY.length];
+      ]);
     }
     case "fulfillment-probe":
       // TWO DIFFERENT QUESTIONS WEAR THIS ONE MOVE.
@@ -827,7 +885,37 @@ export function templateFor(ctx: TurnContext, move: MoveKind): string | undefine
       // - and wa-guard's variance pass then matched the leading "Hi " and
       // substituted a whole greeting for it, shipping "Hey there! again!" on
       // every single nudge. The nudge is warmer without either.
-      return `Just checking in - any chance on that better rate for ${nDays(days)}?`;
+      // A NUDGE WITH THE STRONGEST FACT WE HOLD IN IT.
+      //
+      // `momentum` is only legal when NO price is on the table (policy.ts), so
+      // "any chance on that better rate" referred to a rate nobody had ever
+      // asked for - and the turn carried no leverage at all, because every
+      // leverage block in this file is gated on `bargain` being legal and
+      // `momentum` is pushed only when it is not. Meanwhile the rails police it
+      // AS a price move. Briefed like a silence-breaker, policed like a bargain.
+      //
+      // A live quote from another shop in this same hunt is the one fact that
+      // actually restarts a quiet thread, and it is real: `session.rivals` has
+      // already passed the shared predicate (same vehicle, same currency, same
+      // search, live phase, strictly quotable), and `checkOutboundNumbers`
+      // backs every rival price for every move - so this cites a number the
+      // integrity rail can verify. The shop's NAME is never ours to give away;
+      // the price is the leverage.
+      const nudgeRival = ctx.session.rivals[0];
+      if (nudgeRival && nudgeRival.pricePerDay > 0) {
+        const rm = (n: number) =>
+          agentMoney(n, nudgeRival.currency ?? ctx.session.currency ?? undefined);
+        return seededFamily(ctx, "momentum-rival", [
+          `Just checking in! Another shop here has quoted ${rm(nudgeRival.pricePerDay)}/day - could you let me know your best price for ${nDays(days)}?`,
+          `Hope you're well! We already have ${rm(nudgeRival.pricePerDay)}/day from another shop nearby - what could you do for ${nDays(days)}?`,
+          `Following up - someone else here is at ${rm(nudgeRival.pricePerDay)}/day. Any chance you can beat that for ${nDays(days)}?`,
+        ]);
+      }
+      return seededFamily(ctx, "momentum", [
+        `Just checking in - were you able to check a price for ${nDays(days)}?`,
+        `Hope you're well! Any word on a rate for ${nDays(days)}?`,
+        `Following up gently - could you let me know your best price for ${nDays(days)}?`,
+      ]);
     case "verify-recap": {
       // STEP 7 - DETERMINISTIC BY DESIGN, grounded by construction: every
       // number is the digest's own standing quote (verified extraction wrote

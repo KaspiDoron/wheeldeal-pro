@@ -452,13 +452,20 @@ describe("the hard-coded greeting sources are closed", () => {
     // again!"; this fails against every greeting the rail knows, including the
     // ones the audit found the old regex blind to.
     const pass = readCode("src/lib/spte/pass.ts");
-    const momentum = pass.match(/return `(Just checking in[^`]*)`/)?.[1];
+    const momentum = pass.match(/`(Just checking in[^`]*)`/)?.[1];
     expect(momentum, "the momentum template moved - relocate this test").toBeTruthy();
     expect(hasLeadingGreeting(momentum!.replace(/\$\{[^}]*\}/g, "3 days"))).toBe(false);
     expect(momentum).not.toMatch(/again/i);
     // ...and no OTHER template in the primary engine opens with one either.
-    for (const t of pass.match(/return `[^`]+`/g) ?? []) {
-      const text = t.slice(8, -1).replace(/\$\{[^}]*\}/g, "3 days");
+    //
+    // EVERY BACKTICK LITERAL, not just the ones after `return`. Most templates
+    // are now drawn from a seeded FAMILY - an array of alternatives - so the
+    // old `return \`...\`` shape stopped covering the very strings that vary,
+    // which is exactly where a greeting would sneak back in unnoticed. A
+    // broader sweep is the point of the widening, not a side effect of it.
+    for (const t of pass.match(/`[^`]+`/g) ?? []) {
+      const text = t.slice(1, -1).replace(/\$\{[^}]*\}/g, "3 days");
+      if (!/[a-z]{3}/i.test(text)) continue; // keys, urls, join separators
       expect(hasLeadingGreeting(text), text).toBe(false);
     }
   });
