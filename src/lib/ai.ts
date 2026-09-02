@@ -5,6 +5,7 @@
 // functional in demo mode. Providers are tried in preference order.
 
 import "server-only";
+import { orientationNotes, type InboundImage } from "./media/orientation";
 import { getConfig, pgTimestamp } from "./runtime-config";
 
 // AI_RPM_<PROVIDER> override cache (~60s): the owner can raise a paid tier's
@@ -1625,10 +1626,24 @@ async function anthropicVisionAttempt(
 export async function readImages(
   system: string,
   userText: string,
-  images: { mime: string; base64: string }[],
+  images: InboundImage[],
   opts?: { json?: boolean; budgetMs?: number }
 ): Promise<VisionRead> {
   const json = opts?.json === true;
+  // TELL THE MODEL THE BOARD IS SIDEWAYS.
+  //
+  // Phones are held upright, so a photographed price board routinely arrives
+  // with a rotation in its EXIF and the pixels stored on their side. The
+  // rotation was measured at fetch time (fetchMediaBase64 -> readOrientation)
+  // and then dropped one line before this call: the frame budget rebuilt each
+  // frame as {mime, base64} and the tag went with it. So the one reader that
+  // could act on it was the only layer never told.
+  //
+  // orientationNotes was written for exactly this - "ready to prepend to the
+  // vision user text" - and had zero callers. It returns "" when every image is
+  // upright, so the prompt is byte-identical to today's in the common case.
+  const orientation = orientationNotes(images);
+  const userTextWithOrientation = orientation ? `${orientation}\n\n${userText}` : userText;
   const attempts: VisionAttempt[] = [];
   globalThis.__wd_vision_diag__ = { at: Date.now(), attempts };
   // A SECOND LADDER MUST NOT COST A SECOND BUDGET. The failure-class re-read in
@@ -1678,7 +1693,7 @@ export async function readImages(
         provider: "gemini",
         model,
         run: (ms, raise) =>
-          geminiVisionAttempt(gemini, model, system, userText, images, ms, json, raise),
+          geminiVisionAttempt(gemini, model, system, userTextWithOrientation, images, ms, json, raise),
       });
     }
   }
@@ -1688,7 +1703,7 @@ export async function readImages(
         provider: "groq",
         model,
         run: (ms, raise) =>
-          groqVisionAttempt(groq, model, system, userText, groqImages, ms, json, raise),
+          groqVisionAttempt(groq, model, system, userTextWithOrientation, groqImages, ms, json, raise),
       });
     }
   } else if (groq && images.length > 0 && groqImages.length === 0) {
@@ -1709,7 +1724,7 @@ export async function readImages(
         provider: "anthropic",
         model,
         run: (ms, raise) =>
-          anthropicVisionAttempt(anthropic, model, system, userText, groqImages, ms, json, raise),
+          anthropicVisionAttempt(anthropic, model, system, userTextWithOrientation, groqImages, ms, json, raise),
       });
     }
   }
@@ -1798,8 +1813,10 @@ export async function readImages(
 export async function chatVision(
   system: string,
   userText: string,
-  images: { mime: string; base64: string }[]
+  images: InboundImage[]
 ): Promise<string | null> {
+  // readImages prepends the orientation note itself, so callers of this
+  // convenience wrapper get it for free.
   const read = await readImages(system, userText, images);
   return read.ok ? read.text : null;
 }

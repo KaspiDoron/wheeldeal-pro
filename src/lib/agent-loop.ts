@@ -14,6 +14,7 @@
 //     humanized content variance.
 
 import "server-only";
+import type { InboundImage } from "./media/orientation";
 import { sbInsert, sbSelect, sbSelectStrict, sbSelectDark, sbUpdate } from "./runtime-config";
 import { finishBeforeResponse } from "./after";
 import { isMediaPlaceholder as isMediaPlaceholderText } from "./wa/coalesce";
@@ -231,7 +232,8 @@ export async function processVendorReply(opts: {
   fromDigits: string;
   text: string;
   waMessageId?: string;
-  images?: { mime: string; base64: string }[];
+  /** Carries EXIF orientation through to the vision call. */
+  images?: InboundImage[];
   // Voice notes: the raw audio (transcribed here) and/or a pre-computed
   // transcript. The webhook downloads the audio; the engine's transcribe node
   // and the media-coherence validator handle the rest.

@@ -1,4 +1,5 @@
 import "server-only";
+import type { OrientationInfo } from "../media/orientation";
 import { sbSelect } from "../runtime-config";
 import { numberFilter } from "./phone-key";
 
@@ -172,7 +173,12 @@ export type BurstVerdict =
   | {
       standDown: false;
       /** Every burst frame in arrival order, own frame included. */
-      frames: Array<{ mime: string; base64: string; waMessageId: string }>;
+      frames: Array<{
+        mime: string;
+        base64: string;
+        waMessageId: string;
+        orientation?: OrientationInfo;
+      }>;
       /** Sibling frames whose bytes could not be fetched (traced by caller). */
       fetchFailures: number;
       /** How many frames the burst held in total (before any fetch failure). */
@@ -241,7 +247,14 @@ export async function assembleImageBurst(opts: {
   // swallows those). Bytes we already hold must never be thrown away because a
   // LISTING failed, so `own` is pushed unconditionally when the loop did not
   // find our row.
-  const frames: Array<{ mime: string; base64: string; waMessageId: string }> = [];
+  // orientation rides along: the spreads below already carried the value,
+  // only the TYPE dropped it, which is why it silently never reached vision.
+  const frames: Array<{
+    mime: string;
+    base64: string;
+    waMessageId: string;
+    orientation?: OrientationInfo;
+  }> = [];
   let fetchFailures = 0;
   let sawOwn = false;
   for (const r of rows) {

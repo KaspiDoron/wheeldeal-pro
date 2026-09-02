@@ -9,6 +9,7 @@
 // opportunistic drains lives here, byte-identical to the route it came from.
 
 import { sbInsert, sbSelect, sbSelectStrict } from "@/lib/runtime-config";
+import type { InboundImage } from "../media/orientation";
 import { processVendorReply } from "@/lib/agent-loop";
 import {
   emailForInstance,
@@ -1157,7 +1158,10 @@ export async function processEvolutionWebhook(
       // stand down here (their rows are stored - only the duplicate turn is
       // skipped). Frames are then fitted to the vision request budget, and
       // every frame that does not fit leaves a trace - never a silent drop.
-      const images: { mime: string; base64: string }[] = [];
+      // InboundImage, not {mime,base64}: the EXIF orientation measured at fetch
+      // time has to survive to the vision call, and picking two fields off the
+      // frame is exactly where it used to be lost.
+      const images: InboundImage[] = [];
       let mediaFetchFailed = false;
       let videoUnreadable = false;
       if ((hasImage || docIsImage) && email) {
@@ -1192,7 +1196,7 @@ export async function processEvolutionWebhook(
         }
         const { budgetFrames } = await import("@/lib/media/frame-budget");
         const budget = budgetFrames(verdict.frames);
-        images.push(...budget.kept.map((f) => ({ mime: f.mime, base64: f.base64 })));
+        images.push(...budget.kept);
         for (const d of budget.dropped) {
           await sbInsert("agent_events", [
             d.reason === "frame-too-large"
