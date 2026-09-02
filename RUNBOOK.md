@@ -135,6 +135,62 @@ for either.
 4. Set `EVOLUTION_PROXY_TEMPLATE` if the numbers are not already spread across
    hosts.
 
+## Setting up Redis (REDIS_URL)
+
+**What it is for, in this app specifically.** Cloud Run runs up to 20 instances
+and they share nothing. Redis is the only place a number can be counted ONCE
+for the whole fleet. Five things depend on it, and each degrades differently:
+
+| Subsystem | With Redis | Without it |
+|---|---|---|
+| Daily AI + send caps (`usage.ts`) | one atomic `INCR` per unit, fleet-wide | a per-process counter, so each cap can be exceeded up to **20x** |
+| AI RPM / RPD per provider (`ai.ts`) | fleet-wide, spills off a spent rung before the 429 | per-instance, so N instances each pay their own 429 round trip |
+| Copy-uniqueness window (`graph/uniqueness.ts`) | one 200KB ZSET of 24-char signatures - **no raw text** - catches the same sentence going to two shops from two instances | a strict no-op; only the per-thread database layer runs |
+| AI budget cache (`budget-cache.ts`) | one read per window instead of one per turn | falls through to the database |
+| Session hot state / rival cache (`rival-cache.ts`) | the hot path for cross-shop leverage | falls back to Postgres, which is correct but slower |
+
+The one that matters most at ANY fleet size is the **copy-uniqueness window**:
+it is an anti-ban control, and two Cloud Run instances sending the same
+sentence to two different shops is exactly the fingerprint it exists to break.
+The 20x cap multiplier is a ceiling, not a prediction - at a 24-tester beta
+Cloud Run will usually be running one or two instances, so the real exposure is
+2x, not 20x.
+
+**How to set it up.**
+
+1. Create a Redis. `src/lib/config.ts` points at Upstash
+   (`https://console.upstash.com/redis`) because it is serverless-shaped and
+   has a free tier; any Redis reachable over TLS works.
+2. Copy the **`rediss://` connection string**, NOT the REST URL. The app uses
+   `ioredis`, which speaks the Redis wire protocol - Upstash's REST endpoint
+   (`https://...upstash.io`) will not connect. In the Upstash console it is
+   under Connect -> Node / ioredis, and looks like
+   `rediss://default:<password>@<host>:<port>`.
+3. Add it as a **GitHub repository secret named `REDIS_URL`**
+   (Settings -> Secrets and variables -> Actions -> New repository secret).
+4. Redeploy - push to `master`, or re-run the latest **Deploy to Cloud Run**
+   workflow.
+
+**Do NOT set it by hand in the Cloud Run console.** The deploy step uses
+`gcloud run deploy --set-env-vars`, which REPLACES the service's entire
+environment, so a hand-set value is wiped by the next deploy and the caps go
+quietly back to per-process. The workflow already carries `REDIS_URL` through
+its optional-passthrough list, so the GitHub secret is the only place it needs
+to exist.
+
+**How to confirm it took.** Admin -> Keys -> Connection tests ->
+`REDIS_URL`. Three genuinely different answers: *off* (not set - the documented
+degraded mode, and the detail says what it costs), *ok* (a real PING
+round-tripped, with the milliseconds), and *down* (configured and NOT
+answering, which is the state where the caps silently fall back). It also
+appears in the Service health roll-call.
+
+**What it will cost you in commands.** Roughly four commands per outbound
+message (one signature `ZADD` + trim + expire, one range read), plus one `INCR`
+per AI call and per send. At 24 testers that is low thousands of commands a
+day - check the current free-tier command allowance before assuming it fits,
+and note the ZSET itself is capped at ~200KB by construction.
+
 ## Turning the semantic corpus on (optional)
 
 `docs/VECTOR-SPEC.md` is the design. Phase 1 - the corpus - is shipped; the
