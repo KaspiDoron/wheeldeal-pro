@@ -50,6 +50,10 @@ afterEach(() => {
 
 const norm = (v: number[]) => Math.sqrt(v.reduce((a, x) => a + x * x, 0));
 
+// Pinned from the shipped implementation - see the fingerprint test below.
+const FINGERPRINT_BUCKETS = [47, 66, 160, 170, 220, 362];
+const FINGERPRINT_FIRST = "0.229415734";
+
 describe("the lexical rung is deterministic, unit-length and 768-wide", () => {
   it("returns byte-identical output twice", () => {
     const a = lexicalEmbed("450 baht per day, helmet included");
@@ -88,6 +92,20 @@ describe("the lexical rung is deterministic, unit-length and 768-wide", () => {
     // would be a row that silently matches nothing while counting as embedded.
     expect(lexicalEmbed("")).toBeNull();
     expect(lexicalEmbed("   \n  ")).toBeNull();
+  });
+
+  it("has a STABLE fingerprint - the vector space cannot drift under one model id", () => {
+    // Every row in the corpus is stored under `lexical:v1` and compared only
+    // against other `lexical:v1` rows. If the hashing changes - a different
+    // salt, a different gram width, a stray edit - old rows and new rows stop
+    // living in the same space, and cosine between them starts returning
+    // plausible nonsense instead of failing. There is no runtime signal for
+    // that, so the fingerprint is pinned here: change it deliberately, and
+    // bump the model id to v2 in the same commit.
+    const e = lexicalEmbed("we can do 400 per day")!;
+    const nonZero = e.vector.map((x, i) => (x !== 0 ? i : -1)).filter((i) => i >= 0);
+    expect(nonZero.slice(0, 6)).toEqual(FINGERPRINT_BUCKETS);
+    expect(e.vector[FINGERPRINT_BUCKETS[0]].toFixed(9)).toBe(FINGERPRINT_FIRST);
   });
 
   it("spreads across many dimensions rather than clustering", () => {
