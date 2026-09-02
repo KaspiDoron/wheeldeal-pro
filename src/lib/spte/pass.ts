@@ -86,7 +86,15 @@ function buildPrompt(ctx: TurnContext): { system: string; user: string } {
   const digest = ctx.thread.digest.facts.length
     ? ctx.thread.digest.facts.map((f) => `- ${f}`).join("\n")
     : "(nothing durable yet)";
+  // THE ELISION IS STATED, NOT HIDDEN. `wa/history-window` marks a thread it
+  // had to cut - "never silent" is its own rule - and that marker used to be
+  // parsed away, leaving the composer a transcript with an invisible hole. A
+  // model that believes it has the whole conversation will confidently re-ask
+  // what the shop answered in the part it cannot see.
   const tail = ctx.tail.map((m) => `${m.dir === "in" ? "SHOP" : "YOU"}: ${m.text}`).join("\n");
+  const tailBlock = ctx.tailElided
+    ? `(this thread is long - some middle messages are not shown; the oldest and newest are)\n${tail}`
+    : tail;
 
   const system =
     "You are one traveller haggling on WhatsApp for the cheapest real rental of a specific vehicle. " +
@@ -438,6 +446,14 @@ function buildPrompt(ctx: TurnContext): { system: string; user: string } {
     `VEHICLE WANTED: ${vehicleLine(ctx)} for ${s.rfq.durationDays} days.\n` +
     `${bench}\n${prior}\n` +
     `RIVAL OFFERS (other shops, this search):\n${rivalLines}\n\n` +
+    // WHERE THE REST OF THE HUNT STANDS. The block above is the four quotes we
+    // are ALLOWED TO CITE; this one is everything else the traveller knows -
+    // who said no, who has none left, who has not answered. A human negotiator
+    // holds that in their head and it changes the tactic completely: four live
+    // rivals means push hard, and "every other shop is out" means secure this
+    // one warmly. Anonymised and bounded by negotiation/session-brief; "" when
+    // this is the only shop in the hunt, so a heading never sits over no rows.
+    (s.brief ? `${s.brief}\n` : "") +
     menuBlock +
     roundPlay +
     askShape +
@@ -456,7 +472,7 @@ function buildPrompt(ctx: TurnContext): { system: string; user: string } {
     ledgerBlock +
     aboutYouBlock +
     `THIS SHOP so far:\n${digest}\n\n` +
-    `RECENT MESSAGES:\n${tail || "(none yet)"}\n\n` +
+    `RECENT MESSAGES:\n${tailBlock || "(none yet)"}\n\n` +
     `SHOP JUST SAID: ${ctx.inbound.text || "(nothing - a scheduled follow-up)"}\n` +
     // THEIR WORDS, AND WHAT THEY MEAN. The translation is computed on the
     // critical path for every non-English inbound, stamped on the row and

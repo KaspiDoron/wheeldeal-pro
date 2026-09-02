@@ -461,6 +461,60 @@ describe("the model finally sees both sides of the conversation", () => {
     expect(tail.every((m) => m.dir === "out")).toBe(true);
   });
 
+  it("A LONG THREAD KEEPS BOTH ENDS - the head is what the old cap threw away", async () => {
+    // `buildHistoryWindow` preserves the four OLDEST lines verbatim when it has
+    // to cut - "the part a misunderstanding destroys deals over", in its own
+    // words - and `buildTail` then took the last EIGHT lines of what it had
+    // rebuilt. So on any thread past eight messages the RFQ, the dates and the
+    // vehicle were discarded and the engine that is meant to remember the whole
+    // conversation remembered four exchanges.
+    const { buildThreadTail, TAIL_LINES } = await import("./live");
+    const lines: string[] = [
+      "Us: Hi! 125cc scooter, 14-18 Aug, 4 days - what is your rate?",
+      "Shop: Click 125, 300 baht per day.",
+      "Us: Could you do better for 4 days?",
+      "Shop: 280 is my best.",
+    ];
+    for (let i = 0; i < TAIL_LINES + 20; i++) lines.push(`Shop: filler ${i}`);
+    const { tail, elided } = buildThreadTail(input({ history: lines.join("\n") }));
+
+    expect(tail.length).toBe(TAIL_LINES);
+    // The head survived, dates and vehicle intact.
+    expect(tail[0].text).toContain("14-18 Aug");
+    expect(tail[1].text).toContain("Click 125");
+    expect(tail[3].text).toContain("280 is my best");
+    // ...and so did the newest message.
+    expect(tail[tail.length - 1].text).toBe(`filler ${TAIL_LINES + 19}`);
+    // The cut is declared, never silent.
+    expect(elided).toBe(true);
+  });
+
+  it("a thread that FITS is carried whole, with no elision claimed", async () => {
+    const { buildThreadTail } = await import("./live");
+    const lines = Array.from({ length: 12 }, (_, i) => `Shop: line ${i}`);
+    const { tail, elided } = buildThreadTail(input({ history: lines.join("\n") }));
+    expect(tail).toHaveLength(12);
+    expect(elided).toBe(false);
+  });
+
+  it("the window's OWN elision marker sets the flag without becoming a turn", async () => {
+    const { buildThreadTail } = await import("./live");
+    const { HISTORY_ELISION } = await import("../wa/history-window");
+    const { tail, elided } = buildThreadTail(
+      input({ history: ["Us: opener", HISTORY_ELISION, "Shop: 300 baht"].join("\n") })
+    );
+    expect(tail.map((m) => m.text)).toEqual(["opener", "300 baht"]);
+    expect(elided).toBe(true);
+  });
+
+  it("the prompt SAYS the thread was cut - a hidden hole invites a re-ask", () => {
+    // A model that believes it has the whole conversation will confidently
+    // re-ask what the shop answered in the part it cannot see.
+    const pass = readCode("src/lib/spte/pass.ts");
+    expect(pass).toMatch(/ctx\.tailElided/);
+    expect(pass).toMatch(/some middle messages are not shown/);
+  });
+
   it("the caller's budgeted window is the source - SPTE stopped ignoring it", () => {
     const live = readCode("src/lib/spte/live.ts");
     expect(live).toMatch(/String\(input\.history \?\? ""\)\.split\("\\n"\)/);

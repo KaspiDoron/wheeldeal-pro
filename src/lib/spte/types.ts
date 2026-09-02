@@ -184,6 +184,19 @@ export interface SessionSnapshot {
      */
     derivedFromDays?: number;
   }>;
+  /**
+   * WHERE EVERY OTHER SHOP IN THIS HUNT STANDS - one bounded, anonymised block
+   * (negotiation/session-brief).
+   *
+   * `rivals` above is the LEVERAGE set: live, priced, comparable-currency
+   * quotes, capped at four. Everything else about the hunt was dropped on the
+   * floor, so the agent answering shop B could not know that shop C had said
+   * no, that shop D was still silent, or that B was the last shop left - and
+   * each of those inverts how hard a human would push. Built from the session
+   * rows the engine already loads, so it costs no extra read; empty string when
+   * this is the only shop in the hunt.
+   */
+  brief?: string;
   /** Priors banked from past successful deals (self-improvement loop). */
   priors?: { medianAchieved?: number; typicalDiscountPct?: number; sampleSize: number } | null;
   /** Few-shot TONE/tactic coaching (owner teaching + Ops learning + distilled
@@ -477,6 +490,18 @@ export interface TurnContext {
    *  arithmetic - determinism is the property the golden gate needs. */
   nowMs?: number;
   tail: Array<{ dir: "in" | "out"; text: string; at: string }>;
+  /**
+   * THE THREAD DID NOT FIT, AND THE MODEL IS TOLD SO.
+   *
+   * `wa/history-window` marks its elision explicitly - "never silent" is its
+   * own stated rule - and `buildTail` parsed the marker away, so the composer
+   * saw a contiguous-looking transcript with a hole in the middle and no way to
+   * know. A model that believes it has the whole conversation will confidently
+   * re-ask something the shop answered in the part it cannot see. Carried as a
+   * flag rather than a fake turn: nobody said it, so it must not enter the
+   * repetition corpus or the counter-already-made check.
+   */
+  tailElided?: boolean;
   inbound: {
     text: string;
     /**

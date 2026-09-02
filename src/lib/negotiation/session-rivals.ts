@@ -74,6 +74,19 @@ export function validRivals(rows: SessionShopRow[], opts: RivalOptions): RivalQu
     if (typeof r.pricePerDay !== "number" || !Number.isFinite(r.pricePerDay) || r.pricePerDay <= 0) continue;
     if (!r.currency || r.currency !== opts.currency) continue;
     if (r.phase && DEAD_PHASES.has(r.phase)) continue;
+    // A SHOP THAT SAID NO IS NOT LEVERAGE - and `phase` is not how it says so.
+    //
+    // The phase filter above catches a thread the engine has WOUND UP; it does
+    // not catch the shop that answers "sorry, we have stopped renting" or "no
+    // bikes for those dates" and then goes quiet. Those write
+    // `fields.declined` / `fields.shopUnavailable` - the same facts the card
+    // reads to say "this shop passed" - while the phase stays wherever the
+    // negotiation had got to. So the rival card could tell shop B to beat a
+    // price from a shop that had already refused to rent: exactly the defect
+    // the hot-cache eviction closes on the Redis side. The two paths now apply
+    // the same rule, because one of them SHORT-CIRCUITS the other and they must
+    // not disagree about which shops are still in the hunt.
+    if (r.declined === true || r.outOfStock === true) continue;
     // A FOURTH KIND OF ROW THAT IS NOT LEVERAGE (owner report 5 #2): a per-day
     // figure that only exists because we divided someone's multi-day package.
     // "500 for 3 days" gives 167, and no shop on earth would hand a one-day
@@ -120,6 +133,10 @@ export function sessionFloor(
     if (typeof r.pricePerDay !== "number" || !Number.isFinite(r.pricePerDay) || r.pricePerDay <= 0) continue;
     if (!r.currency || r.currency !== currency) continue;
     if (r.phase && DEAD_PHASES.has(r.phase)) continue;
+    // "Withdrawn shops are still excluded" - stated in this function's own
+    // docstring and, until now, enforced only for `phase`. A floor nobody can
+    // honour is not a floor, and a shop that said no cannot honour one.
+    if (r.declined === true || r.outOfStock === true) continue;
     if (!best || r.pricePerDay < best.pricePerDay) {
       best = { vendorId: r.vendorId, shop: r.vendorName || r.vendorId, pricePerDay: r.pricePerDay };
     }

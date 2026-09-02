@@ -1692,6 +1692,10 @@ export function liveGraphIO(send: LiveSend): GraphIO {
           depositNote?: string;
           fulfillment?: string;
           firmCount?: number;
+          declined?: boolean;
+          shopUnavailable?: boolean;
+          rounds?: number;
+          presented?: boolean;
           digest?: { firmCount?: number };
         };
         // SAME VEHICLE OR IT IS NOT A RIVAL - for THREAD rows too. The offers
@@ -1736,6 +1740,14 @@ export function liveGraphIO(send: LiveSend): GraphIO {
               : typeof fx.digest?.firmCount === "number"
                 ? fx.digest.firmCount
                 : undefined,
+          // THE SESSION BRIEF'S FACTS (ask 5). Already in `fields`, already
+          // loaded, and thrown away by this projection until now - so knowing
+          // that shop C said no, that shop D is still silent, or that this is
+          // the last shop left costs no extra query at all.
+          declined: fx.declined === true ? true : undefined,
+          outOfStock: fx.shopUnavailable === true ? true : undefined,
+          rounds: typeof fx.rounds === "number" && fx.rounds > 0 ? fx.rounds : undefined,
+          presented: fx.presented === true ? true : undefined,
         });
       }
       for (const o of offers) {
@@ -1787,6 +1799,13 @@ export function liveGraphIO(send: LiveSend): GraphIO {
           // the firm ladder in the one path that skipped it.
           toNumber: existing?.toNumber ?? numberByVendor.get(o.vendor_id),
           firmCount: existing?.firmCount,
+          // The session brief's facts survive the replacement for exactly the
+          // same reason: this branch rebuilds the row wholesale, so anything it
+          // does not carry is lost for every shop whose price lives in offers.
+          declined: existing?.declined,
+          outOfStock: existing?.outOfStock,
+          rounds: existing?.rounds,
+          presented: existing?.presented,
         });
       }
 

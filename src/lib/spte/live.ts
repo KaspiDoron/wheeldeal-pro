@@ -25,6 +25,7 @@ import {
   type TurnComprehension,
 } from "./comprehension";
 import { quoteOnTable } from "./policy";
+import { HISTORY_ELISION, HISTORY_HEAD_LINES } from "../wa/history-window";
 import { normalizeDigits } from "../integrity/translation";
 import { citesPrice, findNumerals } from "../integrity/money-context";
 import { cheapestCheaperRival } from "../negotiation/leverage";
@@ -345,6 +346,7 @@ async function buildSession(
   const thisVendor = input.ctx.vendorId ?? "";
   let rivals: SessionSnapshot["rivals"] = [];
   let lowest: SessionSnapshot["lowest"] = null;
+  let brief = "";
   if (email) {
     // SAME VEHICLE. A quote for a different machine is not a rival, and citing
     // one at a shop is an argument we made up.
@@ -390,6 +392,17 @@ async function buildSession(
       durationDays: input.rfq.durationDays,
     });
     lowest = sessionFloor(rows, compareCur);
+    // WHERE EVERY OTHER SHOP STANDS - not just the four we can cite.
+    //
+    // `validRivals` is a LEVERAGE filter: it keeps live, priced,
+    // comparable-currency quotes and drops everything else. That is right for
+    // the rival card and wrong as the agent's only knowledge of the hunt: a
+    // shop that said no, a shop still silent, and "this is the last shop left"
+    // are all facts a human negotiator holds in their head and each one changes
+    // the tactic. Built from the SAME `rows` already in hand, so it adds no
+    // read; bounded in lines and characters so it cannot crowd the prompt.
+    const { buildSessionBrief } = await import("../negotiation/session-brief");
+    brief = buildSessionBrief({ rows, excludeVendorId: thisVendor });
   }
   // Grounded market benchmark (F5): the ONLY market rate allowed into the
   // prompt - web-grounded with a source URL, and ONLY when its currency matches
@@ -451,15 +464,33 @@ async function buildSession(
     benchmark,
     lowest,
     rivals,
+    brief,
     priors,
     coaching,
   };
 }
 
-/** How many transcript lines reach the prompt. The window itself is already
- *  char-budgeted (wa/history-window); this is the second bound, so a long
- *  thread cannot crowd out the blackboard blocks above it. */
-const TAIL_LINES = 8;
+/**
+ * How many transcript lines reach the prompt.
+ *
+ * THIS BOUND WAS THROWING AWAY THE PART THE WINDOW WORKS HARDEST TO KEEP.
+ *
+ * `buildHistoryWindow` is char-budgeted at 4000 and, when a thread overflows,
+ * preserves the four OLDEST lines verbatim - the RFQ and the vehicle-naming
+ * turns, "the part a misunderstanding destroys deals over" in its own words -
+ * marks the elision, and fills the tail newest-backwards. `buildTail` then
+ * parsed that carefully-shaped window back into turns, dropped the elision
+ * marker, and took the last EIGHT lines: on any thread longer than eight
+ * messages the preserved head was discarded, and with it the dates, the vehicle
+ * and any early promise. The engine that is supposed to remember the whole
+ * conversation remembered four exchanges.
+ *
+ * The real bound is the window's character budget, which is already applied
+ * upstream. This stays only as a safety valve for a pathological thread of very
+ * short lines - and when it binds it now keeps the HEAD as well as the tail,
+ * exactly as the window intended.
+ */
+export const TAIL_LINES = 40;
 
 /**
  * THE CONVERSATION, BOTH SIDES OF IT (W4.5).
@@ -478,9 +509,16 @@ const TAIL_LINES = 8;
  * simulator, the older call sites and every existing unit test), so nothing
  * that does not pass `history` changes behaviour.
  */
-export function buildTail(input: GraphTurnInput): TurnContext["tail"] {
+export function buildThreadTail(input: GraphTurnInput): {
+  tail: TurnContext["tail"];
+  elided: boolean;
+} {
   const at = new Date(input.deadlineAt - 40_000).toISOString();
   const parsed: TurnContext["tail"] = [];
+  // The window says so itself when it had to drop the middle. Carried through
+  // as a FLAG rather than as a fake turn: it is not something anyone said, so
+  // it must not enter the repetition corpus or the counter-already-made check.
+  let elided = String(input.history ?? "").includes(HISTORY_ELISION);
   for (const line of String(input.history ?? "").split("\n")) {
     const l = line.trim();
     if (l.startsWith("Shop: ")) parsed.push({ dir: "in", text: l.slice(6).trim(), at });
@@ -488,8 +526,24 @@ export function buildTail(input: GraphTurnInput): TurnContext["tail"] {
     // The elision marker and anything else the window emitted are not turns.
   }
   const kept = parsed.filter((m) => m.text.length > 0);
-  if (kept.length) return kept.slice(-TAIL_LINES);
-  return (input.priorOutbound ?? []).slice(-3).map((text) => ({ dir: "out" as const, text, at }));
+  if (!kept.length) {
+    return {
+      tail: (input.priorOutbound ?? []).slice(-3).map((text) => ({ dir: "out" as const, text, at })),
+      elided: false,
+    };
+  }
+  if (kept.length <= TAIL_LINES) return { tail: kept, elided };
+  // KEEP BOTH ENDS, the way the window does. Taking only the newest lines is
+  // what discarded the RFQ and the vehicle on every long thread.
+  const head = kept.slice(0, HISTORY_HEAD_LINES);
+  const rest = kept.slice(-(TAIL_LINES - HISTORY_HEAD_LINES));
+  elided = true;
+  return { tail: [...head, ...rest], elided };
+}
+
+/** The turns alone - the shape every existing caller and test expects. */
+export function buildTail(input: GraphTurnInput): TurnContext["tail"] {
+  return buildThreadTail(input).tail;
 }
 
 /** Map a closed MoveKind to the outbox meta.kind used by drain/pacing AND by the
@@ -725,7 +779,10 @@ async function buildTurnContext(
     // Wall clock for the confirm-wait and recap-answer bounds. Live only -
     // replays leave it unset and keep pure turn arithmetic.
     nowMs: io.now(),
-    tail: buildTail(input),
+    ...(() => {
+      const t = buildThreadTail(input);
+      return { tail: t.tail, tailElided: t.elided };
+    })(),
     // The gloss the app already paid for, finally reaching the composer.
     inbound: { text, english: (input.inboundEnglish ?? "").trim() || undefined, verified },
     legalMoves: [], // computed deterministically inside runTurn (legalMovesFor)

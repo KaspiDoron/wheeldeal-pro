@@ -300,6 +300,25 @@ export interface SessionShopRow {
   /** How many times this shop has said "last price" - a shop that has refused
    *  twice is not re-opened by the swarm. */
   firmCount?: number;
+  // ---- THE SESSION BRIEF (ask 5) -------------------------------------------
+  //
+  // WHAT A HUMAN NEGOTIATOR REMEMBERS ABOUT THE OTHER SHOPS. The cross-thread
+  // read gave the turn PRICES and nothing else, so the agent could not know
+  // that shop C had said no, that shop D was still silent, or that this was the
+  // last shop left in the hunt - all of which change how hard you push.
+  //
+  // Every field below is read from the SAME `fields` blob the projection
+  // already loads and already throws away, so the brief costs zero extra
+  // queries. Nothing here is rendered with a shop name attached: the
+  // disclosure rule that keeps the rival card anonymous applies whole.
+  /** The shop walked away (fields.declined). */
+  declined?: boolean;
+  /** The shop has no vehicle for these dates (fields.shopUnavailable). */
+  outOfStock?: boolean;
+  /** How many bargaining rounds this thread has run (fields.rounds). */
+  rounds?: number;
+  /** A deal from this shop has been put to the traveller (fields.presented). */
+  presented?: boolean;
 }
 
 // ---------------------------------------------------------------------------
