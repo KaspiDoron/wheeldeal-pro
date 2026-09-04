@@ -2,6 +2,7 @@ import "server-only";
 import { createHash } from "crypto";
 import { sbDelete, sbInsert, sbInsertClaim, sbSelectStrict } from "../runtime-config";
 import { digitsOnly } from "../phone";
+import { outboxKey } from "./phone-key";
 
 /**
  * ALARM ON THE SILENT DEGRADATION (W-beta30).
@@ -160,9 +161,18 @@ export const HARD_MIN_GAP_SEC = 8;
  */
 export const RECIPIENT_LOCK_SEC = HARD_MIN_GAP_SEC;
 
-/** The mutex key. Keyed on the RECIPIENT only - no lane, no gap size. */
+/**
+ * The mutex key. Keyed on the RECIPIENT only - no lane, no gap size - and on
+ * the SHOP rather than the spelling (audit F036): `outboxKey` is the national
+ * tail both spellings of one line agree on (waDigits when the number is too
+ * short to yield one), the same canonical key wa_outbox.to_key and its unique
+ * index use. Keyed on `digitsOnly` the cold rfq row ("09661952196", Google's
+ * national form) and the live reply row ("639661952196", the JID) claimed two
+ * different primary keys, both won, and one shop got two of our messages inside
+ * the same second - the Ko Tao collision this mutex exists to prevent.
+ */
 export function recipientSlot(toDigits: string, bucket: number): string {
-  return `to:${digitsOnly(toDigits)}:${bucket}`;
+  return `to:${outboxKey(toDigits)}:${bucket}`;
 }
 
 export interface BatchSchedule {
