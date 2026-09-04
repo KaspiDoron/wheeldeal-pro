@@ -11,6 +11,7 @@ vi.mock("server-only", () => ({}));
 interface MarkerRow {
   sender: string;
   digits: string;
+  tail?: string;
   kind: string;
   reason?: string;
   at: number;
@@ -53,10 +54,11 @@ vi.mock("../runtime-config", () => ({
     if (table === "whatsapp_messages") {
       if (state.messagesMode !== "ok") return false;
       for (const r of rows) {
-        const raw = r.raw as { sender?: string; digits?: string; kind?: string; reason?: string };
+        const raw = r.raw as { sender?: string; digits?: string; tail?: string; kind?: string; reason?: string };
         state.markers.push({
           sender: String(raw.sender),
           digits: String(raw.digits),
+          ...(raw.tail ? { tail: String(raw.tail) } : {}),
           kind: String(raw.kind),
           reason: raw.reason,
           at: state.clock++,
@@ -88,10 +90,20 @@ vi.mock("../runtime-config", () => ({
     if (table === "wa_cancellations") {
       if (state.cancellationsMode !== "ok") return { error: state.cancellationsMode };
       const sender = decodeURIComponent(/sender_key=eq\.([^&]+)/.exec(query)?.[1] ?? "");
-      const to = decodeURIComponent(/to_number=eq\.([^&]+)/.exec(query)?.[1] ?? "");
+      // isCancelled now reads TOLERANTLY (audit F035) with the same
+      // numberFilter or-group the delete mock above already honours.
+      const eqs = [...query.matchAll(/to_number\.eq\.([0-9]+)/g)].map((m) => m[1]);
+      const exact = decodeURIComponent(/(?:^|&)to_number=eq\.([^&]+)/.exec(query)?.[1] ?? "");
+      if (exact) eqs.push(exact);
+      const tail = /to_number\.like\.\*([0-9]+)/.exec(query)?.[1];
+      const scoped = eqs.length > 0 || Boolean(tail);
       return {
         rows: state.tableRows
-          .filter((r) => r.sender_key === sender && (!to || r.to_number === to))
+          .filter(
+            (r) =>
+              r.sender_key === sender &&
+              (!scoped || eqs.includes(r.to_number) || (tail ? r.to_number.endsWith(tail) : false))
+          )
           .map((r) => ({
             id: 1,
             to_number: r.to_number,
@@ -103,9 +115,24 @@ vi.mock("../runtime-config", () => ({
     if (table === "whatsapp_messages") {
       if (state.messagesMode !== "ok") return { error: state.messagesMode };
       const sender = decodeURIComponent(/raw->>sender=eq\.([^&]+)/.exec(query)?.[1] ?? "");
-      const digits = decodeURIComponent(/raw->>digits=eq\.([^&]+)/.exec(query)?.[1] ?? "");
+      // markerSaysCancelled now reads TOLERANTLY (audit F035): an or-group of
+      // `raw->>digits.eq.<spelling>` clauses plus `raw->>tail.eq.<tail>`. The
+      // mock honours the or-group so the digits filter is exercised, not
+      // vacuous; the exact form stays for cancelledEntries' sender-wide read.
+      const exact = decodeURIComponent(/raw->>digits=eq\.([^&]+)/.exec(query)?.[1] ?? "");
+      const group = /(?:^|&)or=\(([^)]*)\)/.exec(query)?.[1] ?? "";
+      const digitsIn = [...group.matchAll(/raw->>digits\.eq\.([0-9]+)/g)].map((m) => m[1]);
+      const tails = [...group.matchAll(/raw->>tail\.eq\.([0-9]+)/g)].map((m) => m[1]);
+      if (exact) digitsIn.push(exact);
+      const scoped = digitsIn.length > 0 || tails.length > 0;
       const rows = state.markers
-        .filter((m) => m.sender === sender && (!digits || m.digits === digits))
+        .filter(
+          (m) =>
+            m.sender === sender &&
+            (!scoped ||
+              digitsIn.includes(m.digits) ||
+              (m.tail ? tails.includes(m.tail) : false))
+        )
         .sort((a, b) => b.at - a.at)
         .map((m) => ({
           raw: { sender: m.sender, digits: m.digits, kind: m.kind, ...(m.reason ? { reason: m.reason } : {}) },

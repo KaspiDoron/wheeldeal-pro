@@ -44,6 +44,7 @@ This lets you paste all other keys inside the app and have them stick.
    | `SESSION_SECRET` | a long random string (see below) |
    | `OWNER_EMAIL` | `kaspidoron@gmail.com` (the owner - full control) |
    | `ADMIN_EMAILS` | `kaspidoron@gmail.com` |
+   | `OWNER_BOOTSTRAP_PASSWORD` | a one-time secret (8+ characters) for the owner's FIRST sign-in on a fresh database; you are asked to change it right away, and it can be removed afterwards. There is no default - without it the owner cannot be created |
 4. Make a `SESSION_SECRET`: on a Mac/Linux terminal run `openssl rand -hex 32`
    and paste the result. (Set it once and never change it - it protects your
    saved keys.)
@@ -74,10 +75,11 @@ This lets you paste all other keys inside the app and have them stick.
    climbs as shops reply, then falls as the cron embeds them.
 9. Redeploy the Cloud Run web service so the new variables load.
 
-Now sign in to your live app with `kaspidoron@gmail.com` (the owner signs in
-with email only - no phone or terms needed), open **Admin -> Keys**, and you'll
-see a green "Persistence is on" banner. Anything you paste here is saved
-securely.
+Now sign in to your live app with `kaspidoron@gmail.com` and the
+`OWNER_BOOTSTRAP_PASSWORD` you set (the owner signs in with email + that
+one-time secret - no phone or terms needed - and is asked to choose a real
+password straight away), open **Admin -> Keys**, and you'll see a green
+"Persistence is on" banner. Anything you paste here is saved securely.
 
 ---
 

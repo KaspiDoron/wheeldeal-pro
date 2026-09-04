@@ -9,6 +9,7 @@
 import { sbInsert, sbSelectStrict } from "./runtime-config";
 import { boundedSet } from "./bounded-map";
 import { cacheIsStale, UNKNOWN_VERSION } from "./versioned";
+import { numberVariants, outboxKey } from "./wa/phone-key";
 
 // These caches live for the whole PROCESS lifetime in the workers (which import
 // all of src/lib), so an unbounded Map grows one entry per user - and the
@@ -79,20 +80,56 @@ function takeoverCache(): Map<string, CacheEntry> {
   return globalThis.__wd_takeover_flags__;
 }
 
+/**
+ * ONE key per SHOP, whichever spelling the caller holds (audit F176). The app
+ * toggle resolves the newest OUTBOUND row's to_number (Google's national
+ * "09776620146"); the ingest detector stamps WhatsApp's inbound JID digits
+ * ("639776620146"). `outboxKey` is the national tail both agree on, with
+ * waDigits as the fallback for a number too short to yield one - so the toggle
+ * and the detector share one cache entry instead of two, and a stale `false`
+ * under the other spelling can no longer be served for 30s after a takeover.
+ */
+function takeoverCacheKey(email: string, digits: string): string {
+  return `${email}:${outboxKey(digits) || digits}`;
+}
+
+/**
+ * The marker's "this shop" fragment, TOLERANT of spelling (audit F176): the
+ * canonical `digitsKey` stamped on markers written since, plus every spelling
+ * numberVariants can derive from the digits in hand (so rows written before
+ * the key existed still resolve). ONE `or=(...)` param beside the untouched
+ * `to_number=eq.takeover` filter - no second query on the send path - and only
+ * `.eq.` clauses on jsonb paths, the exact shape bargain-draft, deals/restore
+ * and evolution.ts already run against production PostgREST.
+ */
+function takeoverNumberFilter(digits: string): string {
+  const clauses = numberVariants(digits)
+    .filter((v) => /^\d{5,20}$/.test(v))
+    .map((v) => `raw->>digits.eq.${v}`);
+  const key = outboxKey(digits);
+  if (/^\d{5,20}$/.test(key)) clauses.unshift(`raw->>digitsKey.eq.${key}`);
+  if (clauses.length === 0) return `&raw->>digits=eq.${encodeURIComponent(digits)}`;
+  return `&or=(${clauses.join(",")})`;
+}
+
 export async function setThreadTakeover(
   email: string,
   digits: string,
   on: boolean
 ): Promise<boolean> {
   const kind = on ? "human-takeover" : "human-handback";
-  const key = `${email}:${digits}`;
+  const key = takeoverCacheKey(email, digits);
+  const digitsKey = outboxKey(digits);
   const ok = await sbInsert("whatsapp_messages", [
     {
       from_number: "system",
       to_number: "takeover",
       body: `[${kind} ${digits}]`,
       direction: "outbound",
-      raw: { sender: email, digits, kind },
+      // `digits` keeps the caller's spelling (the body, the KPI twin and the
+      // message-path readers key on it); `digitsKey` is the canonical per-shop
+      // key the reader matches on, so either spelling finds this marker.
+      raw: { sender: email, digits, kind, ...(digitsKey ? { digitsKey } : {}) },
     },
   ]);
   // TELEMETRY TWIN of the marker row. The escalation KPI (kpis.ts) counts
@@ -129,14 +166,14 @@ export async function isThreadTakenOver(
   email: string,
   digits: string
 ): Promise<boolean | null> {
-  const key = `${email}:${digits}`;
+  const key = takeoverCacheKey(email, digits);
   const hit = takeoverCache().get(key);
   if (hit && Date.now() - hit.at < TTL_MS) return hit.paused;
   const res = await sbSelectStrict<{ raw: { kind?: string } | null }>(
     "whatsapp_messages",
     `select=raw&to_number=eq.takeover&raw->>sender=eq.${encodeURIComponent(
       email
-    )}&raw->>digits=eq.${encodeURIComponent(
+    )}${takeoverNumberFilter(
       digits
     )}&raw->>kind=in.(human-takeover,human-handback)&order=received_at.desc&limit=1`
   );

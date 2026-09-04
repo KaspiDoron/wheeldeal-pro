@@ -52,7 +52,7 @@ import { clampRestampToWave } from "./wa/waves";
 // `noteRisk` cannot throw, so telemetry can never be the reason a send fails.
 import { noteRisk } from "./wa/risk-events";
 import { digitsOnly } from "./phone";
-import { numberFilter, waDigits, lidKey, nationalTail } from "./wa/phone-key";
+import { numberFilter, waDigits, lidKey, nationalTail, outboxKey, identityKey } from "./wa/phone-key";
 import { outboxToKeyPatch } from "./wa/outbox-columns";
 import {
   claimOutboxRow,
@@ -610,7 +610,7 @@ async function upsertRecipient(
   senderKey: string,
   toNumber: string,
   patch: Record<string, unknown>
-): Promise<void> {
+): Promise<boolean> {
   const tail = nationalTail(toNumber);
   const sender = encodeURIComponent(senderKey);
 
@@ -630,18 +630,51 @@ async function upsertRecipient(
     existing = byExact[0];
   }
 
+  // The write's own verdict is RETURNED (audit F013): sbUpdate/sbInsert answer
+  // false rather than throwing, so a caller that discards this cannot tell a
+  // landed stamp from a lost one - and the opt-out veto reads only what landed.
   if (existing?.id) {
     // Backfill the tail on the legacy row we just adopted, so the next write
     // finds it by tail and the duplicate never appears.
-    await sbUpdate("wa_recipient_state", `id=eq.${existing.id}`, {
+    return sbUpdate("wa_recipient_state", `id=eq.${existing.id}`, {
       ...(tail ? { to_tail: tail } : {}),
       ...patch,
     });
-  } else {
-    await sbInsert("wa_recipient_state", [
-      { sender_key: senderKey, to_number: toNumber, ...(tail ? { to_tail: tail } : {}), ...patch },
-    ]);
   }
+  return sbInsert("wa_recipient_state", [
+    { sender_key: senderKey, to_number: toNumber, ...(tail ? { to_tail: tail } : {}), ...patch },
+  ]);
+}
+
+/**
+ * PROCESS-LOCAL opted-out set (audit F013). The durable stamp is what every
+ * instance reads; this is what THIS instance reads when the stamp did not
+ * land (a PATCH 5xx, an 8s timedFetch abort). guardOutbound's veto consults it
+ * beside the row read, so the turn that detected the stop - and everything the
+ * drain or the reply tick sends from this instance afterwards - is refused
+ * even with nothing durable to read. Keyed on the SHOP (identityKey), not the
+ * spelling, so the outbox row's national number and the JID agree. Bounded,
+ * because opt-outs are rare but a worker lives for weeks.
+ */
+const OPTED_OUT_LOCAL_CAP = 5000;
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __wd_opted_out_local__: Map<string, number> | undefined;
+}
+
+function optedOutLocal(): Map<string, number> {
+  if (!globalThis.__wd_opted_out_local__) globalThis.__wd_opted_out_local__ = new Map();
+  return globalThis.__wd_opted_out_local__;
+}
+
+function optedOutKey(senderKey: string, toNumber: string): string {
+  return `${senderKey}|${identityKey(toNumber) || digitsOnly(toNumber)}`;
+}
+
+/** Has THIS instance seen this shop tell this sender to stop? */
+export function optedOutLocally(senderKey: string, toNumber: string): boolean {
+  return optedOutLocal().has(optedOutKey(senderKey, toNumber));
 }
 
 /**
@@ -662,20 +695,55 @@ export async function markRecipientOptedOut(
   senderKey: string,
   toNumber: string,
   vendorName?: string
-): Promise<void> {
-  try {
-    await upsertRecipient(senderKey, toNumber, { opted_out_at: new Date().toISOString() });
-  } catch {
-    /* the event below still records the request */
+): Promise<boolean> {
+  // 1. THIS instance refuses from memory, from this instant, whatever the
+  //    store says - the half that closes the turn the stop arrived in.
+  const local = optedOutLocal();
+  local.set(optedOutKey(senderKey, toNumber), Date.now());
+  if (local.size > OPTED_OUT_LOCAL_CAP) {
+    const oldest = local.keys().next().value;
+    if (oldest !== undefined) local.delete(oldest);
   }
-  await sbInsert("agent_events", [
-    {
-      kind: "wa-opt-out",
-      vendor_name: vendorName || digitsOnly(toNumber),
-      user_email: senderKey,
-      detail: `+${digitsOnly(toNumber)} asked not to be messaged again - every future send to this number is refused.`,
-    },
-  ]).catch(() => {});
+  // 2. The durable stamp - what every OTHER instance's veto reads. ONE attempt
+  //    here: this sits ahead of composition on the reply path.
+  let persisted = false;
+  try {
+    persisted = await upsertRecipient(senderKey, toNumber, { opted_out_at: new Date().toISOString() });
+  } catch {
+    persisted = false;
+  }
+  // 3. The breadcrumb says what the veto can actually read (audit F013): a
+  //    lost write used to leave an event asserting a refusal nothing enforced.
+  const number = `+${digitsOnly(toNumber)}`;
+  const event = (detail: string) =>
+    sbInsert("agent_events", [
+      {
+        kind: "wa-opt-out",
+        vendor_name: vendorName || digitsOnly(toNumber),
+        user_email: senderKey,
+        detail,
+      },
+    ]).catch(() => {});
+  await event(
+    persisted
+      ? `${number} asked not to be messaged again - every future send to this number is refused.`
+      : `${number} asked not to be messaged again - the opt-out stamp was NOT PERSISTED (the store refused the write); this instance refuses sends from memory and retries the stamp once.`
+  );
+  // 4. One deferred retry, OFF the reply path - never awaited by the caller,
+  //    a short backoff, and its own breadcrumb when it lands so the trail
+  //    stops at the truth.
+  if (!persisted) {
+    void (async () => {
+      await new Promise((r) => setTimeout(r, 150));
+      const landed = await upsertRecipient(senderKey, toNumber, {
+        opted_out_at: new Date().toISOString(),
+      }).catch(() => false);
+      if (landed) {
+        await event(`${number} - the opt-out stamp persisted on retry; every future send to this number is refused.`);
+      }
+    })();
+  }
+  return persisted;
 }
 
 /**
@@ -2596,7 +2664,13 @@ export async function guardOutbound(rawOpts: {
   //      trace. An unreadable row proceeds (the auto path is already held at
   //      -3 during an outage; refusing a manual send on a read blip is the
   //      wrong direction for a boundary we may not even have on record).
-  if ("rows" in priorRecipient && priorRecipient.rows.some((r) => r.opted_out_at)) {
+  //      The process-local set (audit F013) is consulted BESIDE the row read:
+  //      when the stamp did not land, this instance still refuses the turn
+  //      the stop arrived in and everything it drains afterwards.
+  if (
+    ("rows" in priorRecipient && priorRecipient.rows.some((r) => r.opted_out_at)) ||
+    optedOutLocally(opts.senderKey, opts.toDigits)
+  ) {
     void recordSendDropped(
       opts.senderKey,
       opts.toDigits,
@@ -3666,7 +3740,10 @@ export async function drainOutbox(
     // did this row first get a real chance to go?" is still knowable.
     const dueSince = firstDueAt ?? Date.now();
     const cold = isCold(cand);
-    const rcptKey = `${cand.sender_key}|${digitsOnly(cand.to_number)}`;
+    // Keyed on the SHOP, not the spelling (audit F036) - the same canonical key
+    // the recipient mutex claims on, so a reply row under the JID spelling and
+    // a row under Google's national spelling count as one recipient here too.
+    const rcptKey = `${cand.sender_key}|${outboxKey(cand.to_number)}`;
     const overCap = cold
       ? (rfqBySender.get(cand.sender_key) ?? 0) >= 2
       : replyGlobalBudget <= 0 ||

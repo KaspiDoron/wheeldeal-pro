@@ -177,7 +177,12 @@ export function filterFor(entry: UserTableKey, emailRaw: string): string {
   if (entry.match === "prefix") {
     // PostgREST `like` uses * as the wildcard; the colon terminates the email
     // so a@x.com never matches a@x.com.evil rows.
-    return `${entry.column}=like.${encodeURIComponent(`${email}:`)}*`;
+    // LIKE-ESCAPED (audit F022): `_`, `%` and `\` are live metacharacters
+    // inside the pattern, so an unescaped "a_b@x.com:%" reached "axb@x.com"'s
+    // rows - on the erase DELETE and the DSAR export alike. Same escape the
+    // wakeup drain in graph/engine.ts already applies for the same reason.
+    const escaped = email.replace(/([\\%_])/g, "\\$1");
+    return `${entry.column}=like.${encodeURIComponent(`${escaped}:`)}*`;
   }
   if (entry.match === "reset-prefix") {
     return `${entry.column}=eq.${encodeURIComponent(`reset:${email}`)}`;

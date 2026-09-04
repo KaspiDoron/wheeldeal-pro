@@ -2,7 +2,7 @@ import "server-only";
 import { getConfig, sbDelete, sbInsert, sbSelectStrict } from "../runtime-config";
 import { parseFlag } from "../config-flags";
 import { digitsOnly } from "../phone";
-import { numberFilter } from "./phone-key";
+import { nationalTail, numberFilter, numberVariants } from "./phone-key";
 
 // Cancellation tombstones - the "absolute queue deletion" guarantee.
 //
@@ -46,9 +46,37 @@ async function writeMarker(
       body: kind === "cancelled-shop" ? `(stopped messages to +${digits})` : `(re-opened +${digits})`,
       type: "system",
       direction: "outbound",
-      raw: { sender: senderKey, digits, kind, ...(reason ? { reason } : {}) },
+      // `tail` is the canonical per-shop key (audit F035): the national tail
+      // both spellings of one line agree on, so a marker written under the
+      // outbox row's spelling is still found by the reply path's JID digits.
+      raw: {
+        sender: senderKey,
+        digits,
+        kind,
+        ...(nationalTail(digits) ? { tail: nationalTail(digits) } : {}),
+        ...(reason ? { reason } : {}),
+      },
     },
   ]);
+}
+
+/**
+ * The marker's "this shop" fragment, TOLERANT of spelling (audit F035): every
+ * spelling numberVariants can derive from the digits in hand, plus the canonical
+ * tail stamped on markers written since. Only `.eq.` clauses on jsonb paths -
+ * the exact `or=(raw->>x.eq.a,raw->>y.eq.b)` shape bargain-draft, deals/restore
+ * and evolution.ts already run against production PostgREST. Deliberately NO
+ * `like` on a jsonb path: nothing in this repo has proven that shape, and a 400
+ * here would return null and hold every automated send fleet-wide.
+ */
+function markerNumberFilter(digits: string): string {
+  const clauses = numberVariants(digits)
+    .filter((v) => /^\d{5,20}$/.test(v))
+    .map((v) => `raw->>digits.eq.${v}`);
+  const tail = nationalTail(digits);
+  if (tail) clauses.unshift(`raw->>tail.eq.${tail}`);
+  if (clauses.length === 0) return `&raw->>digits=eq.${encodeURIComponent(digits)}`;
+  return `&or=(${clauses.join(",")})`;
 }
 
 /** Newest marker verdict: true=cancelled, false=cleared/none, null=unreadable. */
@@ -57,7 +85,7 @@ async function markerSaysCancelled(senderKey: string, digits: string): Promise<b
     "whatsapp_messages",
     `select=raw&to_number=eq.cancel&direction=eq.outbound&raw->>sender=eq.${encodeURIComponent(
       senderKey
-    )}&raw->>digits=eq.${encodeURIComponent(digits)}&received_at=gte.${encodeURIComponent(
+    )}${markerNumberFilter(digits)}&received_at=gte.${encodeURIComponent(
       new Date(Date.now() - MARKER_WINDOW_MS).toISOString()
     )}&order=received_at.desc&limit=1`
   );
@@ -130,11 +158,17 @@ export async function isCancelled(
   const digits = digitsOnly(toDigits);
   if (!senderKey || !digits) return false;
   if (!(await cancelGuardEnabled())) return false;
+  // TOLERANT read (audit F035) - the same numberFilter the clear at
+  // clearCancellation already uses. The tombstone is written from the outbox
+  // row's spelling (Google's national number) while the reply path asks with
+  // WhatsApp's JID digits; an exact match let a removed shop be auto-messaged
+  // the moment it replied.
   const res = await sbSelectStrict<{ id: number }>(
     "wa_cancellations",
-    `select=id&sender_key=eq.${encodeURIComponent(senderKey)}&to_number=eq.${encodeURIComponent(
+    `select=id&sender_key=eq.${encodeURIComponent(senderKey)}&limit=1${numberFilter(
+      "to_number",
       digits
-    )}&limit=1`
+    )}`
   );
   if ("rows" in res && res.rows.length > 0) return true;
   const tableUnavailable = !("rows" in res) && res.error === "unavailable";

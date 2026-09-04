@@ -159,9 +159,14 @@ describe("the floor it enforces", () => {
   });
 
   it("the key carries the recipient and nothing else - no lane, no gap size", async () => {
-    expect(recipientSlot("+66 93 103 4552", 7)).toBe("to:66931034552:7");
+    // The recipient is the SHOP, keyed on its canonical national tail (audit
+    // F036) - the same key the outbox unique index uses - so the cold rfq row
+    // under Google's national spelling and the reply row under the JID
+    // spelling contend for ONE slot. See recipient-mutex-spelling.test.ts.
+    expect(recipientSlot("+66 93 103 4552", 7)).toBe("to:931034552:7");
     // Two lanes, one key: that is the entire point.
     expect(recipientSlot("66931034552", 7)).toBe(recipientSlot("+66-93-103-4552", 7));
+    expect(recipientSlot("0931034552", 7)).toBe(recipientSlot("66931034552", 7));
   });
 });
 

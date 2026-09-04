@@ -13,8 +13,45 @@ import { sbInsert } from "@/lib/runtime-config";
 const EMAIL_RX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PHONE_RX = /^\+?[\d\s\-()]{7,17}$/;
 
-// The owner's bootstrap password (changeable in Profile like any user).
-const OWNER_DEFAULT_PASSWORD = "KASPI123";
+/**
+ * The owner's ONE-TIME bootstrap credential (audit F258). Read from the
+ * environment only - there is NO default and no literal in this file: the old
+ * well-known default plus the owner address published in the docs let a single
+ * anonymous POST install that password on a password-less owner row and mint an
+ * owner cookie. Installed with mustChange=true, verified like any other
+ * password, and refused (503) when unset or too short to be a credential.
+ */
+const OWNER_BOOTSTRAP_MIN_LEN = 8;
+function ownerBootstrapPassword(): string | null {
+  const v = (process.env.OWNER_BOOTSTRAP_PASSWORD ?? "").trim();
+  return v.length >= OWNER_BOOTSTRAP_MIN_LEN ? v : null;
+}
+const bootstrapUnconfigured = () =>
+  NextResponse.json(
+    {
+      error:
+        "Owner bootstrap is not configured (owner: set OWNER_BOOTSTRAP_PASSWORD to a one-time secret of at least 8 characters, sign in with it once, then change it in Profile).",
+    },
+    { status: 503 }
+  );
+
+/**
+ * Create the owner row on a fresh instance with the bootstrap secret and FORCE
+ * a change on first login, so the bootstrap can never remain a live credential.
+ * The caller still verifies the submitted password against the row - the
+ * bootstrap creates the account, it never signs anyone in by itself.
+ */
+async function bootstrapOwner(email: string, bootstrap: string, phone?: string) {
+  await registerUser({
+    email,
+    phone,
+    password: bootstrap,
+    provider: "email",
+    acceptedTerms: true,
+  });
+  await setPassword(email, bootstrap, true);
+  return getUser(email, { fresh: true });
+}
 
 // Email + password auth. Accounts live durably in Supabase (app_users), so
 // logins, signups and password changes work across serverless instances.
@@ -127,15 +164,21 @@ export async function POST(req: Request) {
       }
     }
     // Owner bootstrap: no email round-trip needed (invited testers were already
-    // registered above in the no-email-provider fall-through).
+    // registered above in the no-email-provider fall-through). The row is
+    // created with the BOOTSTRAP secret - never the caller's own choice - and
+    // the submitted password must match it (audit F258): before this, anyone
+    // who knew the owner address could sign up as the owner on a fresh
+    // deployment with a password of their choosing.
     if (isOwner(email)) {
-      await registerUser({
-        email,
-        phone: phone || undefined,
-        password: password || OWNER_DEFAULT_PASSWORD,
-        provider: "email",
-        acceptedTerms: true,
-      });
+      const bootstrap = ownerBootstrapPassword();
+      if (!bootstrap) return bootstrapUnconfigured();
+      const owner = await bootstrapOwner(email, bootstrap, phone || undefined);
+      if (!verifyPassword(password, owner?.passwordHash)) {
+        return NextResponse.json(
+          { error: "Wrong password. Try again or use Forgot password." },
+          { status: 401 }
+        );
+      }
     }
   } else {
     // Brute-force throttle, keyed on (email, ip) - NOT on the email alone.
@@ -160,18 +203,15 @@ export async function POST(req: Request) {
     // Log in - always verify against the freshest durable record.
     let user = await getUser(email, { fresh: true });
     if (!user && isOwner(email)) {
-      // Owner bootstrap on a fresh instance: create with the default password
-      // but FORCE a change on first login so the well-known default can never
-      // remain a live credential.
-      user = await registerUser({
-        email,
-        password: OWNER_DEFAULT_PASSWORD,
-        provider: "email",
-        acceptedTerms: true,
-      });
-      const { setPassword: setPw } = await import("@/lib/access");
-      await setPw(email, OWNER_DEFAULT_PASSWORD, true);
-      user = await getUser(email, { fresh: true });
+      // Owner bootstrap on a fresh instance: the row is created with the
+      // env-only bootstrap secret and FORCED to change on first login, so it
+      // can never remain a live credential. Unset -> 503, never a well-known
+      // default (audit F258). The submitted password is verified below like
+      // any other; setPassword revokes every session, and the caller's own
+      // cookie is minted after that, at the end of this handler.
+      const bootstrap = ownerBootstrapPassword();
+      if (!bootstrap) return bootstrapUnconfigured();
+      user = await bootstrapOwner(email, bootstrap);
     }
     if (!user) {
       return NextResponse.json(
@@ -179,10 +219,11 @@ export async function POST(req: Request) {
         { status: 400 }
       );
     }
-    if (!user.passwordHash && isOwner(email)) {
-      await setPassword(email, OWNER_DEFAULT_PASSWORD);
-      user = await getUser(email, { fresh: true });
-    }
+    // A password-less owner row is an account whose credential is Google (the
+    // Google route registers it with no hash). It gets the same 401 every other
+    // password-less account gets. The re-install branch that used to sit here
+    // wrote a well-known password onto that row for ANY anonymous caller - and
+    // revoked every live owner session doing it (audit F258).
     if (!verifyPassword(password, user?.passwordHash)) {
       const { locked, lockedMinutes } = await noteAuthFailure(lockKey, "login");
       return NextResponse.json(
