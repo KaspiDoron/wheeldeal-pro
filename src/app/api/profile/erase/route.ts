@@ -33,10 +33,13 @@ export async function POST(req: Request) {
     // The truth, and a path forward: the account still exists (deleted LAST,
     // exactly so a partial failure can retry), so they can try again or ask
     // the operator to finish it.
+    // `whatsapp:link` (audit F057) = the Evolution instance could not be
+    // confirmed deleted, so the person's WhatsApp may still be linked.
+    const named = result.failed.map((f) => (f === "whatsapp:link" ? "your WhatsApp link" : f));
     return NextResponse.json(
       {
         error: `Some of your data could not be deleted yet (${[
-          ...result.failed,
+          ...named,
           ...(result.userDeleted ? [] : ["your account row"]),
         ].join(", ")}). Try again in a minute - your account remains until everything is gone.`,
       },

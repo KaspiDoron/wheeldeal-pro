@@ -56,6 +56,7 @@ import {
 import { noteInboundDropped } from "./wa/webhook-trace";
 import { waDigits, numberFilter } from "./wa/phone-key";
 import { resolveThreadContext } from "./wa/thread-context";
+import { accountTurnFence } from "./privacy/turn-fence";
 import type { TraceRow } from "./orchestrator";
 import type { StructuredRFQ, Vendor } from "./types";
 import type { SendResult } from "./wa/transport";
@@ -555,6 +556,22 @@ export async function processVendorReply(opts: {
     }
   }
 
+  /**
+   * THE ACCOUNT FENCE (audit F050). True = stand down: the account this turn
+   * acts for is erased, blocked, or had its sessions revoked after the turn
+   * began. Only the blocked case leaves a breadcrumb - the account still
+   * exists to own it; an erased or revoked account gets NOTHING written for
+   * it, which is the whole point.
+   */
+  async function fenced(): Promise<boolean> {
+    const fence = await accountTurnFence(opts.senderEmail ?? ctx?.sender, turnStartedAt);
+    if (!fence) return false;
+    if (fence === "blocked") {
+      void noteInboundDropped(opts.senderEmail, from, "account-blocked", { state: "blocked" });
+    }
+    return true;
+  }
+
   async function runVendorTurn(): Promise<void> {
   // Already guaranteed by the guard above; restated because narrowing does not
   // cross the closure boundary.
@@ -632,6 +649,15 @@ export async function processVendorReply(opts: {
   // construction); reading it from `resolved` here says so out loud.
   const rfq = resolved.rfq as StructuredRFQ; // non-null: guarded at the top
   const round = Number(ctx.round ?? 0);
+
+  // ---- ACCOUNT FENCE, FIRST WRITE (audit F050) ------------------------------
+  // Everything above this line only READS. From here the turn writes rows
+  // keyed to the traveller (reputation, the inbound copy, vendor_replies,
+  // offers, events). An account the walker has erased, the owner has blocked,
+  // or whose sessions were revoked after this turn began gets nothing written
+  // for it - see privacy/turn-fence.ts. The message lease is handed back in
+  // the finally above, so nothing is silently eaten either.
+  if (await fenced()) return;
 
   // A reply arrived: build the sender's trust score (anti-ban engagement).
   if (ctx.sender) await recordInboundEngagement(ctx.sender, from);
@@ -2347,6 +2373,12 @@ export async function processVendorReply(opts: {
     void noteInboundDropped(opts.senderEmail, from, sessionClosedReason);
     return;
   }
+
+  // ---- ACCOUNT FENCE, BEFORE THE ENGINE (audit F050) ------------------------
+  // The extraction above can take tens of seconds; an erase that completed
+  // meanwhile must not be followed by the outbound send, the offer rows, the
+  // wakeups and the events the engine writes for an account that is gone.
+  if (await fenced()) return;
 
   // ==== THE DIGRAPH NEGOTIATION ENGINE (v2) ==================================
   // The default path: a true directed graph of specialized agents driven by a

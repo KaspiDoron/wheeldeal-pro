@@ -77,6 +77,7 @@ import {
   warmupFactor,
   nextIntroSlotIso,
 } from "./wa/capacity";
+import { insertUserEvent } from "./events";
 
 // ---------------------------------------------------------------------------
 // Policies - DB-driven control panel with safe defaults
@@ -822,12 +823,10 @@ function noteRepBumpDegraded(senderKey: string): void {
   const now = Date.now();
   if (now - last < REP_BUMP_DEGRADED_THROTTLE_MS) return;
   repBumpDegradedAt.set(senderKey, now);
-  void sbInsert("agent_events", [
-    {
-      kind: "wa-rep-bump-degraded",
-      detail: `${senderKey}: wa_rep_bump exists but refused the write - the safety counters fell back to the racy absolute path and will UNDERCOUNT under concurrency. Check the Supabase logs for the function's error (a non-integer value in p_set aborts the whole statement).`,
-    },
-  ]).catch(() => {});
+  void insertUserEvent(senderKey, {
+    kind: "wa-rep-bump-degraded",
+    detail: `${senderKey}: wa_rep_bump exists but refused the write - the safety counters fell back to the racy absolute path and will UNDERCOUNT under concurrency. Check the Supabase logs for the function's error (a non-integer value in p_set aborts the whole statement).`,
+  }).catch(() => {});
 }
 
 /**
@@ -884,12 +883,10 @@ async function saveReputation(
     if (!already) {
       update.paused_until = until;
       try {
-        await sbInsert("agent_events", [
-          {
-            kind: "wa-ban-risk",
-            detail: `${senderKey} auto-paused ${p.risk_pause_minutes}min - risk ${risk.score}: ${risk.reasons.join("; ")}`,
-          },
-        ]);
+        await insertUserEvent(senderKey, {
+          kind: "wa-ban-risk",
+          detail: `${senderKey} auto-paused ${p.risk_pause_minutes}min - risk ${risk.score}: ${risk.reasons.join("; ")}`,
+        });
       } catch {
         /* best-effort */
       }
@@ -1077,17 +1074,15 @@ export async function recordSendError(
   opts: { firstContact: boolean; status: string }
 ): Promise<void> {
   try {
-    await sbInsert("agent_events", [
-      {
-        kind: opts.firstContact ? "wa-send-error-cold" : "wa-send-error-reply",
-        detail:
-          `${senderKey} -> ${toNumber}: WhatsApp returned ${opts.status} on an ` +
-          `outbound ${opts.firstContact ? "FIRST CONTACT" : "reply in an established thread"}.` +
-          (opts.firstContact
-            ? " Cold introductions are held; replies continue."
-            : ""),
-      },
-    ]);
+    await insertUserEvent(senderKey, {
+      kind: opts.firstContact ? "wa-send-error-cold" : "wa-send-error-reply",
+      detail:
+        `${senderKey} -> ${toNumber}: WhatsApp returned ${opts.status} on an ` +
+        `outbound ${opts.firstContact ? "FIRST CONTACT" : "reply in an established thread"}.` +
+        (opts.firstContact
+          ? " Cold introductions are held; replies continue."
+          : ""),
+    });
     await upsertRecipient(senderKey, toNumber, {
       last_error_at: new Date().toISOString(),
     }).catch(() => {});
@@ -2046,12 +2041,10 @@ export async function enterBanRecovery(
       `sender_key=eq.${encodeURIComponent(senderKey)}`,
       { paused_until: until, trust_score: 10 }
     );
-    await sbInsert("agent_events", [
-      {
-        kind: "wa-ban-risk",
-        detail: `${senderKey} entered ban-recovery: paused ${hours}h after a WhatsApp restriction/logout. Sending resumes slowly under warm-up.`,
-      },
-    ]);
+    await insertUserEvent(senderKey, {
+      kind: "wa-ban-risk",
+      detail: `${senderKey} entered ban-recovery: paused ${hours}h after a WhatsApp restriction/logout. Sending resumes slowly under warm-up.`,
+    });
     // The event that has to be in the ledger for any of this to be reviewable
     // later. `until` rides along because ban recovery restores the FULL plan
     // budget the moment it lapses - so the pair (entered, lapsed) is the only

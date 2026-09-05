@@ -29,7 +29,14 @@ describe("every kind the panel asks for is written with an address it can join o
   it("THE REGRESSION: a dropped inbound is addressed, not just labelled", () => {
     const trace = readCode("src/lib/wa/webhook-trace.ts");
     const fn = trace.slice(trace.indexOf("export async function noteInboundDropped"));
-    expect(fn).toMatch(/to_number: digits/);
+    // The address is the SPLIT shape (audit F173): every reason on a shop
+    // thread the traveller opened keeps to_number, while the privacy-gate
+    // reasons (PRIVACY_DROP_REASONS) store no number at all. The unconditional
+    // `to_number: digits` that wrote a personal contact's number is gone.
+    expect(fn).toMatch(/const privacy = PRIVACY_DROP_REASONS\.has\(reason\);/);
+    expect(fn).toMatch(/const shown = privacy \? null : \(digits \?\? null\);/);
+    expect(fn).toMatch(/to_number: shown/);
+    expect(fn).not.toMatch(/to_number: digits/);
     expect(fn).toMatch(/user_email: email/);
   });
 

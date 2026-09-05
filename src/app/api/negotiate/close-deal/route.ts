@@ -275,8 +275,9 @@ export async function POST(req: Request) {
     const { getConfig } = await import("@/lib/runtime-config");
     const keep = ((await getConfig("KEEP_WA_ON_CLOSE")) ?? "").toLowerCase() !== "off";
     if (!keep) {
-      await disconnectInstance(session.email);
-      disconnected = true;
+      // Honest (audit F057): `disconnected` follows what the host confirmed,
+      // not the attempt.
+      disconnected = (await disconnectInstance(session.email)).severed;
     }
   } catch {
     /* best-effort - the traveller can also disconnect from Profile */

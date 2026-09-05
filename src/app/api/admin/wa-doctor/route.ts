@@ -157,12 +157,23 @@ export async function GET(req: Request) {
     // shop's lid learned from our OWN outbound anchor.
     const { lidAliasForShop } = await import("@/lib/wa/lid-alias");
     const shopLid = await lidAliasForShop(email, number).catch(() => "");
+    // A privacy-gate drop (audit F173) stores NO digits - only a hash of the
+    // spelling-normalised number - so the asked-for number is hashed the same
+    // way and compared; the drop of a shop refused by the vendor gate is
+    // still findable, while the row itself never names a personal contact.
+    const { dropDigitsHash } = await import("@/lib/wa/drop-privacy");
+    const askedHash = dropDigitsHash(number);
     const lastDrop =
       dropTrace.find((d) => {
         try {
-          const det = JSON.parse(d.detail ?? "{}") as { digits?: unknown; lid?: unknown };
+          const det = JSON.parse(d.detail ?? "{}") as {
+            digits?: unknown;
+            digitsHash?: unknown;
+            lid?: unknown;
+          };
           if (typeof det.digits === "string" && det.digits && sameNumber(det.digits, number))
             return true;
+          if (typeof det.digitsHash === "string" && det.digitsHash === askedHash) return true;
           if (shopLid && typeof det.lid === "string" && det.lid === shopLid) return true;
         } catch {}
         return false;

@@ -697,6 +697,23 @@ deploy; each one names the surface that answers it.
 
 ## Deliberate scope notes (so they are not re-litigated as bugs)
 
+### Storage objects and retention (audit F168)
+
+The audit copies of inbound media live in the `wa-media` Supabase Storage
+bucket (`src/lib/media/audit.ts`), not in a table. The erasure registry
+declares the bucket (`USER_OBJECT_STORES` in `src/lib/privacy/user-tables.ts`)
+and the erase walker deletes a person's objects by `wa_message_id` BEFORE it
+deletes the `whatsapp_messages` rows that are the only index to them,
+reporting the outcome under `purged["storage:wa-media"]`; the DSAR export
+lists them by name. What SQL cannot do is age them out: `prune_old_rows` runs
+inside Postgres and cannot reach Storage, so objects whose index rows were
+pruned by the 90-day window stay in the bucket until the owner sweeps them.
+Owner action: periodically delete objects older than the retention window
+from the bucket (Supabase dashboard -> Storage -> wa-media, sort by created),
+or add a Storage lifecycle rule if the plan offers one. The bucket must also
+be PRIVATE - the media proxy (`/api/wa/media`) gates every read per
+traveller, and a public bucket would bypass it.
+
 - **The public marketing surface stays English.** `/welcome`, `/pricing` and
   the 20-guide corpus are server components, statically prerendered, and are
   the SEO/AdSense surface. Their CLIENT parts (trust panel, footer, plan cards)

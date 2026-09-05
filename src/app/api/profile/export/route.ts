@@ -1,9 +1,15 @@
 import { NextResponse } from "next/server";
 import { getSession } from "@/lib/session";
 import { getUser } from "@/lib/access";
-import { sbSelect, supabaseConfigured } from "@/lib/runtime-config";
+import { sbSelectStrict, supabaseConfigured } from "@/lib/runtime-config";
 import { rateLimit } from "@/lib/rate-limit";
-import { USER_TABLES, CHILD_TABLES, filterFor } from "@/lib/privacy/user-tables";
+import {
+  USER_TABLES,
+  CHILD_TABLES,
+  USER_OBJECT_STORES,
+  filterFor,
+} from "@/lib/privacy/user-tables";
+import { auditExtFor, auditObjectPath } from "@/lib/media/audit";
 
 export const dynamic = "force-dynamic";
 
@@ -16,6 +22,43 @@ const ROWS_PER_TABLE = 1000;
 // Honesty: tables that could not be read are named in `unreadable` rather than
 // silently returned empty - an export that hides a third of the data behind a
 // DB hiccup is a false statement about what we hold.
+//
+// That promise was inert (audit F166): the reads used sbSelect, which answers
+// [] for every failure and never throws, so both catch blocks were unreachable
+// and a table Supabase refused to read was exported as an empty array. The
+// reads are now STRICT and the three answers are kept apart:
+//   rows          - the read succeeded ([] = genuinely nothing)
+//   "missing"     - the table does not exist on this database: vacuously []
+//   "unavailable" - the truth is unknown: NAMED in `unreadable`
+// A "missing" on a table with a custom export column list is probed once more
+// with select=* before it is believed: a stale column in that list answers
+// the same way as an absent table, and rows that exist must never be handed
+// over as "none".
+
+type Read = { rows: Record<string, unknown>[] } | "unreadable" | "absent";
+
+async function readTable(
+  table: string,
+  select: string,
+  filter: string,
+  customSelect: boolean
+): Promise<Read> {
+  const read = await sbSelectStrict<Record<string, unknown>>(
+    table,
+    `select=${select}&${filter}&limit=${ROWS_PER_TABLE}`
+  );
+  if ("rows" in read) return { rows: read.rows };
+  if (read.error === "unavailable") return "unreadable";
+  if (!customSelect) return "absent";
+  // Absent table, or a stale column in the export list? Only the table can say.
+  const probe = await sbSelectStrict<Record<string, unknown>>(
+    table,
+    `select=*&${filter}&limit=1`
+  );
+  if ("rows" in probe) return probe.rows.length ? "unreadable" : { rows: [] };
+  return probe.error === "missing" ? "absent" : "unreadable";
+}
+
 export async function GET() {
   const session = await getSession();
   if (!session) return NextResponse.json({ error: "Sign in first." }, { status: 401 });
@@ -32,6 +75,12 @@ export async function GET() {
 
   const data: Record<string, unknown[]> = {};
   const unreadable: string[] = [];
+  const nameUnreadable = (key: string) => {
+    if (!unreadable.includes(key)) unreadable.push(key);
+    // Partial rows under a name we could not fully read would imply
+    // completeness; the person can retry and get the whole table.
+    delete data[key];
+  };
 
   // The account record itself, minus secret material.
   const rec = await getUser(session.email, { fresh: true });
@@ -58,15 +107,20 @@ export async function GET() {
   if (supabaseConfigured()) {
     for (const entry of USER_TABLES) {
       if (entry.exportSkip) continue;
+      if (unreadable.includes(entry.table)) continue;
       const select = entry.exportSelect ?? "*";
       try {
-        const rows = await sbSelect<Record<string, unknown>>(
+        const read = await readTable(
           entry.table,
-          `select=${select}&${filterFor(entry, session.email)}&limit=${ROWS_PER_TABLE}`
+          select,
+          filterFor(entry, session.email),
+          Boolean(entry.exportSelect)
         );
-        data[entry.table] = [...(data[entry.table] ?? []), ...rows];
+        if (read === "unreadable") nameUnreadable(entry.table);
+        else if (read === "absent") data[entry.table] = data[entry.table] ?? [];
+        else data[entry.table] = [...(data[entry.table] ?? []), ...read.rows];
       } catch {
-        if (!unreadable.includes(entry.table)) unreadable.push(entry.table);
+        nameUnreadable(entry.table);
       }
     }
     for (const child of CHILD_TABLES) {
@@ -76,27 +130,67 @@ export async function GET() {
       );
       if (!parentEntry) continue;
       try {
-        const parents = await sbSelect<Record<string, unknown>>(
+        const parents = await readTable(
           child.parentTable,
-          `select=${child.parentIdColumn}&${filterFor(parentEntry, session.email)}&limit=${ROWS_PER_TABLE}`
+          child.parentIdColumn,
+          filterFor(parentEntry, session.email),
+          false
         );
-        const ids = parents
+        if (parents === "unreadable") {
+          nameUnreadable(child.table);
+          continue;
+        }
+        if (parents === "absent") {
+          data[child.table] = data[child.table] ?? [];
+          continue;
+        }
+        const ids = parents.rows
           .map((r) => r[child.parentIdColumn])
           .filter((v) => v !== null && v !== undefined);
         if (!ids.length) {
           data[child.table] = data[child.table] ?? [];
           continue;
         }
-        const rows = await sbSelect<Record<string, unknown>>(
+        const rows = await readTable(
           child.table,
-          `select=${child.exportSelect ?? "*"}&${child.childColumn}=in.(${ids
-            .map((v) => encodeURIComponent(String(v)))
-            .join(",")})&limit=${ROWS_PER_TABLE}`
+          child.exportSelect ?? "*",
+          `${child.childColumn}=in.(${ids.map((v) => encodeURIComponent(String(v))).join(",")})`,
+          Boolean(child.exportSelect)
         );
-        data[child.table] = [...(data[child.table] ?? []), ...rows];
+        if (rows === "unreadable") nameUnreadable(child.table);
+        else if (rows === "absent") data[child.table] = data[child.table] ?? [];
+        else data[child.table] = [...(data[child.table] ?? []), ...rows.rows];
       } catch {
-        if (!unreadable.includes(child.table)) unreadable.push(child.table);
+        nameUnreadable(child.table);
       }
+    }
+    // The object stores (audit F168): the audit copies of inbound media, listed
+    // by NAME beside the table rows - never bytes, the same reasoning
+    // feedback_images.exportSelect already uses. Derived from the index rows
+    // already exported above, so an unreadable index means an unknown list.
+    for (const store of USER_OBJECT_STORES) {
+      if (unreadable.includes(store.indexTable)) {
+        nameUnreadable(store.purgedKey);
+        continue;
+      }
+      const rows = (data[store.indexTable] ?? []) as {
+        direction?: string;
+        [k: string]: unknown;
+        raw?: { media?: { kind?: string | null; mime?: string | null } | null } | null;
+      }[];
+      const objects: { waMessageId: string; path: string; kind: string }[] = [];
+      for (const row of rows) {
+        const id = row[store.indexIdColumn];
+        const media = row.raw?.media;
+        if (row.direction !== "inbound" || !media || typeof id !== "string" || !id) continue;
+        const kind = media.kind ?? "image";
+        objects.push({
+          waMessageId: id,
+          path: auditObjectPath(id, auditExtFor(media.mime, kind)),
+          kind,
+        });
+      }
+      data[store.purgedKey] = objects;
     }
   }
 

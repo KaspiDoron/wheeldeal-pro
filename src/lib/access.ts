@@ -259,32 +259,32 @@ export async function getUser(
     // read means the row is gone (return undefined); only an UNAVAILABLE read
     // (transient) falls back to cache, so a DB hiccup never wrongly reports a
     // real account as missing.
-    if (opts?.fresh) {
-      const read = await sbSelectStrict<UserRow>(
-        "app_users",
-        `select=*&email=eq.${encodeURIComponent(key)}&limit=1`
-      );
-      if ("rows" in read) {
-        if (read.rows.length) {
-          const rec = fromRow(read.rows[0]);
-          remember(rec);
-          return rec;
-        }
-        return undefined;
-      }
-      return hit?.rec;
-    }
-    const rows = await sbSelect<UserRow>(
+    //
+    // THE NON-FRESH READ MUST NOT SERVE A CONFIRMED-GONE ROW EITHER (audit
+    // F048). It used sbSelect and fell through to the cache on `[]` - which is
+    // exactly what an erased account reads as - so on every warm container
+    // except the one that ran the delete, the erased traveller's cached record
+    // (status active, pre-revocation horizon) kept their cookie alive and
+    // re-created rows under the deleted email. Both branches are now the same
+    // single strict call: rows = remember; a POSITIVE empty read = the row is
+    // gone, drop it from this cache and say so; missing/unavailable = fall
+    // back to the cache, so an outage or an un-migrated table never signs the
+    // fleet out.
+    const read = await sbSelectStrict<UserRow>(
       "app_users",
       `select=*&email=eq.${encodeURIComponent(key)}&limit=1`
     );
-    if (rows.length) {
-      const rec = fromRow(rows[0]);
-      remember(rec);
-      return rec;
+    if ("rows" in read) {
+      if (read.rows.length) {
+        const rec = fromRow(read.rows[0]);
+        remember(rec);
+        return rec;
+      }
+      cache().delete(key);
+      return undefined;
     }
   }
-  // No durable row (or no Supabase): fall back to what this instance knows.
+  // Unreadable store (or no Supabase): fall back to what this instance knows.
   return hit?.rec;
 }
 

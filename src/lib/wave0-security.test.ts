@@ -237,8 +237,13 @@ describe("revocation is not advisory, and a fresh read is really fresh", () => {
     const src = read("src/lib/session.ts");
     expect(src).toMatch(/rec\?\.status === "blocked"\) return null/);
   });
-  it("getUser({fresh}) distinguishes a gone row from a transient error", () => {
+  it("getUser distinguishes a gone row from a transient error (fresh AND cached reads)", () => {
+    // Audit F048 folded the permissive non-fresh branch into the same strict
+    // read: a POSITIVE empty answer returns undefined (and drops the cache
+    // entry), only an unreadable store falls back to the cache.
     const src = read("src/lib/access.ts");
-    expect(src).toMatch(/if \(opts\?\.fresh\) \{[\s\S]*?sbSelectStrict[\s\S]*?return undefined/);
+    const fn = src.slice(src.indexOf("export async function getUser("), src.indexOf("export async function registerUser("));
+    expect(fn).toMatch(/sbSelectStrict<UserRow>\([\s\S]*?cache\(\)\.delete\(key\);\s*return undefined;/);
+    expect(fn).not.toMatch(/sbSelect<UserRow>\(/);
   });
 });

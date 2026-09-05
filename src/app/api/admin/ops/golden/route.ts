@@ -3,6 +3,7 @@ import { requireOwner } from "@/lib/session";
 import { sbSelect, sbInsertReturning, sbUpdate, sbDelete } from "@/lib/runtime-config";
 import { listGoldenCases, expectationFromOutbound, runGoldenCase } from "@/lib/ops/golden";
 import type { GoldenCase, GoldenExpect, GoldenTurn } from "@/lib/ops/types";
+import { goldenProvenance } from "@/lib/ops/provenance";
 
 // Golden regression cases - real conversations frozen into deterministic
 // replays. create-from-thread snapshots the ACTUAL shop messages, the stored
@@ -179,7 +180,10 @@ export async function POST(req: Request) {
   let spteNote: string | null = null;
   const candidate: Omit<GoldenCase, "id" | "created_at"> = {
     name: String(body.name ?? "").trim().slice(0, 120) || `Golden - ${digits}`,
-    thread_key: threadKey,
+    // Provenance WITHOUT the address (audit F169): the pseudonym plus the
+    // shop digits. The raw key was persisted here for months while the
+    // registry called this table de-identified.
+    thread_key: goldenProvenance(threadKey),
     rfq: newest?.raw?.rfq ?? {},
     region: newest?.raw?.region ?? null,
     floor,

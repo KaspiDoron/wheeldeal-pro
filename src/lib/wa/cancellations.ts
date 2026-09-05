@@ -3,6 +3,7 @@ import { getConfig, sbDelete, sbInsert, sbSelectStrict } from "../runtime-config
 import { parseFlag } from "../config-flags";
 import { digitsOnly } from "../phone";
 import { nationalTail, numberFilter, numberVariants } from "./phone-key";
+import { insertUserEvent } from "../events";
 
 // Cancellation tombstones - the "absolute queue deletion" guarantee.
 //
@@ -281,12 +282,10 @@ export async function recordSuppressedSend(
   toDigits: string,
   kind: "cancelled-send-blocked" | "takeover-send-blocked"
 ): Promise<void> {
-  await sbInsert("agent_events", [
-    {
-      kind,
-      detail: `Automated message to +${digitsOnly(toDigits)} suppressed (${
-        kind === "cancelled-send-blocked" ? "user removed queued messages" : "human takeover"
-      }) for ${senderKey}.`,
-    },
-  ]).catch(() => {});
+  await insertUserEvent(senderKey, {
+    kind,
+    detail: `Automated message to +${digitsOnly(toDigits)} suppressed (${
+      kind === "cancelled-send-blocked" ? "user removed queued messages" : "human takeover"
+    }) for ${senderKey}.`,
+  }).catch(() => {});
 }

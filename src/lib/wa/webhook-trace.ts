@@ -11,6 +11,7 @@
 import "server-only";
 import { sbInsert } from "../runtime-config";
 import { makeTraceThrottle } from "./trace-throttle";
+import { PRIVACY_DROP_REASONS, dropDigitsHash } from "./drop-privacy";
 
 const okThrottle = makeTraceThrottle(60_000); // 1/min per instance
 const denyThrottle = makeTraceThrottle(5 * 60_000); // 1/5min per process key
@@ -62,20 +63,31 @@ export async function noteInboundDropped(
   // wrote one row and the panel reported one - the throttle was protecting the
   // DB and destroying the magnitude at the same time.
   const alsoSuppressed = dropThrottle.takeSuppressed(throttleKey);
+  // THE PRIVACY GATE'S OWN BREADCRUMB MUST NOT NAME THE CHAT (audit F173).
+  // For the reasons raised before a thread is known to be the traveller's own
+  // shop thread - the vendor gate refusing a personal chat above all - the row
+  // carries no number anywhere: not in to_number, not in vendor_name, not in
+  // detail.digits. An 8-hex hash of the number stands in so the WA doctor can
+  // still match the number it is asked about. Every reason on a shop thread
+  // the traveller opened keeps its address, because the message-path panel
+  // joins on it.
+  const privacy = PRIVACY_DROP_REASONS.has(reason);
+  const shown = privacy ? null : (digits ?? null);
   await sbInsert("agent_events", [
     {
       kind: "inbound-dropped",
       vendor_id: "",
-      vendor_name: digits ?? "",
+      vendor_name: shown ?? "",
       // The panel joins on to_number; vendor_name here is BARE digits, which
       // matches neither side of its (to_number | "+digits") filter - so every
       // drop this function recorded was invisible on the screen built to show
       // exactly these drops.
-      ...(digits ? { to_number: digits } : {}),
+      ...(shown ? { to_number: shown } : {}),
       ...(email ? { user_email: email } : {}),
       detail: JSON.stringify({
         reason,
-        digits: digits ?? null,
+        digits: shown,
+        ...(privacy && digits ? { digitsHash: dropDigitsHash(digits) } : {}),
         ...(alsoSuppressed > 0 ? { alsoSuppressed } : {}),
         ...(extra ?? {}),
       }),
