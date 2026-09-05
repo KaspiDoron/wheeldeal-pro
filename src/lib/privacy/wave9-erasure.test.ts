@@ -32,7 +32,11 @@ vi.mock("../runtime-config", () => ({
     if (table === "waba_leads" && query.includes("select=id")) return [];
     return [];
   },
-  sbSelectStrict: async () => ({ rows: [] }),
+  sbSelectStrict: async (table: string, query: string) => {
+    // Parent-id collection for the child walks - the STRICT read since F167.
+    if (table === "feedback" && query.includes("select=id")) return { rows: [{ id: 7 }, { id: 9 }] };
+    return { rows: [] };
+  },
   sbInsert: async () => true,
   sbUpdate: async (table: string) => {
     calls.updates.push({ table });
@@ -44,7 +48,7 @@ vi.mock("../runtime-config", () => ({
 vi.mock("../evolution", () => ({
   disconnectInstance: async (email: string) => {
     calls.disconnects.push(email);
-    return true;
+    return { severed: true, hostsTried: 1, hadLink: true };
   },
 }));
 
@@ -107,8 +111,17 @@ describe("the registry covers the schema", () => {
   });
 
   it("the digest's headline omission is covered: transcripts by BOTH directions", () => {
-    const wm = USER_TABLES.filter((t) => t.table === "whatsapp_messages").map((t) => t.column);
-    expect(wm.sort()).toEqual(["raw->>receiver", "raw->>sender"]);
+    // Both directions, under the live address AND under the wd- pseudonym the
+    // 180-day de-identify rewrites the address to (audit F025).
+    const wm = USER_TABLES.filter((t) => t.table === "whatsapp_messages").map(
+      (t) => `${t.column}:${t.match}`
+    );
+    expect(wm.sort()).toEqual([
+      "raw->>receiver:exact",
+      "raw->>receiver:pseudonym",
+      "raw->>sender:exact",
+      "raw->>sender:pseudonym",
+    ]);
   });
 
   it("the reset rows are erased under their namespaced key too", () => {
@@ -248,7 +261,12 @@ describe("retention completion", () => {
 
   it("priced transcripts are DE-IDENTIFIED past the window, not kept verbatim forever", () => {
     expect(sql).toMatch(/update public\.whatsapp_messages/);
-    expect(sql).toMatch(/raw - 'sender' - 'receiver'/);
+    // Audit F025: the address is REWRITTEN to the erasable wd- pseudonym, not
+    // removed - removing it was what made the rows unfindable by this very
+    // registry. The old strip must stay gone.
+    expect(sql).not.toMatch(/raw - 'sender' - 'receiver'/);
+    expect(sql).toMatch(/'sender',\s*case when raw \? 'sender'/);
+    expect(sql).toMatch(/'receiver',\s*case when raw \? 'receiver'/);
     expect(sql).toMatch(/'deidentified_at', now\(\)/);
     // Idempotent: already-stripped rows are filtered out.
     expect(sql).toMatch(/\(raw ->> 'deidentified_at'\) is null/);

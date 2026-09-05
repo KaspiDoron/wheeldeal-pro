@@ -287,11 +287,21 @@ export function WaConnect({
 
   async function disconnect() {
     setBusy(true);
+    setErr(null);
     try {
-      await fetch("/api/wa/disconnect", { method: "POST" });
+      // Honest (audit F057): the route answers 502 when no host confirmed
+      // the teardown - the link is then STILL LIVE, and saying "disconnected"
+      // would be the lie the audit found. Only a confirmed sever flips the UI.
+      const res = await fetch("/api/wa/disconnect", { method: "POST" });
+      if (!res.ok) {
+        setErr(t("WhatsApp could not be unlinked right now - the link is still live. Try again in a minute."));
+        return;
+      }
       setWa((w) => (w ? { ...w, connected: false } : w));
       setQr(null);
       setPairingCode(null);
+    } catch {
+      setErr(t("Could not reach the server - check your connection and tap Try again."));
     } finally {
       setBusy(false);
     }

@@ -947,6 +947,7 @@ export const I18N_CATALOG: string[] = [
   "WhatsApp Linking Terms",
   "WhatsApp connected",
   "WhatsApp connected - agents bargain as you",
+  "WhatsApp could not be unlinked right now - the link is still live. Try again in a minute.",
   "WhatsApp disconnected - replies can't reach the app",
   "WhatsApp is disconnected, so shop replies cannot reach the app - reconnect in Profile to keep your conversations moving.",
   "WhatsApp is verifying - please wait",

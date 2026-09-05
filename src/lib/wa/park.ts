@@ -2,6 +2,7 @@ import { sbInsert, sbDelete, sbSelect } from "../runtime-config";
 import { tableReady } from "../schema-probe";
 import { outboxKey } from "./phone-key";
 import { REPLY_KIND_FILTER, humanizeForOutbound } from "../wa-guard";
+import { insertUserEvent } from "../events";
 
 /**
  * Park an auto-composed WhatsApp message in wa_outbox with STRICT
@@ -157,16 +158,14 @@ export async function parkOutboxOnce(row: {
     if (existing.length === 0) {
       ok = await sbInsert("wa_outbox", [record]); // retry the blip once
       if (!ok) {
-        await sbInsert("agent_events", [
-          {
-            kind: "wa-park-failed",
-            vendor_id: String((row.meta as { vendorId?: string } | undefined)?.vendorId ?? ""),
-            vendor_name: String(
-              (row.meta as { vendorName?: string } | undefined)?.vendorName ?? row.toNumber
-            ),
-            detail: `Could not queue a composed reply to +${row.toNumber} (sender ${row.senderKey}) - write failed twice. A later inbound/tick recomposes.`,
-          },
-        ]).catch(() => {});
+        await insertUserEvent(row.senderKey, {
+          kind: "wa-park-failed",
+          vendor_id: String((row.meta as { vendorId?: string } | undefined)?.vendorId ?? ""),
+          vendor_name: String(
+            (row.meta as { vendorName?: string } | undefined)?.vendorName ?? row.toNumber
+          ),
+          detail: `Could not queue a composed reply to +${row.toNumber} (sender ${row.senderKey}) - write failed twice. A later inbound/tick recomposes.`,
+        }).catch(() => {});
       }
     }
   }

@@ -44,6 +44,7 @@ import { claimInboundStore } from "@/lib/wa/inbound-claim";
 import { kickDispatcher } from "@/lib/wa/kick";
 import { finishBeforeResponse } from "@/lib/after";
 import { parseInboundCoords, describeShopLocation, distanceNote } from "@/lib/wa/inbound-location";
+import { insertUserEvent } from "../events";
 
 // The region of the last outbound to this shop - primes the voice transcriber
 // for the local accent (best-effort; undefined just means no language hint).
@@ -1123,14 +1124,12 @@ export async function processEvolutionWebhook(
       // says so the moment they look. See lib/notify/significance - the whole
       // reason alerts felt like spam was events like this one earning one.
       if (doc && !docIsImage && email) {
-        await sbInsert("agent_events", [
-          {
-            kind: "media-unreadable",
-            vendor_id: "",
-            vendor_name: from,
-            detail: `Document "${doc.fileName ?? "file"}" (${doc.mimetype ?? "?"}) from +${from} - stored, not machine-readable (email ${email}).`,
-          },
-        ]).catch(() => {});
+        await insertUserEvent(email, {
+          kind: "media-unreadable",
+          vendor_id: "",
+          vendor_name: from,
+          detail: `Document "${doc.fileName ?? "file"}" (${doc.mimetype ?? "?"}) from +${from} - stored, not machine-readable (email ${email}).`,
+        }).catch(() => {});
       }
 
       // A shop that sends ONLY a price-list photo or a voice note (no caption)
@@ -1241,7 +1240,8 @@ export async function processEvolutionWebhook(
         const budget = budgetFrames(verdict.frames);
         images.push(...budget.kept);
         for (const d of budget.dropped) {
-          await sbInsert("agent_events", [
+          await insertUserEvent(
+            email,
             d.reason === "frame-too-large"
               ? {
                   kind: "media-unreadable",
@@ -1254,21 +1254,19 @@ export async function processEvolutionWebhook(
                   vendor_id: "",
                   vendor_name: from,
                   detail: `Burst from +${from}: frame ${d.index + 1} of ${verdict.burstSize} not sent to the reader (${d.reason}) - read the first ${budget.kept.length} (email ${email}).`,
-                },
-          ]).catch(() => {});
+                }
+          ).catch(() => {});
         }
         if (verdict.fetchFailures > 0 || verdict.ownFetchFailed) {
           // Honest, and in the app rather than on the lock screen - a photo we
           // could not download is not something the traveller can act on.
           // (lib/notify/significance.)
-          await sbInsert("agent_events", [
-            {
-              kind: "media-fetch-failed",
-              vendor_id: "",
-              vendor_name: from,
-              detail: `${verdict.ownFetchFailed ? "Photo" : "Burst photo"} from +${from} failed to download after 3 attempts (email ${email}).`,
-            },
-          ]).catch(() => {});
+          await insertUserEvent(email, {
+            kind: "media-fetch-failed",
+            vendor_id: "",
+            vendor_name: from,
+            detail: `${verdict.ownFetchFailed ? "Photo" : "Burst photo"} from +${from} failed to download after 3 attempts (email ${email}).`,
+          }).catch(() => {});
         }
         // NEVER-SILENT with the SHOP: when NOTHING readable survived (every
         // download failed or every frame was oversized), fall through to
@@ -1294,16 +1292,14 @@ export async function processEvolutionWebhook(
           if (msgId) void storeMediaAudit(msgId, { mime: mime.split(";")[0], base64: media.base64 });
         } else {
           videoUnreadable = true;
-          await sbInsert("agent_events", [
-            {
-              kind: "media-unreadable",
-              vendor_id: "",
-              vendor_name: from,
-              detail: media
-                ? `Video from +${from} (${mime || "unknown format"}, ~${Math.round(media.base64.length / 1_400_000)}MB) is too large or not mp4/3gpp - agent asks for a photo instead (email ${email}).`
-                : `Video from +${from} failed to download - agent asks for a photo instead (email ${email}).`,
-            },
-          ]).catch(() => {});
+          await insertUserEvent(email, {
+            kind: "media-unreadable",
+            vendor_id: "",
+            vendor_name: from,
+            detail: media
+              ? `Video from +${from} (${mime || "unknown format"}, ~${Math.round(media.base64.length / 1_400_000)}MB) is too large or not mp4/3gpp - agent asks for a photo instead (email ${email}).`
+              : `Video from +${from} failed to download - agent asks for a photo instead (email ${email}).`,
+          }).catch(() => {});
         }
       }
 

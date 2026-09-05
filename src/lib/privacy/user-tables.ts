@@ -8,13 +8,23 @@
 // schema-grep test fails the build when a new user-keyed table ships without a
 // registry decision (erase it, or say WHY not in EXCLUDED_TABLES).
 //
+// The registry has a SECOND dimension since audit F168: "which stores hold
+// this person" is not only "which tables". Supabase Storage holds the audit
+// copies of every inbound photo, PDF, video and voice note, and SQL cannot
+// reach it - USER_OBJECT_STORES declares those buckets and how their object
+// ids are found, so the walker and the export can reach them too.
+//
 // No Supabase import here - pure data + filter builders, so tests can walk it
 // without a server context.
+
+import { pseudonymForEmail } from "./pseudonym";
 
 /** How a table's key column holds the person's email. */
 export type KeyMatch =
   | "exact" // column equals the email
-  | "prefix" // column is `${email}:...` (thread keys)
+  | "prefix" // column is `${email}:...` (thread keys, inbound claim keys)
+  | "pseudonym-prefix" // column is `${pseudonymForEmail(email)}:...` (de-identified provenance)
+  | "pseudonym" // column equals `pseudonymForEmail(email)` (de-identified transcript rows)
   | "reset-prefix"; // column equals `reset:${email}` (password-reset rows)
 
 export interface UserTableKey {
@@ -22,6 +32,11 @@ export interface UserTableKey {
   /** PostgREST filter column - may be a jsonb path (`raw->>sender`). */
   column: string;
   match: KeyMatch;
+  /**
+   * For `prefix`: the character that terminates the address in the key
+   * (default `:`). The login throttle writes `${email}|ip:<addr>` (F187).
+   */
+  separator?: string;
   /**
    * Omit this table from the DSAR export payload (still ERASED): transient
    * auth material nobody needs a copy of, or blobs that dwarf the response.
@@ -41,6 +56,13 @@ export const USER_TABLES: UserTableKey[] = [
   { table: "auth_events", column: "email", match: "exact" },
   { table: "consent_events", column: "email", match: "exact" },
   { table: "user_cooldowns", column: "email", match: "exact" },
+  // The login brute-force lock is keyed `${email}|ip:<addr>` (so an attacker
+  // only ever locks their own network path) and setCooldown stores that
+  // composite verbatim in `email`. Registered as a `|`-terminated prefix
+  // (F187): the exact entry above never matched it, so a row pairing the
+  // address with the IP it signed in from outlived the erasure. The Google
+  // lane's `ip:<addr>` rows carry no account and are left to retention.
+  { table: "user_cooldowns", column: "email", match: "prefix", separator: "|" },
   { table: "wa_sessions", column: "email", match: "exact" },
   { table: "email_verifications", column: "email", match: "exact", exportSkip: true },
   { table: "email_verifications", column: "email", match: "reset-prefix", exportSkip: true },
@@ -87,9 +109,45 @@ export const USER_TABLES: UserTableKey[] = [
   // ---- the transcripts themselves (the digest's headline omission) ---------
   { table: "whatsapp_messages", column: "raw->>sender", match: "exact" },
   { table: "whatsapp_messages", column: "raw->>receiver", match: "exact" },
+  // Priced rows past the 180-day window are DE-IDENTIFIED in place by
+  // retention.sql, and that used to REMOVE the two keys above - so from that
+  // moment the rows were unfindable by the walker and the export, while never
+  // being deleted by any window (F025). The de-identify now rewrites both keys
+  // to the same address-free pseudonym the golden-case provenance and the
+  // WhatsApp instance name use (`wd-` + sha256(email)[0:16], pseudonym.ts);
+  // these two entries are what reach those rows. `to_number` on an inbound
+  // row IS that pseudonym too (instanceNameFor) and needs no entry of its own.
+  { table: "whatsapp_messages", column: "raw->>sender", match: "pseudonym" },
+  { table: "whatsapp_messages", column: "raw->>receiver", match: "pseudonym" },
   // ---- thread keys shaped `${email}:${digits}` ------------------------------
   { table: "wa_thread_locks", column: "thread_key", match: "prefix" },
   { table: "agent_scores", column: "thread_key", match: "prefix" },
+  // ---- inbound claim leases keyed `${email}:${wa_message_id}` (claimKey) ---
+  // Excused for months as "message-id dedupe, no user data" - and the primary
+  // key carries the address once per message the person ever received (F019).
+  // Legacy bare-id rows carry no email and are correctly left alone.
+  {
+    table: "wa_processed",
+    column: "wa_message_id",
+    match: "prefix",
+    exportSelect: "wa_message_id,created_at",
+  },
+  {
+    table: "wa_inbound_seen",
+    column: "wa_message_id",
+    match: "prefix",
+    exportSelect: "wa_message_id,created_at",
+  },
+  // ---- the golden replay suite's provenance keys (F169) ---------------------
+  // The capture stamps a pseudonym (lib/ops/provenance.ts) instead of the raw
+  // address, but the row STILL holds the person's RFQ and up to eight verbatim
+  // shop messages from their thread - so it is registered, not excused. Two
+  // entries: rows frozen before the pseudonym (raw `${email}:${digits}`) and
+  // rows frozen after it (`${pseudonym}:${digits}`). retention.sql carries a
+  // one-off UPDATE that rewrites the legacy keys; both entries stay so an
+  // erase is complete whether or not the owner has re-run that file.
+  { table: "agent_golden_cases", column: "thread_key", match: "prefix" },
+  { table: "agent_golden_cases", column: "thread_key", match: "pseudonym-prefix" },
 ];
 
 /**
@@ -137,6 +195,46 @@ export const CHILD_TABLES: ChildTableKey[] = [
 ];
 
 /**
+ * Object stores (Supabase Storage buckets) that hold a person's content, and
+ * the table whose rows are the ONLY index from the person to the object ids.
+ *
+ * The walker purges these BEFORE it deletes the index rows - once the rows are
+ * gone nothing can ever find the objects again - and reports each under
+ * `purgedKey` in EraseResult.purged, so a failed purge is named exactly like a
+ * failed table. The DSAR export lists the objects by name under the same key
+ * (names only, never bytes).
+ */
+export interface UserObjectStore {
+  /** Supabase Storage bucket name. */
+  bucket: string;
+  /** The `purged` / export key the walker and the export report it under. */
+  purgedKey: string;
+  /** The table whose rows are the only index from the person to the object ids. */
+  indexTable: string;
+  /** The column holding the object id (`wa_message_id` -> `wa-media/<id>.<ext>`). */
+  indexIdColumn: string;
+  /** The USER_TABLES entry (on indexTable) whose filter finds the person's index rows. */
+  indexEntryColumn: string;
+  /** Extra PostgREST filter narrowing the index rows (only inbound frames are audited). */
+  indexExtraFilter: string;
+  reason: string;
+}
+
+export const USER_OBJECT_STORES: UserObjectStore[] = [
+  {
+    bucket: "wa-media",
+    purgedKey: "storage:wa-media",
+    indexTable: "whatsapp_messages",
+    indexIdColumn: "wa_message_id",
+    indexEntryColumn: "raw->>receiver",
+    indexExtraFilter: "direction=eq.inbound",
+    reason:
+      "audit copies of every inbound photo, PDF, video and voice note (lib/media/audit.ts). " +
+      "SQL cannot reach Storage, so the walker deletes them by id BEFORE the index rows go.",
+  },
+];
+
+/**
  * Tables that hold NO per-person key, with the reason on record. The
  * completeness test walks schema.sql and refuses any table that is neither
  * registered above nor excused here - a new PII table cannot ship un-erasable.
@@ -150,7 +248,6 @@ export const EXCLUDED_TABLES: Record<string, string> = {
   market_floor_prices: "market aggregates, no user key",
   waba_agencies: "shop-side WABA partners",
   wa_suppressions: "shop-side opt-outs - deleting them on user erasure would RE-CONTACT the shop",
-  agent_golden_cases: "owner-curated replay suite (de-identified at capture)",
   agent_tactics: "owner-authored playbook content",
   agent_training: "owner-authored training snippets",
   policy_versions: "system config history",
@@ -160,8 +257,6 @@ export const EXCLUDED_TABLES: Record<string, string> = {
   ai_usage: "provider token counters, no user key",
   api_usage_daily: "daily rollup by (day, kind), no user key",
   billing_events: "provider event-id dedupe only - payment records live with PayPal",
-  wa_processed: "message-id dedupe, no user data",
-  wa_inbound_seen: "message-id dedupe, no user data",
   wa_risk_snapshots: "fleet-level aggregates",
   email_verifications: "REGISTERED above - listed here only for the two-entry shape",
   feedback_images: "REGISTERED as a child table (via feedback_id)",
@@ -171,18 +266,39 @@ export const EXCLUDED_TABLES: Record<string, string> = {
   graph_wakeups: "REGISTERED above (user_email)",
 };
 
+/**
+ * Escape the LIKE metacharacters in a value that must match LITERALLY.
+ *
+ * PostgREST hands a `like.` value straight to SQL LIKE (only `*` is rewritten
+ * to `%`), where `_` matches any one character and `%` any run. An underscore
+ * in a local part is common; without this, one person's erase would delete
+ * OTHER travellers' claim rows and thread locks. Backslash is LIKE's default
+ * escape character, so it escapes itself too.
+ */
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, (c) => `\\${c}`);
+}
+
 /** The PostgREST horizontal filter that finds this person's rows. */
 export function filterFor(entry: UserTableKey, emailRaw: string): string {
   const email = emailRaw.trim().toLowerCase();
   if (entry.match === "prefix") {
-    // PostgREST `like` uses * as the wildcard; the colon terminates the email
-    // so a@x.com never matches a@x.com.evil rows.
-    // LIKE-ESCAPED (audit F022): `_`, `%` and `\` are live metacharacters
-    // inside the pattern, so an unescaped "a_b@x.com:%" reached "axb@x.com"'s
-    // rows - on the erase DELETE and the DSAR export alike. Same escape the
-    // wakeup drain in graph/engine.ts already applies for the same reason.
-    const escaped = email.replace(/([\\%_])/g, "\\$1");
-    return `${entry.column}=like.${encodeURIComponent(`${escaped}:`)}*`;
+    // PostgREST `like` uses * as the wildcard; the separator (`:` unless the
+    // entry says otherwise) terminates the email so a@x.com never matches
+    // a@x.com.evil rows. LIKE-ESCAPED (audit F022 / F019): `_`, `%` and `\`
+    // are live metacharacters inside the pattern, so an unescaped
+    // "a_b@x.com:%" reached "axb@x.com"'s rows - on the erase DELETE and the
+    // DSAR export alike. Same escape the wakeup drain in graph/engine.ts
+    // already applies for the same reason.
+    const sep = escapeLike(entry.separator ?? ":");
+    return `${entry.column}=like.${encodeURIComponent(`${escapeLike(email)}${sep}`)}*`;
+  }
+  if (entry.match === "pseudonym-prefix") {
+    // The pseudonym is hex - nothing in it needs escaping.
+    return `${entry.column}=like.${encodeURIComponent(`${pseudonymForEmail(email)}:`)}*`;
+  }
+  if (entry.match === "pseudonym") {
+    return `${entry.column}=eq.${pseudonymForEmail(email)}`;
   }
   if (entry.match === "reset-prefix") {
     return `${entry.column}=eq.${encodeURIComponent(`reset:${email}`)}`;

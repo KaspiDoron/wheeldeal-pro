@@ -125,7 +125,9 @@ async function loadUsersRoute(opts: RouteOpts) {
     },
     deleteUser: async () => true,
   }));
-  vi.doMock("@/lib/evolution", () => ({ disconnectInstance: async () => true }));
+  vi.doMock("@/lib/evolution", () => ({
+    disconnectInstance: async () => ({ severed: true, hostsTried: 1, hadLink: true }),
+  }));
   vi.doMock("@/lib/runtime-config", () => ({
     sbDelete: async () => true,
     sbSelect: async () => [],

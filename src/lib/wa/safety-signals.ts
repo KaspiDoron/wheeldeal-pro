@@ -41,6 +41,9 @@ export const BENIGN_DROP_REASONS: ReadonlySet<string> = new Set([
   // invented later and never added, so the SAME outcome was silent when the
   // user closed the search and loud when the clock did.
   "session-expired",
+  // The owner blocked the account (audit F050): the agent standing down on
+  // its behalf is the block working, not a lost shop reply.
+  "account-blocked",
 ]);
 
 export function isLoudDrop(reason: string): boolean {

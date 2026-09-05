@@ -9,6 +9,7 @@ import {
   misreadTag,
   misreadTurn,
 } from "@/lib/ops/misread";
+import { goldenProvenance } from "@/lib/ops/provenance";
 
 // Ops Center: owner reviews of agent decisions - the feedback that actually
 // teaches the system. Upserted per (thread, decision). Two side effects make
@@ -257,7 +258,8 @@ export async function POST(req: Request) {
       const floorMatch = (comp[0]?.input ?? "").match(/floor=(\d+)/);
       const candidate = {
         name: `misread ${misread.actualMeaning} - ${thread[0]?.vendor_name ?? "shop"}`.slice(0, 80),
-        thread_key: threadKey,
+        // Pseudonymous provenance (audit F169) - same stamp as create-from-thread.
+        thread_key: goldenProvenance(threadKey),
         rfq: outMeta[0]?.raw?.rfq ?? {},
         region: outMeta[0]?.raw?.region ?? null,
         floor: floorMatch

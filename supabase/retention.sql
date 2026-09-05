@@ -85,21 +85,48 @@ begin
   -- A priced row's lasting value is the READING (vehicle/price extraction) and
   -- the outcome - the deal_memory shape - not WHO said it or the words used.
   -- Past the mid window the row is DE-IDENTIFIED in place: body nulled, the
-  -- traveller's email stripped out of raw, the shop's number dropped. The
-  -- pricing evidence stays; the person leaves.
+  -- traveller's address replaced by a pseudonym, the shop's number dropped.
+  -- The pricing evidence stays; the person leaves.
   delete from public.whatsapp_messages
    where received_at < cutoff
      and (raw ->> 'reading') is null
      and coalesce((raw ->> 'ok')::text, '') <> 'priced';
   get diagnostics msgs = row_count;
 
+  -- Audit F025: this used to REMOVE raw.sender / raw.receiver - the only two
+  -- keys the erasure registry (src/lib/privacy/user-tables.ts) matches this
+  -- table on - so from the mid window a priced row was unfindable by the
+  -- erase walker and the DSAR export while no window ever deleted it; and it
+  -- was not anonymous either, because the shop's JID stayed nested at
+  -- raw.media.key.remoteJid and raw.lid / raw.instance / raw.quoted survived
+  -- (only a TOP-LEVEL remoteJid was stripped, which no writer sets).
+  --
+  -- Both keys are now REWRITTEN to the same address-free pseudonym the
+  -- golden-case one-off below and the WhatsApp instance name use
+  -- (`wd-` + sha256(lowercased email)[0:16] = pseudonymForEmail in
+  -- src/lib/privacy/pseudonym.ts), which the registry matches, so "the person
+  -- leaves" and "the person can still erase it" are both true. The nested
+  -- provider key is removed with the jsonb path operator (#-), the other
+  -- identifiers the writers actually set go with the `-` operator, and the
+  -- inbound to_number (already that pseudonym, via instanceNameFor) stays so
+  -- the console's tolerant number reads keep matching history.
   update public.whatsapp_messages
      set body = null,
          from_number = case when direction = 'inbound' then 'deidentified' else from_number end,
          to_number   = case when direction = 'outbound' then 'deidentified' else to_number end,
-         raw = (raw - 'sender' - 'receiver' - 'english' - 'gloss' - 'pushName'
-                    - 'remoteJid' - 'participant')
-               || jsonb_build_object('deidentified_at', now())
+         raw = ((raw - 'english' - 'gloss' - 'englishGloss' - 'pushName' - 'remoteJid'
+                     - 'participant' - 'lid' - 'instance' - 'contact' - 'quoted')
+                #- '{media,key}')
+               || jsonb_strip_nulls(jsonb_build_object(
+                    'sender',
+                    case when raw ? 'sender'
+                         then 'wd-' || left(encode(sha256(convert_to(lower(btrim(raw ->> 'sender')), 'UTF8')), 'hex'), 16)
+                    end,
+                    'receiver',
+                    case when raw ? 'receiver'
+                         then 'wd-' || left(encode(sha256(convert_to(lower(btrim(raw ->> 'receiver')), 'UTF8')), 'hex'), 16)
+                    end,
+                    'deidentified_at', now()))
    where received_at < cutoff_mid
      and (raw ->> 'deidentified_at') is null
      and ((raw ->> 'reading') is not null
@@ -146,6 +173,19 @@ begin
 
   delete from public.graph_wakeups where created_at < cutoff;
   get diagnostics n = row_count; others := others || jsonb_build_object('graph_wakeups', n);
+
+  -- The inbound claim leases (audit F019). Their primary key is
+  -- `<email>:<wa_message_id>` (claimKey), so every row carries the
+  -- traveller's address once per message they ever received - and neither
+  -- table had any window at all. They are leases, not history: CLAIM_LEASE_MS
+  -- is 10 minutes and the ingest thread window 14 days, so the short window
+  -- is far past anything live dedupe needs. (The erase walker deletes them by
+  -- prefix too; this is the time-bound half.)
+  delete from public.wa_processed where created_at < cutoff;
+  get diagnostics n = row_count; others := others || jsonb_build_object('wa_processed', n);
+
+  delete from public.wa_inbound_seen where created_at < cutoff;
+  get diagnostics n = row_count; others := others || jsonb_build_object('wa_inbound_seen', n);
 
   -- Keyed on updated_at (the table has no created_at): a thread QUIET for the
   -- whole mid window is gone; one the traveller re-engaged stays.
@@ -305,6 +345,39 @@ begin
     raise notice 'Scheduled wheeldeal-prune-nightly (03:17 UTC).';
   else
     raise notice 'pg_cron not installed - enable it (Supabase: Database -> Extensions) then re-run this file, OR call select public.prune_old_rows(90); on your own schedule.';
+  end if;
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- 5. ONE-OFF (audit F169): pseudonymise legacy golden-case provenance keys.
+-- ---------------------------------------------------------------------------
+--
+-- agent_golden_cases.thread_key used to be persisted as the raw
+-- `<email>:<shop digits>` while the erasure registry called the table
+-- "de-identified at capture". The app now stamps `wd-<sha256(email)[0:16]>:
+-- <digits>` (src/lib/ops/provenance.ts - the same shape as the WhatsApp
+-- instance name), and the erase walker deletes under BOTH prefixes. This
+-- rewrites the rows captured before the fix. Idempotent: only keys that still
+-- carry an address match, and a pseudonymised key never does. Guarded so a
+-- database without the table (schema.sql not yet run) is a no-op, not an
+-- abort of this file.
+do $$
+declare
+  n bigint := 0;
+begin
+  if to_regclass('public.agent_golden_cases') is not null then
+    execute $u$
+      update public.agent_golden_cases
+         set thread_key = 'wd-'
+                          || left(encode(sha256(convert_to(lower(regexp_replace(thread_key, ':[^:]*$', '')), 'UTF8')), 'hex'), 16)
+                          || substring(thread_key from ':[^:]*$')
+       where thread_key like '%@%:%'
+    $u$;
+    get diagnostics n = row_count;
+    raise notice 'agent_golden_cases: % legacy provenance key(s) pseudonymised.', n;
+  else
+    raise notice 'agent_golden_cases does not exist yet - nothing to pseudonymise (run schema.sql first).';
   end if;
 end;
 $$;

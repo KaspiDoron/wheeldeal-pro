@@ -161,3 +161,32 @@ export async function noteAgentEvent(e: {
     },
   ]).catch(() => false);
 }
+
+/**
+ * An agent_events write KEYED TO THE PERSON IT NAMES (audit F170).
+ *
+ * The erasure registry finds agent_events rows by `user_email` and nothing
+ * else. Several writers put the traveller's address into the free-text
+ * `detail` while leaving `user_email` null - the send-error breadcrumb, the
+ * session-closed event, a park failure, the media-unreadable rows - so those
+ * rows were invisible to eraseUserData and outlived an erasure that reported
+ * ok, for up to 90 days. Every such writer goes through here now.
+ *
+ * Attempted WITH `user_email` first and retried WITHOUT it when the write does
+ * not confirm - the same degrade contract as wa/hold-events and the inbound
+ * risk row - so a database where schema.sql has not been re-run loses the
+ * ownership key, never the breadcrumb. Best-effort like every telemetry
+ * write: returns false, never throws.
+ */
+export async function insertUserEvent(
+  userEmail: string | null | undefined,
+  row: Record<string, unknown>
+): Promise<boolean> {
+  const email = (userEmail ?? "").trim();
+  if (!email) return sbInsert("agent_events", [row]).catch(() => false);
+  const stamped = await sbInsert("agent_events", [{ ...row, user_email: email }]).catch(
+    () => false
+  );
+  if (stamped) return true;
+  return sbInsert("agent_events", [row]).catch(() => false);
+}

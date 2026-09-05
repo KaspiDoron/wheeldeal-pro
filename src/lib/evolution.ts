@@ -29,6 +29,7 @@ import { placeHost, serveHost } from "./wa/host-placement";
 import { isHardSendFailure, isAmbiguousSendFailure } from "./wa/send-classify";
 import { readOrientationFromBase64 } from "./media/orientation";
 import type { InboundImage } from "./media/orientation";
+import { insertUserEvent } from "./events";
 
 // ---- anti-ban limits (human-like behaviour; owner-adjustable in Admin) --------
 
@@ -1583,14 +1584,12 @@ export async function markOpen(email: string) {
  */
 export async function markClosed(email: string, reason: string) {
   await saveSession(email, instanceNameFor(email), "close");
-  await sbInsert("agent_events", [
-    {
-      kind: "wa-session-closed",
-      detail:
-        `${email}: WhatsApp link closed (${reason}). The session is dead until ` +
-        `the user re-links - queued messages park instead of retrying into it.`,
-    },
-  ]).catch(() => {});
+  await insertUserEvent(email, {
+    kind: "wa-session-closed",
+    detail:
+      `${email}: WhatsApp link closed (${reason}). The session is dead until ` +
+      `the user re-links - queued messages park instead of retrying into it.`,
+  }).catch(() => {});
 }
 
 /**
@@ -2686,23 +2685,60 @@ export async function connectionState(
   return state;
 }
 
+export interface DisconnectResult {
+  /**
+   * The link is GONE: a host confirmed the delete, every host answered that
+   * the instance is absent, or there was never a link to sever. False means
+   * the instance (socket + Baileys credentials) may still be live somewhere.
+   */
+  severed: boolean;
+  /** Hosts the teardown was attempted on (0 = unconfigured, or the vault unreadable). */
+  hostsTried: number;
+  /** What the app's own wa_sessions record says (null = the record could not be read). */
+  hadLink: boolean | null;
+}
+
 /**
  * Fully sever our link to the user's WhatsApp. Logs out and DELETES the instance
  * on EVERY host (so no server keeps a live socket) and on the shared database
  * (so the Baileys credentials are gone), then removes our own wa_sessions record
  * entirely - we retain nothing about their WhatsApp afterwards.
+ *
+ * The result is HONEST (audit F057). This returned a bare boolean that every
+ * caller dropped, and it deleted wa_sessions regardless - so a host past its
+ * 12s abort, or an unreadable EVOLUTION_HOSTS, left the socket live on the
+ * host while the app forgot the instance ever existed: no retry could ever
+ * find it, and the DSAR erase answered "erased". Now:
+ *   - "never linked, nothing configured" is a real success with nothing to
+ *     sever (a deployment without Evolution can still erase accounts);
+ *   - "the app's record says they linked and no host confirmed the teardown"
+ *     is NOT severed, and the wa_sessions row is KEPT so the retry can find
+ *     the instance again.
  */
-export async function disconnectInstance(email: string): Promise<boolean> {
+export async function disconnectInstance(email: string): Promise<DisconnectResult> {
   const instance = instanceNameFor(email);
+  const enc = encodeURIComponent(email.toLowerCase());
+  // What we know about the link BEFORE touching anything: strict, so an
+  // unreadable record ("unavailable") is never mistaken for "never linked".
+  const linkRead = await sbSelectStrict<{ email: string }>(
+    "wa_sessions",
+    `select=email&email=eq.${enc}&limit=1`
+  );
+  const hadLink: boolean | null =
+    "rows" in linkRead ? linkRead.rows.length > 0 : linkRead.error === "missing" ? false : null;
   const hosts = await getHosts();
-  let ok = false;
+  let confirmed = false; // a host deleted the instance
+  let unanswered = false; // a host could not say (timeout, 5xx)
   for (const h of hosts) {
     await evoFetch(h, `/instance/logout/${instance}`, { method: "DELETE" });
     const res = await evoFetch(h, `/instance/delete/${instance}`, { method: "DELETE" });
-    ok = ok || res.ok;
+    if (res.ok) confirmed = true;
+    else if (res.status !== 404) unanswered = true; // 404 = no such instance here
   }
-  const enc = encodeURIComponent(email.toLowerCase());
-  await sbDelete("wa_sessions", `email=eq.${enc}`);
+  const severed = hosts.length > 0 ? confirmed || !unanswered : hadLink === false;
+  // The wa_sessions row is the ONLY record that lets a retry find the instance
+  // again - it goes only once the link is actually gone.
+  if (severed) await sbDelete("wa_sessions", `email=eq.${enc}`);
   // Purge the user's PARKED work too. Without this, an orphaned wa_outbox row
   // would (a) be drained by a background poll, whose ensureConnected re-created
   // the wa_sessions row we just deleted (silently undoing the disconnect), and
@@ -2710,7 +2746,7 @@ export async function disconnectInstance(email: string): Promise<boolean> {
   // must leave nothing behind that can message a shop.
   await sbDelete("wa_outbox", `sender_key=eq.${enc}`).catch(() => {});
   await sbDelete("graph_wakeups", `user_email=eq.${enc}`).catch(() => {});
-  return ok;
+  return { severed, hostsTried: hosts.length, hadLink };
 }
 
 /** Send a text from the user's own WhatsApp (rate-limited, human-like).
