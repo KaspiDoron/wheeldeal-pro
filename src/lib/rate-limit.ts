@@ -62,7 +62,69 @@ function trustedHops(): number {
   return Number.isFinite(n) && n >= 0 ? Math.min(Math.floor(n), 8) : 0;
 }
 
-/** An IPv4/IPv6 literal, with the optional `:port` and `[...]` bracket form removed. */
+const IPV4_RX = /^\d{1,3}(\.\d{1,3}){3}$/;
+
+/** A dotted IPv4 literal with every octet in range, or null. */
+function parseIpv4(v: string): string | null {
+  if (!IPV4_RX.test(v)) return null;
+  const octets = v.split(".").map(Number);
+  return octets.every((o) => o <= 255) ? octets.join(".") : null;
+}
+
+/**
+ * An IPv6 literal as its eight 16-bit groups, or null when it is not one.
+ * Handles `::` compression and a dotted IPv4 tail (`::ffff:1.2.3.4`).
+ */
+function parseIpv6(v: string): number[] | null {
+  if (!/^[0-9A-Fa-f:.]+$/.test(v) || !v.includes(":")) return null;
+  const halves = v.split("::");
+  if (halves.length > 2) return null;
+  const groupsOf = (part: string): number[] | null => {
+    if (part === "") return [];
+    const out: number[] = [];
+    const pieces = part.split(":");
+    for (let i = 0; i < pieces.length; i++) {
+      const piece = pieces[i];
+      if (piece.includes(".")) {
+        // A dotted IPv4 tail is only legal as the LAST piece, and it fills two groups.
+        if (i !== pieces.length - 1) return null;
+        const v4 = parseIpv4(piece);
+        if (!v4) return null;
+        const [a, b, c, d] = v4.split(".").map(Number);
+        out.push((a << 8) | b, (c << 8) | d);
+        continue;
+      }
+      if (!/^[0-9A-Fa-f]{1,4}$/.test(piece)) return null;
+      out.push(parseInt(piece, 16));
+    }
+    return out;
+  };
+  const head = groupsOf(halves[0]);
+  const tail = halves.length === 2 ? groupsOf(halves[1]) : [];
+  if (!head || !tail) return null;
+  if (halves.length === 2) {
+    // `::` must stand for at least one zero group.
+    if (head.length + tail.length > 7) return null;
+    return [...head, ...Array<number>(8 - head.length - tail.length).fill(0), ...tail];
+  }
+  return head.length === 8 ? head : null;
+}
+
+/**
+ * An IPv4/IPv6 literal reduced to its RATE KEY: the port and `[...]` bracket
+ * form removed, IPv4 kept as-is, and IPv6 collapsed to its /64 routing prefix.
+ *
+ * The host half of an IPv6 address is the caller's to choose: an ordinary
+ * routed /64 lets one client source every request from a different /128, and
+ * keyed on the full address that was 2^64 fresh windows for every IP-keyed cap
+ * in the app (audit F185). A /64 is the smallest block a provider routes to a
+ * single subscriber, so keying on it cannot merge two unrelated people - and
+ * over-merging on an unusually shared prefix only ever refuses more, the safe
+ * direction. IPv4-in-IPv6 (`::ffff:a.b.c.d` mapped, `::a.b.c.d` compatible,
+ * dotted or hex) is unwrapped to the IPv4 branch FIRST: truncating those would
+ * fold the whole IPv4 space into one prefix and lock every real user into a
+ * single shared window.
+ */
 function normalizeIp(raw: string | undefined): string | null {
   let v = String(raw ?? "").trim();
   if (!v) return null;
@@ -70,10 +132,17 @@ function normalizeIp(raw: string | undefined): string | null {
   // keeping it would let one client occupy many buckets.
   if (v.startsWith("[")) v = v.slice(1, v.indexOf("]") > 0 ? v.indexOf("]") : undefined);
   else if ((v.match(/:/g) ?? []).length === 1) v = v.split(":")[0];
-  const ipv4 = /^\d{1,3}(\.\d{1,3}){3}$/;
-  const ipv6 = /^[0-9A-Fa-f:]+$/;
-  if (!ipv4.test(v) && !(v.includes(":") && ipv6.test(v))) return null;
-  return v.toLowerCase();
+  const v4 = parseIpv4(v);
+  if (v4) return v4;
+  const g = parseIpv6(v);
+  if (!g) return null;
+  const embeddedV4 = () => `${g[6] >> 8}.${g[6] & 0xff}.${g[7] >> 8}.${g[7] & 0xff}`;
+  const leadingZero = g[0] === 0 && g[1] === 0 && g[2] === 0 && g[3] === 0 && g[4] === 0;
+  // IPv4-mapped (::ffff:a.b.c.d) and IPv4-compatible (::a.b.c.d, excluding
+  // :: and ::1 themselves) carry an IPv4 caller - key them as that caller.
+  if (leadingZero && g[5] === 0xffff) return embeddedV4();
+  if (leadingZero && g[5] === 0 && (g[6] !== 0 || g[7] > 1)) return embeddedV4();
+  return `${g.slice(0, 4).map((x) => x.toString(16)).join(":")}::/64`;
 }
 
 /**
@@ -164,6 +233,46 @@ export async function rateLimit(
   }
   cur.n += 1;
   if (cur.n > Math.max(1, max)) {
+    return { ok: false, retryAfter: Math.max(1, Math.ceil((cur.reset - now) / 1000)) };
+  }
+  return { ok: true, retryAfter: 0 };
+}
+
+/**
+ * READ a window without counting a hit: is the (max+1)th hit going to be
+ * refused right now? For ceilings that must be COUNTED only on one outcome
+ * (a verified wrong password) but CHECKED before the work that produces the
+ * outcome - the login route's per-account guess ceiling (audit F184), where
+ * counting before the verification would make the bucket an enumeration
+ * oracle and a lockout weapon, and checking only after it would let a spent
+ * ceiling still accept the correct guess.
+ *
+ * Same fail direction as rateLimit: a Redis hiccup falls back to the
+ * per-instance window, never to a refusal.
+ */
+export async function rateLimitPeek(
+  bucket: string,
+  id: string,
+  max: number,
+  windowSec: number
+): Promise<RateVerdict> {
+  const key = `rl:${bucket}:${id}`;
+  try {
+    const r = await hotStateClient();
+    if (r && typeof r.get === "function") {
+      const n = Number((await r.get(key)) ?? 0);
+      // The window rolls over in at most `windowSec` - the same honest upper
+      // bound rateLimit reports on the fleet-wide path.
+      if (Number.isFinite(n) && n >= Math.max(1, max)) return { ok: false, retryAfter: windowSec };
+      return { ok: true, retryAfter: 0 };
+    }
+  } catch {
+    /* per-instance fallback below */
+  }
+  const now = Date.now();
+  const cur = store().get(key);
+  if (!cur || cur.reset <= now) return { ok: true, retryAfter: 0 };
+  if (cur.n >= Math.max(1, max)) {
     return { ok: false, retryAfter: Math.max(1, Math.ceil((cur.reset - now) / 1000)) };
   }
   return { ok: true, retryAfter: 0 };

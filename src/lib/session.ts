@@ -280,11 +280,24 @@ export async function getSession(): Promise<Session | null> {
   // Slide-renew past the halfway mark so real users never notice the 30-day
   // window - only now, once the session has proven valid, and carrying the
   // original firstIssuedAt so renewal never resets the absolute clock.
+  //
+  // THE RE-ISSUE RUNS THE DOOR CHECKS AGAIN FIRST (audit F159). It used to
+  // mint on the gates above alone, and two things slipped through them: the
+  // beta allowlist (enforced only on the /me poll - a de-invited tester whose
+  // client never polled stayed signed in and self-renewing for 90 days), and a
+  // row that could not be read THIS request (a blip, or a stale 10s cache with
+  // no horizon on it), where the fresh issuedAt walked past any horizon written
+  // in between and made a revoked session valid again on every instance. At
+  // most once per cookie per 15 days, and never on the WhatsApp reply path.
   if (ageMs > (MAX_AGE * 1000) / 2) {
-    try {
-      setSessionCookie(raw.email, { firstIssuedAt });
-    } catch {
-      /* renewal is best-effort (read-only contexts cannot set cookies) */
+    const verdict = await renewalVerdict(raw.email, role, Number(raw.issuedAt) || 0);
+    if (verdict === "refuse") return null;
+    if (verdict === "renew") {
+      try {
+        setSessionCookie(raw.email, { firstIssuedAt });
+      } catch {
+        /* renewal is best-effort (read-only contexts cannot set cookies) */
+      }
     }
   }
   if (role === "user") {
@@ -301,6 +314,59 @@ export async function getSession(): Promise<Session | null> {
     }
   }
   return { email: raw.email, issuedAt: raw.issuedAt, role, plan };
+}
+
+/**
+ * May this session be re-minted for another 30 days, right now?
+ *   renew  - every door check passed on a POSITIVE read this request
+ *   skip   - the account state is not known this request (unreadable row):
+ *            the session stands for this request, but nothing is minted on it
+ *   refuse - the account is de-invited, blocked, or the fresh horizon is past
+ *            the cookie's issue - the session ends here
+ * Demo mode (no durable store) renews unconditionally past the allowlist:
+ * there is no revocation store to consult, and no horizon can have moved.
+ */
+async function renewalVerdict(
+  email: string,
+  role: Role,
+  issuedAt: number
+): Promise<"renew" | "skip" | "refuse"> {
+  // The invite list: the owner is always allowed; everyone else must still be
+  // on it. isAllowed itself falls back to the env list on an unreadable vault.
+  try {
+    const { isAllowed } = await import("./allowlist");
+    if (!(await isAllowed(email))) return "refuse";
+  } catch {
+    return "skip";
+  }
+  let rc: typeof import("./runtime-config");
+  try {
+    rc = await import("./runtime-config");
+    if (!rc.supabaseConfigured?.()) return "renew";
+  } catch {
+    return "renew";
+  }
+  // A STRICT read, deliberately not getUser: the fresh path there falls back
+  // to the per-instance cache on an unavailable read, which is exactly the
+  // stale row this pass must not mint on.
+  let read: { rows: { status: string | null; sessions_valid_from: string | null }[] } | { error: string };
+  try {
+    read = await rc.sbSelectStrict<{ status: string | null; sessions_valid_from: string | null }>(
+      "app_users",
+      `select=status,sessions_valid_from&email=eq.${encodeURIComponent(email)}&limit=1`
+    );
+  } catch {
+    return "skip";
+  }
+  if (!read || !("rows" in read)) return "skip";
+  if (read.rows.length === 0) return role === "owner" ? "renew" : "refuse";
+  const row = read.rows[0];
+  if (role !== "owner" && row.status === "blocked") return "refuse";
+  const horizon = row.sessions_valid_from ? Date.parse(row.sessions_valid_from) : NaN;
+  if (Number.isFinite(horizon) && horizon <= Date.now() + 5 * 60_000 && issuedAt < horizon) {
+    return "refuse";
+  }
+  return "renew";
 }
 
 /** True for owner or admin. */

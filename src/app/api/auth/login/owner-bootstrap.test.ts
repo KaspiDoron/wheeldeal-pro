@@ -84,7 +84,10 @@ async function loadLoginRoute(h: Harness) {
   }));
   vi.doMock("@/lib/runtime-config", () => ({ sbInsert: async () => true }));
   vi.doMock("@/lib/rate-limit", () => ({
-    rateLimit: async () => ({ ok: true }),
+    rateLimit: async () => ({ ok: true, retryAfter: 0 }),
+    // The per-account guess ceiling (audit F184) is out of scope here - the
+    // real limiter is exercised in account-guess-ceiling.test.ts.
+    rateLimitPeek: async () => ({ ok: true, retryAfter: 0 }),
     clientIp: () => "203.0.113.9",
   }));
   vi.doMock("@/lib/cooldown", () => ({

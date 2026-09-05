@@ -60,7 +60,11 @@ describe("clientIp reads the hop the platform guarantees, not the one the caller
 
   it("drops the port so one client cannot occupy many buckets", () => {
     expect(clientIp(req({ "x-forwarded-for": "203.0.113.7:51000" }))).toBe("203.0.113.7");
-    expect(clientIp(req({ "x-forwarded-for": "[2001:db8::1]:443" }))).toBe("2001:db8::1");
+    // REWRITTEN, INTENT PRESERVED (audit F185): this pinned the full /128
+    // address as the key, which was the same defect as keeping the port at 64
+    // bits of freedom. The key is the /64 routing prefix now - see
+    // ipv6-prefix-bucket.test.ts for the attack run end to end.
+    expect(clientIp(req({ "x-forwarded-for": "[2001:db8::1]:443" }))).toBe("2001:db8:0:0::/64");
   });
 
   it("TRUSTED_PROXY_HOPS shifts left by the proxies that append after the client", () => {

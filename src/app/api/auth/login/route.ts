@@ -53,6 +53,25 @@ async function bootstrapOwner(email: string, bootstrap: string, phone?: string) 
   return getUser(email, { fresh: true });
 }
 
+/**
+ * The IP-independent per-account failed-guess ceiling (audit F184). Sixty
+ * verified wrong passwords an hour is far beyond any person mistyping - a
+ * legitimate user is never touched - while a botnet holding a thousand
+ * addresses is capped at sixty guesses an hour per account instead of thirty
+ * per address. Distinct from the per-(email, ip) LOCK below, which stays the
+ * fast local trip. The refusal wears the same generic wording as that lock.
+ */
+const ACCOUNT_FAIL_BUCKET = "login-fail";
+const ACCOUNT_FAIL_MAX = 60;
+const ACCOUNT_FAIL_WINDOW_SEC = 3600;
+const accountCeilingSpent = (retryAfterSec: number) =>
+  NextResponse.json(
+    {
+      error: `Too many attempts - try again in ${Math.max(1, Math.ceil(retryAfterSec / 60))} min or use Forgot password.`,
+    },
+    { status: 429, headers: { "Retry-After": String(Math.max(1, retryAfterSec)) } }
+  );
+
 // Email + password auth. Accounts live durably in Supabase (app_users), so
 // logins, signups and password changes work across serverless instances.
 //   mode "login"  : { email, password }
@@ -186,12 +205,21 @@ export async function POST(req: Request) {
     // anyone locked the real owner of the address out for 15 minutes,
     // repeatable forever (a lockout DoS on any known email). Keyed on the
     // pair, an attacker only ever locks their own network path; the real
-    // person logging in from their own device is untouched, and a rotating
-    // attacker still runs into the 30/hour per-IP limit above. Same
-    // clientIp discipline as the Google route: the appended hop, never the
+    // person logging in from their own device is untouched. Same clientIp
+    // discipline as the Google route: the appended hop, never the
     // caller-typed leftmost one.
+    //
+    // A rotating attacker walks past BOTH the pair lock and the 30/hour per-IP
+    // window above - every fresh address is a fresh window and a fresh lock
+    // counter (audit F184). The IP-INDEPENDENT ceiling below is the bound on
+    // that: "login-fail" is keyed on the account alone, COUNTED only on a
+    // verified wrong password (never before getUser - counting earlier would
+    // make it the enumeration oracle and lockout weapon the pair lock exists
+    // to avoid) and CHECKED before the password is verified, so a spent
+    // ceiling refuses the correct guess as well. The ceiling is high enough
+    // that no real person reaches it - it bounds a botnet, it is not a lock.
     const { authLockLeft, noteAuthFailure, clearAuthFailures } = await import("@/lib/cooldown");
-    const { clientIp } = await import("@/lib/rate-limit");
+    const { clientIp, rateLimit, rateLimitPeek } = await import("@/lib/rate-limit");
     const lockKey = `${email}|ip:${clientIp(req)}`;
     const lockLeft = await authLockLeft(lockKey, "login");
     if (lockLeft > 0) {
@@ -219,6 +247,12 @@ export async function POST(req: Request) {
         { status: 400 }
       );
     }
+    // The account-keyed guess ceiling, read WITHOUT counting: the account
+    // exists (getUser above), so this reveals nothing the 400 just before it
+    // does not already say, and it closes the door on the correct guess once
+    // the hour's failures are spent, from any address.
+    const ceiling = await rateLimitPeek(ACCOUNT_FAIL_BUCKET, email, ACCOUNT_FAIL_MAX, ACCOUNT_FAIL_WINDOW_SEC);
+    if (!ceiling.ok) return accountCeilingSpent(ceiling.retryAfter);
     // A password-less owner row is an account whose credential is Google (the
     // Google route registers it with no hash). It gets the same 401 every other
     // password-less account gets. The re-install branch that used to sit here
@@ -226,6 +260,10 @@ export async function POST(req: Request) {
     // revoked every live owner session doing it (audit F258).
     if (!verifyPassword(password, user?.passwordHash)) {
       const { locked, lockedMinutes } = await noteAuthFailure(lockKey, "login");
+      // COUNTED here and only here: a verified wrong password on an account
+      // that exists.
+      const spent = await rateLimit(ACCOUNT_FAIL_BUCKET, email, ACCOUNT_FAIL_MAX, ACCOUNT_FAIL_WINDOW_SEC);
+      if (!spent.ok) return accountCeilingSpent(spent.retryAfter);
       return NextResponse.json(
         {
           error: locked

@@ -42,6 +42,27 @@ export async function POST(req: Request) {
     );
   }
 
+  // THE SAME DOOR EVERY OTHER COOKIE-MINTING PATH RUNS (audit F158). Removing
+  // a tester from the invite list only rewrites the beta_allowlist config -
+  // the app_users row stays - and this route used to go straight from the
+  // redeemed token to setSessionCookie. A de-invited tester could drive
+  // forgot -> reset into a fresh, fully valid wd_session and resume live
+  // outreach through every route that gates on getSession alone. Both checks
+  // sit BEFORE the password write, so a de-invited or restricted account
+  // cannot rewrite its own credential either. The blocked check reads the row
+  // already fetched above - no second lookup; getSession would refuse the
+  // cookie anyway, but the credential write must not happen.
+  const { allowedPlanFor, BETA_BLOCK_MESSAGE } = await import("@/lib/allowlist");
+  if ((await allowedPlanFor(redeemed.email)) === null) {
+    return NextResponse.json({ error: BETA_BLOCK_MESSAGE, betaBlocked: true }, { status: 403 });
+  }
+  if (user.status === "blocked") {
+    return NextResponse.json(
+      { error: "This account has been restricted by an administrator." },
+      { status: 403 }
+    );
+  }
+
   const saved = await setPassword(redeemed.email, next, false);
   if (!saved) {
     return NextResponse.json(

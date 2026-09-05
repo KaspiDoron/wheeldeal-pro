@@ -181,11 +181,13 @@ export async function POST(req: Request) {
         { status: 403 }
       );
     }
+    // A block also cancels the account's WhatsApp wire - parked outbox rows
+    // and wakeups purged, every contacted shop tombstoned (audit F049).
     await setUserStatus(target, status);
-    // AND THE ANSWER HAS TO BE TRUE. setUserStatus returns void and swallows
-    // the durable write's result, so a failed upsert looked exactly like a
-    // successful block. Read the list back (it comes from Supabase, not the
-    // cache) and report what it actually says.
+    // AND THE ANSWER HAS TO BE TRUE. setUserStatus used to return void and
+    // swallow the durable write's result, so a failed upsert looked exactly
+    // like a successful block. Read the list back (it comes from Supabase, not
+    // the cache) and report what it actually says.
     const after = await payload();
     const row = after.users.find((u) => u.email === target);
     if (!row || row.status !== status) {
