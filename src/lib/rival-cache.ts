@@ -27,6 +27,13 @@ export type RedisLike = {
    * admin probe checks for it before calling rather than assuming.
    */
   ping?(): Promise<string>;
+  /**
+   * Plain read of a string key. Optional on the type for the same reason as
+   * ping: the test doubles implement only what they exercise. rateLimitPeek
+   * (rate-limit.ts) uses it to READ a window without counting a hit, and falls
+   * back to the per-instance window when a double lacks it.
+   */
+  get?(key: string): Promise<string | null>;
   set(...args: (string | number)[]): Promise<unknown>;
   exists(key: string): Promise<number>;
   del(...keys: string[]): Promise<number>;

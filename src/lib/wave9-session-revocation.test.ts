@@ -35,7 +35,10 @@ vi.mock("./access", () => ({
   getUser: async () => state.rec,
   normalizePlan: (p: unknown) => (p === "pro" ? "pro" : "free"),
 }));
-vi.mock("./allowlist", () => ({ isTestUser: async () => false }));
+// isAllowed: the slide re-issue re-runs the invite door (audit F159); these
+// tests pin the clock semantics, so every tester here is invited. The
+// de-invited path is executed in deinvite-revocation.test.ts.
+vi.mock("./allowlist", () => ({ isTestUser: async () => false, isAllowed: async () => true }));
 
 const jar: { value?: string; setCalls: number; lastSet?: string } = { setCalls: 0 };
 vi.mock("next/headers", () => ({

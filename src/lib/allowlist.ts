@@ -155,9 +155,21 @@ export const BETA_BLOCK_MESSAGE =
  * save and a complete one were indistinguishable to the caller and to the
  * owner. The route surfaces `dropped` so an over-long paste says so.
  */
-export async function saveBetaAllowlist(
-  entries: BetaEntry[]
-): Promise<{ saved: BetaEntry[]; dropped: number; max: number }> {
+export interface SaveBetaResult {
+  saved: BetaEntry[];
+  dropped: number;
+  max: number;
+  /** Whether the list itself reached the durable store (in-memory only = false). */
+  persisted: boolean;
+  error?: string;
+  /** De-invited testers whose sessions were revoked. */
+  revoked: string[];
+  /** De-invited testers whose revocation write did NOT persist - they stay signed in. */
+  revokeFailed: string[];
+}
+
+export async function saveBetaAllowlist(entries: BetaEntry[]): Promise<SaveBetaResult> {
+  const before = await betaAllowlist();
   const clean: BetaEntry[] = [];
   const seen = new Set<string>();
   let dropped = 0;
@@ -171,8 +183,50 @@ export async function saveBetaAllowlist(
     }
     clean.push({ email, plan: normalizePlanLoose(e?.plan), ...(e?.test ? { test: true } : {}) });
   }
-  await setConfig("beta_allowlist", JSON.stringify(clean));
-  return { saved: clean, dropped, max: BETA_ALLOWLIST_MAX };
+  const wrote = await setConfig("beta_allowlist", JSON.stringify(clean)).catch(
+    (e: unknown) =>
+      ({ ok: false, persistent: false, error: e instanceof Error ? e.message : String(e) }) as {
+        ok: boolean;
+        persistent: boolean;
+        error?: string;
+      }
+  );
+  // A legacy/mocked setConfig that resolves undefined keeps the old behavior.
+  const persisted = wrote ? wrote.ok : true;
+  // DE-INVITATION IS A REVOCATION (audit F159). This used to rewrite the
+  // config key and nothing else: the dropped tester's app_users row, cookie
+  // and 30-day slide-renewal all survived, and the only surface that ever
+  // asked the list again was the /me poll. Moving sessions_valid_from here is
+  // what getSession already honours on every request, so the removed tester
+  // is out on their next request - at zero cost on the request path. Only
+  // when the list actually landed: a save that did not persist de-invited
+  // nobody. Env-listed addresses stay invited through the env fallback.
+  const revoked: string[] = [];
+  const revokeFailed: string[] = [];
+  if (persisted) {
+    const stillInvited = new Set<string>([
+      ...clean.map((e) => e.email),
+      ...parseEnvList(process.env.BETA_ALLOWLIST).map((e) => e.email),
+      ownerEmailLocal(),
+    ]);
+    const removed = before.map((e) => e.email).filter((email) => !stillInvited.has(email));
+    if (removed.length > 0) {
+      const { revokeSessions } = await import("./access");
+      for (const email of removed) {
+        const ok = await revokeSessions(email).catch(() => false);
+        (ok ? revoked : revokeFailed).push(email);
+      }
+    }
+  }
+  return {
+    saved: clean,
+    dropped,
+    max: BETA_ALLOWLIST_MAX,
+    persisted,
+    ...(wrote && !wrote.ok && wrote.error ? { error: wrote.error } : {}),
+    revoked,
+    revokeFailed,
+  };
 }
 
 // ---------------------------------------------------------------------------

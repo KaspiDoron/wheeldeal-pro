@@ -33,9 +33,17 @@
 //
 // USAGE
 //   SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=... \
-//     node scripts/admin-recover-owner.mjs [--email you@example.com] [--password 'NewPass'] [--must-change]
+//     node scripts/admin-recover-owner.mjs --password '<8+ chars>' [--email you@example.com] [--must-change]
 //
-//   Defaults: --email kaspidoron@gmail.com  --password KASPI123
+//   Default: --email kaspidoron@gmail.com. THERE IS NO DEFAULT PASSWORD (audit
+//   F258b): the well-known literal this script used to fall back on was a
+//   published credential - anyone who could run it installed a known password
+//   on the owner row. Pass --password explicitly (8+ characters), or set
+//   OWNER_BOOTSTRAP_PASSWORD in the environment - the same one-time secret the
+//   login route's owner bootstrap reads - and the script refuses otherwise.
+//   A password taken from OWNER_BOOTSTRAP_PASSWORD is installed with
+//   must_change_password so it cannot remain a live credential (override with
+//   --no-must-change); an explicit --password is left as-is unless --must-change.
 //
 //   Reads SUPABASE_URL (or NEXT_PUBLIC_SUPABASE_URL) and SUPABASE_SERVICE_ROLE_KEY
 //   from the environment - the same bootstrap vars the deployed service uses.
@@ -52,25 +60,38 @@ function arg(name, fallback) {
 }
 const hasFlag = (name) => process.argv.includes(`--${name}`);
 
+function die(msg) {
+  console.error(`\n  ✗ ${msg}\n`);
+  process.exit(1);
+}
+
 const EMAIL = String(arg("email", "kaspidoron@gmail.com")).trim().toLowerCase();
-const PASSWORD = String(arg("password", "KASPI123"));
-// Force a password change on next login whenever the weak, well-known default is
-// used (matches the login route's owner-bootstrap hardening: the default must
-// never remain a live credential). An explicit strong --password the operator
-// chose is left as-is unless they add --must-change. --no-must-change overrides.
-const MUST_CHANGE =
-  hasFlag("must-change") || (PASSWORD === "KASPI123" && !hasFlag("no-must-change"));
+// NO BUILT-IN DEFAULT (audit F258b). Explicit --password, or the one-time
+// OWNER_BOOTSTRAP_PASSWORD from the environment; anything else is a refusal,
+// checked BEFORE the database is even looked for.
+const PASSWORD_MIN_LEN = 8;
+const explicitPassword = arg("password", "");
+const envPassword = String(process.env.OWNER_BOOTSTRAP_PASSWORD ?? "").trim();
+const PASSWORD = explicitPassword !== "" ? String(explicitPassword) : envPassword;
+const passwordFromEnv = explicitPassword === "" && envPassword !== "";
+if (PASSWORD.length < PASSWORD_MIN_LEN) {
+  die(
+    `A password is required and there is no default: pass --password '<at least ${PASSWORD_MIN_LEN} characters>'\n` +
+      "    or set OWNER_BOOTSTRAP_PASSWORD in the environment (the one-time bootstrap secret the login\n" +
+      "    route reads). The old built-in default was a published credential and is gone."
+  );
+}
+// A bootstrap secret taken from the environment must never remain a live
+// credential (matches the login route's owner bootstrap): force a change on
+// next login unless --no-must-change. An explicit --password the operator
+// chose is left as-is unless they add --must-change.
+const MUST_CHANGE = hasFlag("must-change") || (passwordFromEnv && !hasFlag("no-must-change"));
 
 // ---- connection (mirrors src/lib/runtime-config.ts supabase()) --------------
 const URL = (process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "")
   .trim()
   .replace(/\/$/, "");
 const KEY = (process.env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
-
-function die(msg) {
-  console.error(`\n  ✗ ${msg}\n`);
-  process.exit(1);
-}
 
 if (!URL || !KEY) {
   die(
@@ -212,7 +233,7 @@ async function main() {
   console.log(``);
   console.log(`  Done. Log in with:`);
   console.log(`      email    : ${EMAIL}`);
-  console.log(`      password : ${PASSWORD}`);
+  console.log(`      password : ${passwordFromEnv ? "(the OWNER_BOOTSTRAP_PASSWORD you set)" : "(the --password you passed)"}`);
   console.log(``);
   console.log(`  Notes:`);
   console.log(`   - The in-memory attempt counter (if any) is per-instance and`);
@@ -220,11 +241,9 @@ async function main() {
   console.log(`     actually unlocks the account across all instances.`);
   console.log(`   - This app has no email-confirmation gate for the owner, so`);
   console.log(`     there is nothing else to "confirm" - the account is usable now.`);
-  if (PASSWORD === "KASPI123") {
+  if (MUST_CHANGE) {
     console.log(``);
-    console.log(`   ⚠ SECURITY: "KASPI123" is a weak, well-known default. Change it`);
-    console.log(`     immediately after logging in (Profile -> password), or re-run`);
-    console.log(`     this script with --password '<a strong unique passphrase>' --must-change.`);
+    console.log(`   ⚠ The account must change this password on its first login (Profile -> password).`);
   }
   console.log(``);
 }

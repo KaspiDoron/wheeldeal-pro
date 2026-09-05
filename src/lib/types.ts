@@ -337,7 +337,7 @@ export interface Vendor {
   // WHO cancelled. "user-removed" is the only reason that may render as
   // "Removed by you" - a session-close or deal-close tombstone is the
   // system's own action and must never be attributed to the traveller.
-  cancelReason?: "user-removed" | "session-closed" | "deal-closed" | "unknown";
+  cancelReason?: "user-removed" | "session-closed" | "deal-closed" | "account-blocked" | "unknown";
   // When the tombstone was written (keys the dismissible notice, so a LATER
   // removal of the same shop is a new fact and reappears).
   cancelledAt?: string | null;

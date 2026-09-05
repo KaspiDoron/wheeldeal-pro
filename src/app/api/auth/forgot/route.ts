@@ -44,6 +44,14 @@ export async function POST(req: Request) {
   // Do not reveal whether an account exists.
   if (!user) return NextResponse.json(generic);
 
+  // A de-invited address gets no link at all (audit F158): the redeem route
+  // refuses it too, but a live reset link in the inbox of someone the owner
+  // removed is still a credential-rewrite button. SAME generic body - on an
+  // unauthenticated route a distinct answer here would be an
+  // account-existence oracle.
+  const { isAllowed } = await import("@/lib/allowlist");
+  if (!(await isAllowed(key))) return NextResponse.json(generic);
+
   const result = await startPasswordReset(key);
   if (!result.ok) {
     // A cooldown is not an error the caller can distinguish from success

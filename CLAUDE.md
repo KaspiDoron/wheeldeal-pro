@@ -112,9 +112,12 @@ supabase/retention.sql     run once; prune + de-identify + heartbeat + the
 - **Runtime config**: secrets resolve Supabase override -> `process.env`,
   cached 30s. Admin-pasted keys are AES-256-GCM encrypted (key derived from
   `SESSION_SECRET`). Bootstrap secrets are env-only.
-- **Sessions**: password change / block / erase / sign-out-everywhere move
-  `app_users.sessions_valid_from`; cookies carry issuedAt + firstIssuedAt
-  (90-day absolute ceiling). Password reset is token-based (a request changes
+- **Sessions**: password change / block / erase / sign-out-everywhere /
+  removal from the beta list move `app_users.sessions_valid_from`; cookies
+  carry issuedAt + firstIssuedAt (90-day absolute ceiling), and the slide
+  re-issue re-runs the allowlist, status and horizon checks on a fresh read.
+  A block also cancels the account's WhatsApp wire (outbox + wakeups purged,
+  contacted shops tombstoned). Password reset is token-based (a request changes
   nothing; redemption proves the inbox).
 - **Privacy is code**: `privacy/user-tables.ts` registers every user-keyed
   table; erase + export walk it, a schema-grep test refuses unregistered

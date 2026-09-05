@@ -470,10 +470,15 @@ export async function listUsers(
   return [...seen.values()].sort((a, b) => b.lastSeen - a.lastSeen);
 }
 
+/**
+ * Block or unblock an account. Returns whether the status write PERSISTED
+ * (in demo mode, true) - the admin route reads the list back as well, but a
+ * caller such as the integrity ladder has only this to go on.
+ */
 export async function setUserStatus(
   email: string,
   status: "active" | "blocked"
-): Promise<void> {
+): Promise<boolean> {
   const key = email.trim().toLowerCase();
   const rec = (await getUser(key, { fresh: true })) ?? {
     email: key,
@@ -484,9 +489,53 @@ export async function setUserStatus(
     lastSeen: Date.now(),
   };
   rec.status = status;
-  await mirror(rec);
+  const persisted = await mirror(rec);
   // Blocking is the urgent revocation: the status check in getSession already
   // refuses blocked accounts per-request, and the horizon closes the remaining
   // door (a race with the 10s cache, an unblock-then-reblock).
   if (status === "blocked") await revokeSessions(key).catch(() => false);
+  // ...and the wire half: nothing parked drains, no shop reply is answered.
+  if (status === "blocked") await cancelWireForUser(key);
+  return supabaseConfigured() ? persisted : true;
+}
+
+/**
+ * THE WIRE HALF OF A BLOCK (audit F049). The cookie revocation above stops the
+ * browser; it stopped nothing on WhatsApp. No send path reads account status -
+ * the fleet drain selects wa_outbox fleet-wide and the inbound path is
+ * token/claim-gated - so a blocked traveller's parked batch kept draining from
+ * their own linked number and every shop reply kept getting an agent answer.
+ *
+ * Done on the WRITE side, the way disconnectInstance and closeSearchSession
+ * already are, so nothing is added to the drain or the reply path: purge the
+ * sender's parked outbox rows and wakeups, then tombstone every shop the
+ * account has contacted in wa_cancellations - the veto guardOutbound already
+ * enforces on every automated send, so a shop reply that arrives after the
+ * block is refused at the send moment. Best-effort per step: the status write
+ * and the horizon have already landed, and a purge that could not run must
+ * not un-block the account.
+ */
+async function cancelWireForUser(key: string): Promise<void> {
+  const enc = encodeURIComponent(key);
+  const rc = await import("./runtime-config");
+  const purged = await rc
+    .sbDeleteReturning<{ to_number: string }>("wa_outbox", `sender_key=eq.${enc}`)
+    .catch(() => [] as { to_number: string }[]);
+  await rc.sbDelete("graph_wakeups", `user_email=eq.${enc}`).catch(() => {});
+  // wa_recipient_state holds exactly one row per shop this sender has ever
+  // contacted - including the live threads with no outbox row, whose next
+  // inbound would otherwise still trigger an auto-answer. No time window: a
+  // block means every thread, warm or cold.
+  const contacted = await sbSelect<{ to_number: string }>(
+    "wa_recipient_state",
+    `select=to_number&sender_key=eq.${enc}&limit=500`
+  ).catch(() => [] as { to_number: string }[]);
+  const digits = new Set<string>(
+    [...purged.map((r) => r.to_number), ...contacted.map((r) => r.to_number)].filter(Boolean)
+  );
+  if (digits.size === 0) return;
+  const { cancelSends } = await import("./wa/cancellations");
+  for (const d of digits) {
+    await cancelSends(key, d, "account-blocked").catch(() => false);
+  }
 }

@@ -35,19 +35,42 @@ export async function PUT(req: Request) {
   const body = await req.json().catch(() => ({}));
   const entries: BetaEntry[] = Array.isArray(body.entries) ? body.entries : [];
   const res = await saveBetaAllowlist(entries);
+  // HONEST WRITE: a list that did not reach the durable store was not saved -
+  // it would reset on the next restart and de-invited nobody. 502, not ok.
+  if (!res.persisted) {
+    return NextResponse.json(
+      {
+        error: res.error ?? "The tester list did not persist. Check Supabase and retry.",
+        entries: await betaAllowlist(),
+        max: res.max,
+      },
+      { status: 502 }
+    );
+  }
   const list = await betaAllowlist();
+  const notes: string[] = [];
+  // An over-long paste used to return a plain 200 having thrown the tail
+  // away. Say so, in the owner's words, on the response they already read.
+  if (res.dropped > 0) {
+    notes.push(
+      `Saved ${res.saved.length} testers. ${res.dropped} more were not saved - the list is capped at ${res.max}.`
+    );
+  }
+  // De-invitation revokes sessions (audit F159); a revocation that did not
+  // persist leaves that tester signed in, and the owner must hear it by name.
+  if (res.revokeFailed.length > 0) {
+    notes.push(
+      `Removed from the list, but still signed in (the sign-out did not persist - retry): ${res.revokeFailed.join(", ")}.`
+    );
+  }
   return NextResponse.json({
     ok: true,
     entries: list,
     max: res.max,
     dropped: res.dropped,
-    // An over-long paste used to return a plain 200 having thrown the tail
-    // away. Say so, in the owner's words, on the response they already read.
-    ...(res.dropped > 0
-      ? {
-          note: `Saved ${res.saved.length} testers. ${res.dropped} more were not saved - the list is capped at ${res.max}.`,
-        }
-      : {}),
+    revoked: res.revoked,
+    revokeFailed: res.revokeFailed,
+    ...(notes.length > 0 ? { note: notes.join(" ") } : {}),
   });
 }
 

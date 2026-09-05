@@ -13,7 +13,8 @@ import { nationalTail, numberFilter, numberVariants } from "./phone-key";
 // enforced THERE (see wa-guard rule -2) rather than by chasing every queue.
 //
 // Semantics:
-//   - written by: queue removal, Clear Search / session close, deal close
+//   - written by: queue removal, Clear Search / session close, deal close,
+//     an account block (audit F049 - the owner's stop reaches the wire)
 //   - enforced on: AUTOMATED sends only (a human explicitly pressing Send is
 //     itself the re-initiation signal)
 //   - cleared by: any explicit user action toward that shop (new RFQ, custom
@@ -22,7 +23,7 @@ import { nationalTail, numberFilter, numberVariants } from "./phone-key";
 //     (escape hatch if a bug ever over-blocks; writes keep happening so
 //     turning it back on restores protection)
 
-export type CancelReason = "user-removed" | "session-closed" | "deal-closed";
+export type CancelReason = "user-removed" | "session-closed" | "deal-closed" | "account-blocked";
 
 // MIGRATION-FREE FALLBACK: the dedicated wa_cancellations table only exists
 // after the owner re-runs schema.sql - but "remove must be permanent" cannot
@@ -239,7 +240,12 @@ export async function cancelledEntries(senderKey: string): Promise<CancelledEntr
 }
 
 function isCancelReason(v: unknown): v is CancelReason {
-  return v === "user-removed" || v === "session-closed" || v === "deal-closed";
+  return (
+    v === "user-removed" ||
+    v === "session-closed" ||
+    v === "deal-closed" ||
+    v === "account-blocked"
+  );
 }
 
 /** Back-compat digest of cancelledEntries - digits only. */
