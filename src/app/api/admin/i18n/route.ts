@@ -85,6 +85,11 @@ export async function POST(req: Request) {
   }
 
   const res = await setOverride(lang, String(body.source ?? ""), String(body.text ?? ""));
-  if (!res.ok) return NextResponse.json({ error: res.error }, { status: 400 });
+  if (!res.ok) {
+    // HONEST WRITE. A store that did not answer, or a write that did not land,
+    // is not the owner's mistake: 502 says "nothing changed, try again", where
+    // a 400 would send them hunting for a typo in a correct correction.
+    return NextResponse.json({ error: res.error }, { status: res.kind === "store" ? 502 : 400 });
+  }
   return NextResponse.json({ ok: true, count: res.count });
 }

@@ -15,7 +15,16 @@ import { finishBeforeResponse } from "../after";
 // call sites as the wa_outbox queue (no external cron needed).
 
 import "server-only";
-import { getConfig, setConfig, sbInsert, sbSelect, sbSelectStrict, sbUpdate } from "../runtime-config";
+import {
+  getConfig,
+  setConfig,
+  sbInsert,
+  sbSelect,
+  sbSelectStrict,
+  sbUpdate,
+  vaultDecryptHealth,
+  vaultReadState,
+} from "../runtime-config";
 import { runSafety, localizeMessage } from "../agents";
 import {
   getOrchestratorConfig,
@@ -147,6 +156,59 @@ async function migrateFromLegacy(): Promise<GraphSpec> {
   return spec;
 }
 
+/**
+ * IS "NO SPEC" REALLY "NO SPEC"? (audit F194)
+ *
+ * getConfig cannot tell "never saved" from "could not be read": a Supabase
+ * brownout hands back the empty negative cache, and a SESSION_SECRET rotated
+ * without SESSION_SECRET_PREVIOUS leaves the row PRESENT but undecryptable
+ * while the bulk read still reports "ok". Both used to reach the self-heal
+ * write in getGraphSpec, which upserted the shipped default over the owner's
+ * edited edges, priorities and round cap - encrypted under the NEW secret, so
+ * nothing could recover it - with no policy_versions row and no golden replay.
+ *
+ *   unavailable                 -> the truth is unknown: write nothing.
+ *   unconfigured                -> env-only/demo: setConfig is an in-memory
+ *                                  pin, harmless.
+ *   ok, nothing undecryptable   -> a genuine fresh install: self-heal.
+ *   ok, rows failed to decrypt  -> ask whether graph_spec's OWN row exists.
+ *                                  Present means unreadable, not absent: write
+ *                                  nothing. One stale unrelated row must not
+ *                                  disable the self-heal forever, which is why
+ *                                  the fleet-wide decrypt counter alone is not
+ *                                  the gate.
+ *
+ * Two synchronous getters plus, only under decrypt trouble, one exact-key
+ * probe - and it all runs AFTER the caller has its spec, so the reply path
+ * pays nothing.
+ */
+async function selfHealAllowed(): Promise<boolean> {
+  const state = vaultReadState();
+  if (state === "unavailable") return false;
+  if (state === "unconfigured") return true;
+  const health = vaultDecryptHealth();
+  if (!health || health.count === 0) return true;
+  const probe = await sbSelectStrict<{ key: string }>(
+    "app_config",
+    `select=key&key=eq.${encodeURIComponent(GRAPH_SPEC_KEY)}&limit=1`
+  );
+  if ("error" in probe) return false;
+  return probe.rows.length === 0;
+}
+
+/** Persist the migrated/default spec so the Studio opens on the owner's real
+ *  graph - best-effort, fire-and-forget, and only over a trustworthy absence. */
+function persistMigratedSpec(spec: GraphSpec): void {
+  void (async () => {
+    try {
+      if (!(await selfHealAllowed())) return;
+      await setConfig(GRAPH_SPEC_KEY, JSON.stringify(spec));
+    } catch {
+      /* best-effort - defaults already serve */
+    }
+  })();
+}
+
 export async function getGraphSpec(): Promise<GraphSpec> {
   const cached = globalThis.__wd_graph_spec__;
   if (cached && Date.now() - cached.at < 30_000) return cached.value;
@@ -162,9 +224,9 @@ export async function getGraphSpec(): Promise<GraphSpec> {
   }
   if (!spec) {
     spec = await migrateFromLegacy();
-    // Persist the migrated copy so the Studio opens on the owner's real graph
-    // (best-effort - defaults still serve if the write fails).
-    setConfig(GRAPH_SPEC_KEY, JSON.stringify(spec)).catch(() => {});
+    // Defaults serve THIS call either way; whether they are also written back
+    // depends on whether the absence was real - see selfHealAllowed.
+    persistMigratedSpec(spec);
   }
   globalThis.__wd_graph_spec__ = { at: Date.now(), value: spec };
   return spec;

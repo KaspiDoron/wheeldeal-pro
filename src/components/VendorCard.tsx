@@ -172,19 +172,32 @@ function VendorCardInner({
   // decision, and a double tap would be a second decision on a choice that is
   // already gone (the server answers 409, but the button should not invite it).
   const [altBusy, setAltBusy] = useState(false);
+  const [altMsg, setAltMsg] = useState<string | null>(null);
   const decideAlternative = async (accept: boolean) => {
     if (altBusy) return;
     setAltBusy(true);
+    setAltMsg(null);
     try {
-      await fetch("/api/negotiate/alternative", {
+      const res = await fetch("/api/negotiate/alternative", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ vendorId: vendor.id, accept }),
       });
+      // HONEST WRITE (audit F016). The server answers 502 when the decision
+      // did not persist: the choice is still open on the thread, so clearing
+      // it here would show a decision as made that the agent never received.
+      // A 409 is a real "gone" (answered elsewhere, or expired) and the next
+      // poll carries the truth either way.
+      if (!res.ok && res.status !== 409) {
+        setAltMsg(t("Could not save your choice - try again."));
+        return;
+      }
       // The next poll carries the cleared choice and the thread's new state.
       // Nothing is sent to the shop from here - the ordinary turn does that,
       // inside the same rails as every other message.
       onStage(vendor.id, accept ? "negotiating" : "declined");
+    } catch {
+      setAltMsg(t("Could not save your choice - try again."));
     } finally {
       setAltBusy(false);
     }
@@ -583,6 +596,9 @@ function VendorCardInner({
                   {t("No thanks")}
                 </button>
               </div>
+              {altMsg && (
+                <div className="mt-1.5 text-[11px] font-bold text-brandred">{altMsg}</div>
+              )}
             </div>
           )}
           {/* THE SHOP ASKED TO TALK BY PHONE (K7). The model read it off the

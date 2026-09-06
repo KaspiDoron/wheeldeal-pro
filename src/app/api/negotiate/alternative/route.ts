@@ -25,12 +25,22 @@ export async function POST(req: Request) {
   const accept = body?.accept === true;
   if (!vendorId) return NextResponse.json({ error: "vendorId required" }, { status: 400 });
 
-  const { ok, offer } = await resolveAlternativeOffer({
+  const decided = await resolveAlternativeOffer({
     email: session.email,
     vendorId,
     accept,
   });
-  if (!ok) {
+  if (!decided.ok) {
+    if (decided.reason === "unavailable") {
+      // HONEST WRITE (audit F016). The decision did not persist - the choice
+      // is still open on the thread, and the card must keep showing it. The
+      // copy is the catalogue string the client already renders for a
+      // choice that could not be saved.
+      return NextResponse.json(
+        { error: "Could not save your choice - try again.", stale: false },
+        { status: 502 }
+      );
+    }
     // The commonest cause is a stale tab: the choice expired, or the traveller
     // already answered it on another device. Say so rather than pretending.
     return NextResponse.json(
@@ -38,6 +48,7 @@ export async function POST(req: Request) {
       { status: 409 }
     );
   }
+  const { offer } = decided;
 
   try {
     const { sbInsert } = await import("@/lib/runtime-config");

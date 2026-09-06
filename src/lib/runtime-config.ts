@@ -1121,6 +1121,53 @@ export async function getConfigExact(name: string): Promise<string | undefined> 
 }
 
 /**
+ * STRICT sibling of getConfigExact - for WRITERS that read-modify-write the
+ * row (audit F196).
+ *
+ * getConfigExact is total: no connection, a non-2xx, an 8s abort and a missing
+ * row all come back as process.env[name], and a row that will not decrypt
+ * comes back as its raw ciphertext. That is the right shape for a reader that
+ * degrades (the translate path shows the machine translation) and the wrong
+ * shape for a writer, which would rebuild the row from an empty read and
+ * overwrite what it could not see. This one keeps the three answers apart:
+ *
+ *   { value }                  - the row, or the env fallback for a genuine miss
+ *   { error: "unavailable" }   - the table did not answer; the truth is unknown
+ *   { error: "undecryptable" } - the row is there and no configured secret
+ *                                opens it (SESSION_SECRET rotated without
+ *                                SESSION_SECRET_PREVIOUS); it is recoverable
+ *                                and must not be written over
+ */
+export async function getConfigExactStrict(
+  name: string
+): Promise<{ value: string | undefined } | { error: "unavailable" | "undecryptable" }> {
+  const s = state();
+  if (s.mem[name]) return { value: s.mem[name] };
+  const conn = supabase();
+  if (!conn) return { value: process.env[name] };
+  try {
+    const res = await timedFetch(
+      `${conn.url}/rest/v1/app_config?select=value&key=eq.${encodeURIComponent(name)}&limit=1`,
+      {
+        headers: { apikey: conn.key, Authorization: `Bearer ${conn.key}` },
+        cache: "no-store",
+      }
+    );
+    if (!res.ok) return { error: "unavailable" };
+    const rows = (await res.json()) as { value: string }[];
+    const raw = rows[0]?.value;
+    if (raw === undefined) return { value: process.env[name] };
+    const plain = decrypt(raw);
+    if (plain !== null) return { value: plain };
+    // A legacy plaintext row is not ciphertext; only a "v1:" blob that refused
+    // every configured secret is a key this deployment has lost.
+    return raw.startsWith("v1:") ? { error: "undecryptable" } : { value: raw };
+  } catch {
+    return { error: "unavailable" };
+  }
+}
+
+/**
  * STRICT variant of getConfig for SAFETY GATES, where "not set" and "could not
  * be read" must lead to opposite decisions.
  *

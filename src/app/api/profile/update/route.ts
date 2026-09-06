@@ -43,12 +43,22 @@ export async function POST(req: Request) {
         : undefined;
     const lat = Number(body.stayLat ?? body.stay?.lat);
     const lng = Number(body.stayLng ?? body.stay?.lng);
-    await setUserStay(session.email, {
+    const saved = await setUserStay(session.email, {
       label: stayLabel,
       lat: Number.isFinite(lat) ? lat : undefined,
       lng: Number.isFinite(lng) ? lng : undefined,
       shareConsent: Boolean(body.shareStayConsent),
     });
+    // HONEST WRITE (audit F010). A revocation that did not land is a hotel
+    // still being shared with shops; reporting it as saved is the one answer
+    // this route must never give. Nothing else about the profile changed
+    // either way - the phone/name write above stands on its own.
+    if (!saved) {
+      return NextResponse.json(
+        { error: "Your stay could not be saved - nothing changed. Try again in a moment." },
+        { status: 502 }
+      );
+    }
   }
 
   const stay = await getUserStay(session.email);
