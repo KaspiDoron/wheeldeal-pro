@@ -23,7 +23,7 @@
 // start - the same filter that made the machine cache unreadable until that
 // reader existed.
 
-import { getConfigExact, setConfig } from "./runtime-config";
+import { getConfigExact, getConfigExactStrict, setConfig } from "./runtime-config";
 
 /** The config key holding one language's human corrections. */
 export function overrideKey(lang: string): string {
@@ -44,23 +44,66 @@ export const MAX_OVERRIDES_PER_LANG = 200;
 /** Longest a single correction may be. Matches the translate route's own cap. */
 export const MAX_OVERRIDE_CHARS = 300;
 
+/** The row's JSON as a clean dictionary; null when it is not a dictionary. */
+function parseDictionary(raw: string): Record<string, string> | null {
+  const parsed: unknown = JSON.parse(raw);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof v === "string" && v.trim()) out[k] = v;
+  }
+  return out;
+}
+
 /**
  * Read one language's corrections. Never throws; an unreadable row is an empty
  * one, which degrades to "the machine translation is used", not to an error.
+ *
+ * This is the TRANSLATE path's reader. It must stay total: a vault blip that
+ * failed closed here would show every user raw English. Writers must not use
+ * it - see readOverridesStrict.
  */
 export async function readOverrides(lang: string): Promise<Record<string, string>> {
   try {
     const raw = await getConfigExact(overrideKey(lang));
     if (!raw) return {};
-    const parsed: unknown = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    const out: Record<string, string> = {};
-    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
-      if (typeof v === "string" && v.trim()) out[k] = v;
-    }
-    return out;
+    return parseDictionary(raw) ?? {};
   } catch {
     return {};
+  }
+}
+
+export type OverridesReadError = "unavailable" | "undecryptable";
+
+/**
+ * THE WRITER'S READER (audit F196).
+ *
+ * setOverride is a read-modify-write, and a read-modify-write over a reader
+ * that answers {} for "could not read" rebuilds the row from nothing: one
+ * PostgREST 500, one 8s abort, or a rotated SESSION_SECRET (the raw "v1:..."
+ * ciphertext fails JSON.parse) turned the owner's 40 hand-written corrections
+ * into a one-entry dictionary - encrypted under the new secret, so
+ * SESSION_SECRET_PREVIOUS could no longer recover them - while the panel showed
+ * a successful save. This reader keeps "empty" and "unknown" apart so the
+ * writer can refuse. A row that decrypts but is not a dictionary is treated as
+ * empty, exactly as the total reader does: the recoverable case (ciphertext)
+ * is already separated out above it.
+ */
+export async function readOverridesStrict(
+  lang: string
+): Promise<{ rows: Record<string, string> } | { error: OverridesReadError }> {
+  let read: Awaited<ReturnType<typeof getConfigExactStrict>>;
+  try {
+    read = await getConfigExactStrict(overrideKey(lang));
+  } catch {
+    return { error: "unavailable" };
+  }
+  if ("error" in read) return { error: read.error };
+  if (!read.value) return { rows: {} };
+  try {
+    return { rows: parseDictionary(read.value) ?? {} };
+  } catch {
+    return { rows: {} };
   }
 }
 
@@ -81,7 +124,9 @@ export function applyOverrides(
 
 export type OverrideWriteResult =
   | { ok: true; count: number }
-  | { ok: false; error: string };
+  /** `kind: "store"` marks a refusal the caller should retry (the vault did
+   *  not answer, or the write did not land) rather than a bad request. */
+  | { ok: false; error: string; kind?: "input" | "store" };
 
 /**
  * Set or clear one correction.
@@ -106,13 +151,27 @@ export async function setOverride(
     return { ok: false, error: `A correction may not exceed ${MAX_OVERRIDE_CHARS} characters.` };
   }
 
-  const current = await readOverrides(lang);
+  // A READ THAT DID NOT HAPPEN IS NOT AN EMPTY ROW (audit F196). Refuse rather
+  // than rebuild the dictionary from nothing - a delete is a rewrite too.
+  const read = await readOverridesStrict(lang);
+  if ("error" in read) {
+    return {
+      ok: false,
+      kind: "store",
+      error:
+        read.error === "undecryptable"
+          ? "The stored corrections could not be decrypted - nothing changed. Set SESSION_SECRET_PREVIOUS to the previous secret, then try again."
+          : "The current corrections could not be read - nothing changed. Try again in a moment.",
+    };
+  }
+  const current = read.rows;
   if (!value) {
     delete current[key];
   } else {
     if (!current[key] && Object.keys(current).length >= MAX_OVERRIDES_PER_LANG) {
       return {
         ok: false,
+        kind: "input",
         error: `This language already holds ${MAX_OVERRIDES_PER_LANG} corrections. Remove one first - if this many strings are wrong, the prompt is the problem, not the strings.`,
       };
     }
@@ -120,6 +179,8 @@ export async function setOverride(
   }
 
   const res = await setConfig(overrideKey(lang), JSON.stringify(current));
-  if (!res.ok) return { ok: false, error: res.error ?? "Could not save the correction." };
+  if (!res.ok) {
+    return { ok: false, kind: "store", error: res.error ?? "Could not save the correction." };
+  }
   return { ok: true, count: Object.keys(current).length };
 }

@@ -15,6 +15,14 @@ vi.mock("./runtime-config", () => ({
     if (readThrows) throw new Error("supabase down");
     return store[name];
   }),
+  // The writer's strict reader (audit F196): a failed read is a refusal, not
+  // an empty dictionary. The executed cases live in
+  // i18n-overrides-write-refusal.test.ts; this mock only keeps the suite
+  // honest about which reader setOverride goes through.
+  getConfigExactStrict: vi.fn(async (name: string) => {
+    if (readThrows) return { error: "unavailable" as const };
+    return { value: store[name] };
+  }),
   setConfig: vi.fn(async (name: string, value: string) => {
     if (!writeOk) return { ok: false, persistent: false, error: "no vault" };
     store[name] = value;

@@ -10,7 +10,15 @@
 import "server-only";
 import webpush from "web-push";
 import { createHash } from "crypto";
-import { getConfig, setConfig, sbInsert, sbSelect, sbDelete } from "./runtime-config";
+import {
+  getConfig,
+  setConfig,
+  sbInsert,
+  sbSelect,
+  sbSelectStrict,
+  sbDelete,
+  vaultReadState,
+} from "./runtime-config";
 import { generateVapidPair, vapidPairMatches } from "./push-keys";
 import { resolveSiteHost } from "./site";
 
@@ -92,6 +100,27 @@ export async function vapidPublicKey(): Promise<string | null> {
   ]);
   if (pub && priv) return pub;
   if (pub || priv) return null; // half-configured: let the admin finish, never overwrite
+  // BOTH READ AS ABSENT - BUT IS THE ABSENCE REAL? (audit F195)
+  //
+  // getConfig answers "absent" for a vault brownout (the empty negative cache)
+  // and for rows that exist but will not decrypt (SESSION_SECRET rotated
+  // without SESSION_SECRET_PREVIOUS - the bulk read still says "ok"). Both
+  // used to fall through to provisioning, and setConfig is an UPSERT, so a
+  // brand-new pair was written over the still-present rows: every
+  // push_subscriptions endpoint in the fleet had been minted against the old
+  // applicationServerKey and died at the push service, while pushDiagnostics
+  // said "ok" because the new pair was internally consistent. Provision only
+  // when the vault answered AND the two rows are genuinely not there. The
+  // probe is per-key on purpose: the fleet-wide decrypt counter would let one
+  // unrelated stale row block first-time provisioning forever. Returning null
+  // is the documented "push is off" answer, which the route already renders
+  // as unconfigured.
+  if (vaultReadState() !== "ok") return null;
+  const probe = await sbSelectStrict<{ key: string }>(
+    "app_config",
+    "select=key&key=in.(VAPID_PUBLIC_KEY,VAPID_PRIVATE_KEY)&limit=2"
+  );
+  if ("error" in probe || probe.rows.length > 0) return null;
   return provisionVapidKeys();
 }
 

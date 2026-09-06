@@ -72,27 +72,44 @@ export async function persistAlternativeOffer(args: {
     // card would change under their thumb.
     if (row.fields?.alternativeOffer) return false;
     const { sbUpdate } = await import("../runtime-config");
-    await sbUpdate("negotiation_threads", byKey(row.thread_key), {
+    // THE WRITE IS THE ANSWER (audit F016). sbUpdate never throws - it returns
+    // false on no connection, an 8s abort and every non-2xx - so "parked" is
+    // exactly its boolean, not the intention to park.
+    return sbUpdate("negotiation_threads", byKey(row.thread_key), {
       fields: { ...(row.fields ?? {}), alternativeOffer: args.offer },
     });
-    return true;
   } catch {
     return false;
   }
 }
+
+/**
+ * The outcome of a decision. `stale` is a choice that is no longer open (the
+ * traveller answered elsewhere, it expired, or there is no such thread);
+ * `unavailable` is a thread that could not be read or a decision that did not
+ * PERSIST - the choice is still open and the route must say so, not clear it.
+ */
+export type ResolveOutcome =
+  | { ok: true; offer: AlternativeOffer }
+  | { ok: false; reason: "stale" | "unavailable"; offer: null };
 
 /** The traveller decided. Clear the pause either way. */
 export async function resolveAlternativeOffer(args: {
   email: string;
   vendorId: string;
   accept: boolean;
-}): Promise<{ ok: boolean; offer: AlternativeOffer | null }> {
+}): Promise<ResolveOutcome> {
   try {
     const found = await loadThread(args.email, args.vendorId);
-    if ("error" in found) return { ok: false, offer: null };
+    if ("error" in found) {
+      // "missing" is a database with no threads table at all - no choice CAN
+      // be open. Only a read that did not answer is unknown.
+      const reason = found.error === "unavailable" ? "unavailable" : "stale";
+      return { ok: false, reason, offer: null };
+    }
     const row = found.row;
     const offer = row?.fields?.alternativeOffer ?? null;
-    if (!row || !offer) return { ok: false, offer: null };
+    if (!row || !offer) return { ok: false, reason: "stale", offer: null };
     const { sbUpdate } = await import("../runtime-config");
     const next: Record<string, unknown> = { ...(row.fields ?? {}), alternativeOffer: null };
     if (args.accept) {
@@ -112,9 +129,16 @@ export async function resolveAlternativeOffer(args: {
       // vehicle nobody wants.
       next.declined = true;
     }
-    await sbUpdate("negotiation_threads", byKey(row.thread_key), { fields: next });
+    // THE WRITE IS THE ANSWER (audit F016). A Decline whose PATCH failed used
+    // to return ok:true: the card cleared the question while the offer stayed
+    // parked and `declined` was never set, so the next turn kept negotiating
+    // the vehicle the traveller had just refused and the next reload re-asked.
+    const persisted = await sbUpdate("negotiation_threads", byKey(row.thread_key), {
+      fields: next,
+    });
+    if (!persisted) return { ok: false, reason: "unavailable", offer: null };
     return { ok: true, offer };
   } catch {
-    return { ok: false, offer: null };
+    return { ok: false, reason: "unavailable", offer: null };
   }
 }

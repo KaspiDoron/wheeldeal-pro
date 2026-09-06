@@ -163,9 +163,37 @@ function fromRow(r: UserRow): UserRecord {
   };
 }
 
-/** Write a record to Supabase. Returns false when the durable write failed. */
-async function mirror(rec: UserRecord): Promise<boolean> {
-  remember(rec);
+/** The three upsert payloads, richest first - see mirrorRung. */
+type Rung = "stay" | "consents" | "base";
+
+/**
+ * Write a record to Supabase and report WHICH payload landed (audit F010).
+ *
+ * The ladder exists so signup never depends on a pending column migration:
+ * sbInsert fails on an unknown column, so the richest payload is tried first
+ * and narrower ones follow. But PostgREST's merge-duplicates only touches the
+ * columns PRESENT in the body - a step down is a write that leaves the dropped
+ * columns at their OLD values. A caller changing exactly those columns (the
+ * stay + the share-with-shops consent) needs to know which rung landed, not
+ * merely that one did: the old boolean reported a revoked consent as saved
+ * while the row still said "share the hotel".
+ *
+ * `retryTop`: a transient failure (an 8s abort, a 429, a 5xx) on the top rung
+ * must not read as "column missing" and quietly narrow the write; the caller
+ * whose fields live only in the top payload asks for one retry of the SAME
+ * payload before the ladder steps down.
+ *
+ * THE CACHE IS UPDATED AFTER THE WRITE, FROM ITS OUTCOME. remember(rec) used to
+ * run first - and getUser hands callers the cached object itself, which they
+ * mutate in place - so the route's read-back served the unpersisted value.
+ * Demo mode (no Supabase) keeps the cache as the store; a full write refreshes
+ * it; anything narrower, or nothing, evicts it so the next read is the
+ * database's answer.
+ */
+async function mirrorRung(
+  rec: UserRecord,
+  opts: { retryTop?: boolean } = {}
+): Promise<Rung | null> {
   const base = {
     email: rec.email,
     phone: rec.phone ?? null,
@@ -198,9 +226,24 @@ async function mirror(rec: UserRecord): Promise<boolean> {
   // runs the whole upsert (and thus signup) would break. Three-tier fallback so
   // registration never depends on a pending migration, and adding the stay
   // columns never regresses the already-migrated consent columns.
-  if (await sbInsert("app_users", [withStay], "email")) return true;
-  if (await sbInsert("app_users", [withConsents], "email")) return true;
-  return sbInsert("app_users", [base], "email");
+  let landed: Rung | null = null;
+  if (await sbInsert("app_users", [withStay], "email")) landed = "stay";
+  else if (opts.retryTop && (await sbInsert("app_users", [withStay], "email"))) landed = "stay";
+  else if (await sbInsert("app_users", [withConsents], "email")) landed = "consents";
+  else if (await sbInsert("app_users", [base], "email")) landed = "base";
+
+  if (!supabaseConfigured() || landed === "stay") {
+    remember(rec);
+  } else {
+    cache().delete(rec.email);
+    cache().delete(rec.email.trim().toLowerCase());
+  }
+  return landed;
+}
+
+/** Write a record to Supabase. Returns false when the durable write failed. */
+async function mirror(rec: UserRecord): Promise<boolean> {
+  return (await mirrorRung(rec)) !== null;
 }
 
 /** The traveller's consented stay for the agent - null when none/unconsented. */
@@ -231,8 +274,11 @@ export async function setUserStay(
   rec.stayLng = typeof stay.lng === "number" ? stay.lng : undefined;
   // Consent is a server-recorded timestamp; clearing it revokes sharing.
   rec.stayShareConsentAt = stay.shareConsent && rec.stayLabel ? Date.now() : undefined;
-  const persisted = await mirror(rec);
-  return supabaseConfigured() ? persisted : true;
+  // ONLY THE TOP RUNG CARRIES THE STAY COLUMNS (audit F010). A narrower payload
+  // landing is a write that changed nothing about the stay - the consent the
+  // traveller just revoked is still granted in the row - so it is not "saved".
+  const rung = await mirrorRung(rec, { retryTop: true });
+  return supabaseConfigured() ? rung === "stay" : true;
 }
 
 // ---- CRUD ---------------------------------------------------------------------

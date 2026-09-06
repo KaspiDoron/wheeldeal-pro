@@ -254,6 +254,9 @@ describe("an unreadable thread is not an absent one", () => {
         vendorId: "v1",
         accept: true,
       })
-    ).toEqual({ ok: false, offer: null });
+      // Audit F016: an unreadable thread is UNAVAILABLE - the route answers
+      // 502 (still open, try again), never the 409 "no longer open" a stale
+      // choice gets.
+    ).toEqual({ ok: false, reason: "unavailable", offer: null });
   });
 });
