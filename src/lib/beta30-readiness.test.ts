@@ -218,6 +218,16 @@ describe("clustering defences hold on BOTH outreach paths", () => {
     expect(route).toMatch(/direction=eq\.outbound/);
   });
 
+  it("the MASS path seeds its in-batch ledger from the same fleet-wide read (audit F212)", () => {
+    // Executed in src/app/api/outreach/mass-opener-seed.test.ts; the shape
+    // is pinned here so this block finally covers BOTH paths, as it says.
+    const route = readCode("src/app/api/outreach/mass/route.ts");
+    expect(route).not.toMatch(/const compiledRecent: string\[\] = \[\];/);
+    expect(route).toMatch(/const compiledRecent: string\[\] = rfqForCompile/);
+    expect(route).toMatch(/direction=eq\.outbound&received_at=gte\./);
+    expect(route).toMatch(/ensureGloballyUnique\(english, compiledRecent\)/);
+  });
+
   it("a missing wa_send_claims table ALARMS instead of degrading in silence", () => {
     const pacing = readCode("src/lib/wa/pacing.ts");
     expect(pacing).toMatch(/void noteClaimsTableMissing\(\)/);

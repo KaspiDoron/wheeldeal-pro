@@ -58,17 +58,28 @@ describe("the three places the lease has to be honored", () => {
     expect(loop).toMatch(/settleReplyClaim\(opts\.waMessageId, opts\.senderEmail\)/);
   });
 
-  it("a new delivery can RETAKE a dead turn's claim, atomically", () => {
+  it("a new delivery can RETAKE a dead turn's claim - and only the dead lease it read (audit F020)", () => {
+    // The executed instrument for this is src/lib/wa/dead-turn-retake.test.ts;
+    // this pins the shape so the unconditional delete cannot come back.
     const loop = readCode("src/lib/agent-loop.ts");
     const block = loop.slice(loop.indexOf("if (existing.length > 0)"));
-    expect(block.slice(0, 1400)).toMatch(/if \(!claimIsDeadTurn\(existing\[0\]\)\) return;/);
-    // Delete THEN re-insert: the insert is the atomic winner election, so two
-    // rescuers cannot both take the turn.
-    const del = block.indexOf("sbDelete");
     const ins = block.indexOf("sbInsertReturning");
+    const head = block.slice(0, ins);
+    expect(head).toMatch(/if \(!claimIsDeadTurn\(existing\[0\]\)\) return;/);
+    // The delete is CONDITIONAL and RETURNING: it can only match the lease
+    // this caller read - unsettled and older than CLAIM_LEASE_MS - so a second
+    // retaker whose read pre-dates the first retake removes nothing and stands
+    // down instead of deleting the winner's fresh claim. It used to be a bare
+    // delete by key under a comment calling that "atomic"; it was not.
+    const del = head.indexOf("sbDeleteReturning<{ wa_message_id: string }>(");
     expect(del).toBeGreaterThan(-1);
-    expect(del, "delete precedes the re-claim").toBeLessThan(ins);
-    expect(block.slice(0, 1400)).toMatch(/if \(retaken\.length === 0\) return;/);
+    expect(del, "the conditional delete precedes the re-claim").toBeLessThan(ins);
+    expect(head).toMatch(/settled_at=is\.null/);
+    expect(head).toMatch(/created_at=lt\.\$\{pgTimestamp\(Date\.now\(\) - CLAIM_LEASE_MS\)\}/);
+    expect(head).toMatch(/if \(retired\.length === 0\) return;/);
+    // ...and the unguarded shape is gone: no delete of wa_processed by key alone.
+    expect(head).not.toMatch(/sbDelete\(\s*"wa_processed"/);
+    expect(block.slice(ins, ins + 400)).toMatch(/if \(retaken\.length === 0\) return;/);
   });
 
   it("the recovery sweep stops counting a dead turn as answered", () => {

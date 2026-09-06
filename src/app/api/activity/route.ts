@@ -183,14 +183,24 @@ export async function GET(req: Request) {
     // Rows belonging to signed-out users are not orphaned: the heartbeat
     // (Cloud Scheduler -> /api/wa/ping) and the tick chain drain globally,
     // which is a worker's job rather than somebody else's poll.
+    //
+    // AND EACH DRAIN STOPS ITSELF (audit F250). A race does not cancel: the
+    // loser ran on detached to drainOutbox's 45s default, was frozen at the
+    // response flush holding a claimOutboxRow lease, and the row was invisible
+    // for the 3-minute lease. The budget is the drain's own 5s floor (it
+    // silently raises anything lower), so the loop stops taking rows at most
+    // 2s past the race instead of 42s.
+    const DRAIN_STOP_MS = 5_000;
     await bounded(
       drainOutbox((k, to, text, lane) => sendFromUser(k, to, text, true, { lane }), {
         senderKey: session.email,
+        budgetMs: DRAIN_STOP_MS,
       }).catch((e) => console.error("[drain:outbox]", e instanceof Error ? e.message : e))
     );
     await bounded(
       drainGraphWakeups((k, to, text) => sendFromUser(k, to, text, true, { lane: "reply" }), {
         userEmail: session.email,
+        budgetMs: DRAIN_STOP_MS,
       }).catch((e) => console.error("[drain:wakeups]", e instanceof Error ? e.message : e))
     );
     }

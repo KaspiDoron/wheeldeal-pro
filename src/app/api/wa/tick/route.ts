@@ -22,7 +22,22 @@ const MAX_HOPS = 40; // ~30-40 min of autonomous progression per kick
 // Stay well inside Cloud Run's --timeout 90 (the REAL ceiling; `export const
 // maxDuration` is a Vercel-only hint that does nothing on standalone Next -
 // deploy-gcp.yml says so and this comment used to claim the inert guard).
+//
+// A WALL OVER THE WHOLE INVOCATION (audit F064). This number used to gate only
+// whether a FURTHER drain was started: the clock began after the hop-retry
+// sleep (up to 30.25s that were never counted), each drain then took a fixed
+// 40s of its own however little remained, and the wakeup drain took no budget
+// at all - so one hop could run 29s + 40s + one row's send past the 90s kill.
+// A kill mid-drain leaves every claimed row invisible for the 3-minute claim
+// lease and skips the hop kick, ending the chain silently. Now the clock
+// starts at entry, every drain is clipped to what is left, and nothing starts
+// with less than a drain's floor remaining. The wall bounds ADMISSION: one
+// admitted row's in-flight send may overshoot it (documented worst case
+// ~29s), and 45s + 29s still lands inside the 90s kill with the response.
 const IN_CALL_BUDGET_MS = 45_000;
+// drainOutbox raises any budget below this to it silently, so a drain that
+// starts with less than the floor left WOULD cross the wall - do not start it.
+const DRAIN_FLOOR_MS = 5_000;
 const CHAIN_HORIZON_MS = 10 * 60_000; // chain only for work due soon
 
 export async function GET(req: Request) {
@@ -33,6 +48,10 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
   const hop = Math.max(0, Number(url.searchParams.get("hop")) || 0);
+  // The clock starts HERE, above the claim and its hop-retry sleep - both are
+  // part of this invocation's wall time whether or not they drain anything.
+  const started = Date.now();
+  const remainingMs = () => IN_CALL_BUDGET_MS - (Date.now() - started);
 
   // ONE runner at a time: whoever wins this 30s slot drives; everyone else
   // exits immediately (kicks are cheap and frequent by design).
@@ -76,23 +95,29 @@ export async function GET(req: Request) {
     }
   }
 
-  const started = Date.now();
   let drained = 0;
   const drainOnce = async () => {
     try {
-      const { drainOutbox } = await import("@/lib/wa-guard");
       // fast=true: skip the long typing simulation - these rows already served
       // their stagger, and the guard (not presence cosmetics) enforces gaps.
-      // Keeps a 5-row drain safely inside the 60s invocation ceiling.
-      // 40s: the tick self-chains, so leaving rows for the next hop is
-      // cheaper than being killed mid-send at Cloud Run's 90s ceiling and
-      // stranding leased rows for the 3-minute claim lease.
+      // Each drain gets WHAT IS LEFT of the wall, never a fixed figure: the
+      // tick self-chains, so leaving rows for the next hop is cheaper than
+      // being killed mid-send at Cloud Run's 90s ceiling and stranding leased
+      // rows for the 3-minute claim lease. Below the floor, do not start.
+      let remaining = remainingMs();
+      if (remaining < DRAIN_FLOOR_MS) return;
+      const { drainOutbox } = await import("@/lib/wa-guard");
       drained += await drainOutbox(
         (k, to, text, lane) => sendFromUser(k, to, text, true, { lane }),
-        { budgetMs: 40_000 }
+        { budgetMs: remaining }
       );
+      remaining = remainingMs();
+      if (remaining < DRAIN_FLOOR_MS) return;
       const { drainGraphWakeups } = await import("@/lib/graph/engine");
-      drained += await drainGraphWakeups((k, to, text) => sendFromUser(k, to, text, true, { lane: "reply" }));
+      drained += await drainGraphWakeups(
+        (k, to, text) => sendFromUser(k, to, text, true, { lane: "reply" }),
+        { budgetMs: remaining }
+      );
     } catch (e) {
       console.error("[wa:tick]", e instanceof Error ? e.message : e);
     }
@@ -133,9 +158,13 @@ export async function GET(req: Request) {
   for (;;) {
     const due = await nextDueMs();
     if (due === null) break; // nothing scheduled ahead - chain ends
-    const remaining = IN_CALL_BUDGET_MS - (Date.now() - started);
-    if (due >= remaining) break; // too far out for this invocation - hand off
-    await new Promise((r) => setTimeout(r, Math.max(0, due) + 500));
+    const remaining = remainingMs();
+    // The wait AND a floor-sized drain after it must both fit inside the
+    // wall; otherwise hand off. `due >= remaining` alone let a row due in
+    // 500ms with 3s left start a fresh 40s drain at t=43.5s.
+    const waitMs = Math.max(0, due) + 500;
+    if (waitMs + DRAIN_FLOOR_MS > remaining) break;
+    await new Promise((r) => setTimeout(r, waitMs));
     await drainOnce();
   }
 

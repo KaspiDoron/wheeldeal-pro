@@ -162,6 +162,32 @@ export const HARD_MIN_GAP_SEC = 8;
 export const RECIPIENT_LOCK_SEC = HARD_MIN_GAP_SEC;
 
 /**
+ * THE ONE BUCKET SIZE EVERY PACING SLOT IS KEYED ON (audit F243).
+ *
+ * The gap and fleet slots used to embed the policy-derived gap VALUE in their
+ * claim key (`rfleet:6:<bucket>`, `gap:12:<bucket>`) and bucket on that same
+ * value. getPolicies caches per instance for 60s, and a fresh instance whose
+ * first policy read blips serves the cautious preset - so a warm instance at
+ * fleet gap 6 and a cold one at 15 built DIFFERENT primary keys for the same
+ * instant, both won, and two messages left the traveller's personal number
+ * 50ms apart. For the reply lane the fleet slot is the ONLY cross-instance
+ * velocity cap there is.
+ *
+ * So the KEY is fleet-invariant: every slot buckets on this fixed quantum and
+ * carries no gap in its name. The policy-derived gap stays where it belongs -
+ * in the straddle comparison, which reads the previous ceil(gap / quantum)
+ * quantum slots and refuses anything inside `gap`. Two instances that disagree
+ * about the gap now collide on the same key and the tighter one still paces
+ * exactly as configured.
+ *
+ * 5 is the floor of the reply fleet formula max(5, min_gap / 2), so no
+ * anti-ban number moves: the 8s recipient floor, the fleet gap and the 2-intro
+ * cold cap are untouched, and a straddle read over N quantum slots is the same
+ * single PostgREST round trip the previous-bucket read already paid.
+ */
+export const FLEET_SLOT_QUANTUM_SEC = 5;
+
+/**
  * The mutex key. Keyed on the RECIPIENT only - no lane, no gap size - and on
  * the SHOP rather than the spelling (audit F036): `outboxKey` is the national
  * tail both spellings of one line agree on (waDigits when the number is too
@@ -301,11 +327,13 @@ export type ClaimOutcome =
  *   invocations carrying the same message cannot both send. Claimed BEFORE
  *   the network send (the old dedup row was written after, so concurrent
  *   duplicates both passed).
- * - "gap" slot (auto sends only): one send per min-gap bucket per sender -
+ * - "gap" slot (auto sends only): one send per quantum bucket per sender
+ *   (FLEET_SLOT_QUANTUM_SEC - the key never carries the gap, audit F243) -
  *   serializes the 5+ concurrent drain callers. Straddle-proof: winning the
- *   current bucket also requires the PREVIOUS bucket to be free or older
- *   than the gap, so two sends can never land min-gap-epsilon apart across
- *   a bucket boundary.
+ *   current bucket also requires every PREVIOUS bucket inside the gap to be
+ *   free or older than the gap, so two sends can never land min-gap-epsilon
+ *   apart across a bucket boundary, and two instances that disagree about
+ *   the gap still contend for one key.
  *   - perRecipient (REPLIES to already-engaged shops): the gap slot is keyed
  *     by (sender, RECIPIENT, bucket) instead of (sender, bucket). Distinct
  *     engaged shops no longer serialize through ONE per-sender window - 40
@@ -362,8 +390,8 @@ export async function claimSendSlots(opts: {
   // Ko Tao, 12:21. Two of our messages landed on one shop inside the same
   // minute: a cold introduction and an agent reply. Neither pacing lane was
   // broken - they simply do not intersect. A cold intro claims
-  // `gap:12:<bucket>` with NO recipient in the key; a reply claims
-  // `gap:5:<digits>:<bucket>`. Different strings, so both win, and the shop
+  // `gap:<bucket>` with NO recipient in the key; a reply claims
+  // `gap:<digits>:<bucket>`. Different strings, so both win, and the shop
   // gets two messages from a stranger at once.
   //
   // Every OTHER slot here is a pacing decision scoped to a lane. This one is
@@ -446,11 +474,15 @@ export async function claimSendSlots(opts: {
   // is not now, subject to it.
   if (!opts.auto) return { ok: true };
 
-  const bucket = gapBucket(now, opts.gapSeconds);
+  // KEYED ON THE QUANTUM, NOT ON THE GAP (audit F243 - see
+  // FLEET_SLOT_QUANTUM_SEC). The bucket index is in quantum units from here
+  // on, and so is every edge computed from it.
+  const bucket = gapBucket(now, FLEET_SLOT_QUANTUM_SEC);
+  const quantumMs = FLEET_SLOT_QUANTUM_SEC * 1000;
   // Reply lane -> the gap slot carries the recipient, so two DIFFERENT shops
   // never contend for the same bucket (only the same shop is serialized).
   const laneKey = opts.perRecipient ? `:${digitsOnly(opts.toDigits)}` : "";
-  const slotFor = (b: number) => `gap:${opts.gapSeconds}${laneKey}:${b}`;
+  const slotFor = (b: number) => `gap${laneKey}:${b}`;
   const releaseOwn = async (slots: string[]) => {
     for (const s of slots) {
       await sbDelete(
@@ -475,6 +507,22 @@ export async function claimSendSlots(opts: {
     );
     return "rows" in row ? Date.parse(row.rows[0]?.created_at ?? "") : NaN;
   };
+  // THE STRADDLE READ, GAP-WIDE. When the NEWEST of the previous
+  // ceil(gap / quantum) quantum slots was claimed, or NaN if none was (or the
+  // read failed). Any send inside `gap` of now sits in one of those slots
+  // (floor(a - b) >= floor(a) - ceil(b)), so this is the whole answer to "did
+  // this lane send less than a gap ago?" - in ONE round trip, whatever the gap.
+  const newestPrevAt = async (slotOf: (b: number) => string, gapSec: number, b: number) => {
+    const span = Math.max(1, Math.ceil(gapSec / FLEET_SLOT_QUANTUM_SEC));
+    const keys = Array.from({ length: span }, (_, i) => encodeURIComponent(slotOf(b - 1 - i)));
+    const row = await sbSelectStrict<{ created_at: string }>(
+      "wa_send_claims",
+      `select=created_at&sender_key=eq.${encodeURIComponent(
+        opts.senderKey
+      )}&slot_key=in.(${keys.join(",")})&order=created_at.desc&limit=1`
+    );
+    return "rows" in row ? Date.parse(row.rows[0]?.created_at ?? "") : NaN;
+  };
   if (cur === "lost") {
     await releaseOwn([msgSlot, ownRecipientSlot]); // let the queued retry re-claim it
     // THE INSTANT THIS LANE IS REALLY FREE, not the instant the bucket rolls.
@@ -486,8 +534,12 @@ export async function claimSendSlots(opts: {
     // that was still refused, burned its whole allowance, and re-parked the row
     // for 20-40s. Wave 8's centrepiece was inert: executed on a 7-shop burst,
     // 1 reply reached the wire and 6 parked.
+    //
+    // The edge is a QUANTUM edge now, because the bucket index is a quantum
+    // index - an edge computed at the gap from a quantum index is off by
+    // gap / quantum, which re-opens the wait-to-a-refused-instant defect.
     const winner = await claimedAt(slotFor(bucket));
-    const edge = (bucket + 1) * opts.gapSeconds * 1000;
+    const edge = (bucket + 1) * quantumMs;
     return {
       ok: false,
       kind: "pacing",
@@ -501,8 +553,10 @@ export async function claimSendSlots(opts: {
     return { ok: false, kind: "error" };
   }
 
-  // Boundary straddle check: if the PREVIOUS bucket was claimed less than a
-  // full gap ago, this send would land too close to the previous one.
+  // Boundary straddle check: if a PREVIOUS slot inside the gap was claimed
+  // less than a full gap ago, this send would land too close to the previous
+  // one. This is where the policy-derived gap is enforced - the key no longer
+  // carries it, the comparison does.
   // A READ, NOT A WRITE. This probed the previous bucket with sbInsertClaim,
   // so on a WIN it CREATED a row stamped now - and no refusal path released it.
   // The row then answered a later attempt's "when did the previous bucket
@@ -512,7 +566,7 @@ export async function claimSendSlots(opts: {
   // the first ATTEMPT rather than the last SEND, on all three lanes.
   //
   // A select answers the same question and cannot corrupt the state it reads.
-  const prevAt = await claimedAt(slotFor(bucket - 1));
+  const prevAt = await newestPrevAt(slotFor, opts.gapSeconds, bucket);
   if (Number.isFinite(prevAt) && now - prevAt < opts.gapSeconds * 1000) {
     await releaseOwn([msgSlot, ownRecipientSlot, slotFor(bucket)]);
     return { ok: false, kind: "pacing", retryAtMs: prevAt + opts.gapSeconds * 1000 };
@@ -526,8 +580,11 @@ export async function claimSendSlots(opts: {
   // distinct shops overlap. Lost -> pace this one out; distinct shops just take
   // turns through the fleet gap instead of all firing at once.
   if (opts.perRecipient && opts.fleetGapSeconds && opts.fleetGapSeconds > 0) {
-    const fleetBucket = gapBucket(now, opts.fleetGapSeconds);
-    const fleetSlotFor = (b: number) => `rfleet:${opts.fleetGapSeconds}:${b}`;
+    // The SAME quantum bucket as the gap lane, and NO gap in the key (audit
+    // F243): two instances whose cached policies disagree about the fleet gap
+    // must contend for one primary key, or the ceiling is not a ceiling.
+    const fleetBucket = bucket;
+    const fleetSlotFor = (b: number) => `rfleet:${b}`;
     const fleet = await sbInsertClaim("wa_send_claims", {
       sender_key: opts.senderKey,
       slot_key: fleetSlotFor(fleetBucket),
@@ -536,9 +593,10 @@ export async function claimSendSlots(opts: {
       await releaseOwn([msgSlot, ownRecipientSlot, slotFor(bucket)]);
       // The true free-at, for the same reason as the gap lane above: the bucket
       // edge is always earlier than `winner + gap`, so waiting to it guaranteed
-      // a second refusal with the whole wait allowance already spent.
+      // a second refusal with the whole wait allowance already spent. The edge
+      // is a quantum edge - the index is a quantum index.
       const winner = await claimedAt(fleetSlotFor(fleetBucket));
-      const edge = (fleetBucket + 1) * opts.fleetGapSeconds * 1000;
+      const edge = (fleetBucket + 1) * quantumMs;
       return {
         ok: false,
         kind: "pacing",
@@ -558,8 +616,9 @@ export async function claimSendSlots(opts: {
     // bulk-sender signature the fleet ceiling exists to prevent. Speeding the
     // engaged lane up makes that boundary far more reachable, so it has to
     // close here rather than being left to luck.
-    // A read, never a probe-write - see the gap lane's note.
-    const prevFleetAt = await claimedAt(fleetSlotFor(fleetBucket - 1));
+    // A read, never a probe-write - see the gap lane's note. Gap-wide: the
+    // fleet gap this instance is configured with decides, whatever the key.
+    const prevFleetAt = await newestPrevAt(fleetSlotFor, opts.fleetGapSeconds, fleetBucket);
     if (Number.isFinite(prevFleetAt) && now - prevFleetAt < opts.fleetGapSeconds * 1000) {
       await releaseOwn([msgSlot, ownRecipientSlot, slotFor(bucket), fleetSlotFor(fleetBucket)]);
       return { ok: false, kind: "pacing", retryAtMs: prevFleetAt + opts.fleetGapSeconds * 1000 };

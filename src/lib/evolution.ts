@@ -1739,6 +1739,11 @@ export async function connectInstance(
   error?: string;
 }> {
   const instance = instanceNameFor(email);
+  // WHAT THE LAST DISCONNECT STILL OWES (audit M50), before anything else: a
+  // purge of parked work that could not land then is run now, while the new
+  // link cannot yet send. Best-effort - a store that refuses again keeps the
+  // marker for the next tap.
+  await drainPurgePending(email).catch(() => false);
   // THE ONE CALLER THAT KNOWS THE NUMBER. Placement happens here and nowhere
   // else in practice (every later call finds `host_url` stored), so this is
   // the only site where passing the phone changes which box a user lands on -
@@ -2696,6 +2701,71 @@ export interface DisconnectResult {
   hostsTried: number;
   /** What the app's own wa_sessions record says (null = the record could not be read). */
   hadLink: boolean | null;
+  /**
+   * The user's PARKED work (wa_outbox rows, graph_wakeups) is gone. False
+   * means a purge could not land even after a retry: the rows are still there
+   * and a purge-pending marker is set, which the re-link path drains before
+   * the new link can send (see drainPurgePending).
+   */
+  purged: boolean;
+}
+
+/** The user_cooldowns kind a disconnect leaves behind when its purge failed. */
+const PURGE_PENDING_KIND = "wa-purge-pending";
+
+/**
+ * Delete everything parked under this sender that could still message a shop.
+ * READ AND RETRIED (audit M50): sbDelete never rejects - it returns false on
+ * any non-2xx or timeout - so the old `.catch(() => {})` was decoration and
+ * the only signal was a discarded boolean. Per table, one retry.
+ */
+async function purgeParkedWork(email: string): Promise<{ outbox: boolean; wakeups: boolean }> {
+  const enc = encodeURIComponent(email.toLowerCase());
+  const once = async (table: string, filter: string) =>
+    (await sbDelete(table, filter)) || (await sbDelete(table, filter));
+  const outbox = await once("wa_outbox", `sender_key=eq.${enc}`);
+  const wakeups = await once("graph_wakeups", `user_email=eq.${enc}`);
+  return { outbox, wakeups };
+}
+
+/**
+ * Leave a durable "this sender's parked work still owes a purge" marker.
+ * user_cooldowns is keyed (email, kind), already registered for erasure, and
+ * read only by kind - so this row is invisible to every cooldown gate.
+ */
+async function markPurgePending(email: string, detail: string): Promise<boolean> {
+  return sbInsert(
+    "user_cooldowns",
+    [
+      {
+        email: email.toLowerCase(),
+        kind: PURGE_PENDING_KIND,
+        until: new Date(Date.now() + 365 * 24 * 3600_000).toISOString(),
+        reason: detail,
+      },
+    ],
+    "email,kind"
+  ).catch(() => false);
+}
+
+/**
+ * The re-link half of the purge (audit M50): before a new link can open, run
+ * the purge the last disconnect could not land. One cheap read on the
+ * pairing path (a traveller's tap), nothing on the reply path or the drain.
+ * Returns true when nothing is owed any more; a purge that fails again keeps
+ * the marker for the next attempt.
+ */
+export async function drainPurgePending(email: string): Promise<boolean> {
+  const enc = encodeURIComponent(email.toLowerCase());
+  const owed = await sbSelect<{ kind: string }>(
+    "user_cooldowns",
+    `select=kind&email=eq.${enc}&kind=eq.${PURGE_PENDING_KIND}&limit=1`
+  ).catch(() => [] as { kind: string }[]);
+  if (owed.length === 0) return true;
+  const { outbox, wakeups } = await purgeParkedWork(email);
+  if (!(outbox && wakeups)) return false;
+  await sbDelete("user_cooldowns", `email=eq.${enc}&kind=eq.${PURGE_PENDING_KIND}`).catch(() => false);
+  return true;
 }
 
 /**
@@ -2744,9 +2814,29 @@ export async function disconnectInstance(email: string): Promise<DisconnectResul
   // the wa_sessions row we just deleted (silently undoing the disconnect), and
   // (b) fire stale sends the moment the user ever re-links. A torn-down link
   // must leave nothing behind that can message a shop.
-  await sbDelete("wa_outbox", `sender_key=eq.${enc}`).catch(() => {});
-  await sbDelete("graph_wakeups", `user_email=eq.${enc}`).catch(() => {});
-  return { severed, hostsTried: hosts.length, hadLink };
+  //
+  // AWAITED AND REPORTED (audit M50). Two fire-and-forget deletes here meant a
+  // PostgREST 5xx during a disconnect left the rows behind while the result
+  // said the link was gone - and outboxExpired keeps a row live for 6h, a
+  // wakeup never ages out, so they fired the moment the person re-linked.
+  // The person pressed Disconnect and the host-side sever already happened,
+  // so a failed purge does not throw or un-sever: it is retried once, named
+  // in the result, and left as a marker the re-link path drains before the
+  // new link can send.
+  const purge = await purgeParkedWork(email);
+  const purged = purge.outbox && purge.wakeups;
+  if (!purged) {
+    await markPurgePending(
+      email,
+      `disconnect purge failed: ${[
+        !purge.outbox ? "wa_outbox" : "",
+        !purge.wakeups ? "graph_wakeups" : "",
+      ]
+        .filter(Boolean)
+        .join(",")}`
+    );
+  }
+  return { severed, hostsTried: hosts.length, hadLink, purged };
 }
 
 /** Send a text from the user's own WhatsApp (rate-limited, human-like).

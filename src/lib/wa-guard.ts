@@ -58,6 +58,7 @@ import {
   claimOutboxRow,
   releaseOutboxRow,
   completeOutboxRow,
+  recordOutboundAnchor,
   MAX_DUP_HOLDS,
   type OutboxMeta,
   type OutboxRow,
@@ -4121,7 +4122,13 @@ export async function drainOutbox(
         replyGlobalBudget--;
       }
       await afterSend(row.sender_key, row.to_number);
-      await sbInsert("whatsapp_messages", [
+      // THE ANCHOR, WITH ITS RESULT READ (audit F014). This was a bare
+      // `await sbInsert(...)` whose boolean was discarded, so a write blip
+      // after the shop had received the message left the thread with no
+      // outbound row and every later reply died as `no-rfq-thread`. The
+      // helper retries once and breadcrumbs a lost anchor; the retire below
+      // still follows unconditionally - see recordOutboundAnchor's note.
+      await recordOutboundAnchor(
         {
           // STORE THE PROVIDER MESSAGE ID. Without it the webhook's fromMe
           // echo-check ("did WE send this?") could never match by id and fell
@@ -4157,7 +4164,14 @@ export async function drainOutbox(
             ...(lidKey(r.chatJid) ? { lid: lidKey(r.chatJid) } : {}),
           },
         },
-      ]);
+        {
+          senderKey: row.sender_key,
+          toNumber: row.to_number,
+          vendorId: String((row.meta as { vendorId?: string } | null)?.vendorId ?? ""),
+          vendorName: String((row.meta as { vendorName?: string } | null)?.vendorName ?? ""),
+          channel: "personal-wa",
+        }
+      );
       // ORDER MATTERS, and it is the whole point of this lifecycle: the SENT row
       // is written FIRST, and only then is the queued row retired. The shop is
       // briefly in both tables (every surface prefers "sent"), and never in

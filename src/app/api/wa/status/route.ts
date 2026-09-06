@@ -122,19 +122,23 @@ export async function GET(req: Request) {
       // one traveller's request - /api/replies was fixed, /api/activity is
       // fixed in this same change, and leaving this one unscoped would keep the
       // whole users-x-users cost alive through a different door.
+      // This one already rides a 3s Promise.race; the budget makes the
+      // drain itself stop rather than run on detached after the race. It is
+      // the drain's 5s FLOOR, not the race's 3s (audit F250): drainOutbox
+      // raises a lower budget to 5_000 silently, so the literal 3_000 that
+      // sat here still ran 2s detached while reading as if it matched.
+      const DRAIN_STOP_MS = 5_000;
       await bounded(
         drainOutbox(
           (senderKey, to, text, lane) => sendFromUser(senderKey, to, text, true, { lane }),
-          // This one already rides a 3s Promise.race; the budget makes the
-          // drain itself stop rather than run on detached after the race.
-          { senderKey: session.email, budgetMs: 3_000 }
+          { senderKey: session.email, budgetMs: DRAIN_STOP_MS }
         ).catch(() => {})
       );
       const { drainGraphWakeups } = await import("@/lib/graph/engine");
       await bounded(
         drainGraphWakeups(
           (senderKey, to, text) => sendFromUser(senderKey, to, text, true, { lane: "reply" }),
-          { userEmail: session.email }
+          { userEmail: session.email, budgetMs: DRAIN_STOP_MS }
         ).catch(() => {})
       );
       }

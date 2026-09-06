@@ -72,7 +72,10 @@ describe("the drain claims by LEASE, so the row never stops existing", () => {
   it("the SENT row is written BEFORE the queued row is retired", () => {
     // Order is the whole point: the shop is briefly in both tables and never in
     // neither. Reversed, the gap - and the disappearance - comes straight back.
-    const sentInsert = guard.indexOf('sbInsert("whatsapp_messages"');
+    // The SENT row goes through recordOutboundAnchor since audit F014 (the
+    // insert's result is read, retried once and breadcrumbed on loss) - the
+    // ordering it sits in is exactly what this pin has always held.
+    const sentInsert = guard.indexOf("await recordOutboundAnchor(");
     expect(sentInsert).toBeGreaterThan(-1);
     // The retire call that belongs to the success path is the first one AFTER
     // the sent row is written; the earlier ones are the deliberate-drop paths.

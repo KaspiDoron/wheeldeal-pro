@@ -2343,6 +2343,20 @@ export type DrainWakeupOptions = {
    * one traveller's time, not everybody's); the heartbeat leaves it unset.
    */
   userEmail?: string;
+  /**
+   * WALL-CLOCK CEILING for ADMISSION, ms (audit F064 / F250 / F254).
+   *
+   * Every wakeup is a full multi-agent compose, and this drain had no bound at
+   * all: a poll that raced it against 3s left it running detached (a race does
+   * not cancel), holding WAKEUP_LEASE_MS leases on rows it would never finish
+   * once Cloud Run throttled the CPU; the tick could start it at t=44.9s of a
+   * 45s budget with nothing to stop it. Like drainOutbox's budgetMs this
+   * stops the pool TAKING new candidates past the deadline - work in flight
+   * completes - and rows not reached stay due for the next drainer. No floor:
+   * a caller with nothing left admits nothing. Unset = unbounded (the
+   * heartbeat, which is a worker and owns its whole invocation).
+   */
+  budgetMs?: number;
 };
 
 /**
@@ -2357,6 +2371,12 @@ export async function drainGraphWakeups(
   opts?: DrainWakeupOptions
 ): Promise<number> {
   let ran = 0;
+  // The admission deadline (see DrainWakeupOptions.budgetMs). Taken at entry
+  // so the SELECT's own latency counts against the caller's budget too.
+  const admitDeadline =
+    typeof opts?.budgetMs === "number" && Number.isFinite(opts.budgetMs)
+      ? Date.now() + Math.max(0, opts.budgetMs)
+      : null;
   try {
     // SCOPED, WHEN THE CALLER OWNS ONLY ONE USER'S TIME.
     //
@@ -2457,18 +2477,26 @@ export async function drainGraphWakeups(
             // is the same identity the inbound turn uses.
             const { runWithAiBudget } = await import("../ai-budget");
             try {
-              const routed = await runWithAiBudget(input.ctx.sender ?? "", () =>
+              await runWithAiBudget(input.ctx.sender ?? "", () =>
                 runThreadTurn(input, liveGraphIO(send), "wakeup")
               );
-              // A tick that sent nothing gives the thread back early, exactly
-              // like the inbound path - a silent wakeup must not freeze the
-              // shop's next message for the rest of the window.
-              if (routed.spte?.delivered === "silent" || routed.engine === "none") {
+            } finally {
+              // RELEASED HOWEVER THE TURN ENDS (audit F018), exactly like the
+              // inbound path's finally in agent-loop. This used to give the
+              // thread back only when the tick was silent / engine-less or
+              // threw, so a wakeup that DELIVERED kept both claimed slots
+              // (bucket N and N-1) until the 2h GC - and the shop's answer,
+              // arriving in the next 120-240s, lost claimThreadTurn and was
+              // dropped as "turn-in-flight". The lock's contract is one
+              // COMPOSE at a time, not one message per window: the spacing
+              // between this follow-up and the next composed reply is owned
+              // by the per-recipient pacing in claimSendSlots, which still
+              // runs on every send. Only a WON claim is ours to release - an
+              // "error" claim holds no rows, and deleting the slots then
+              // would take a sibling's live claim with them.
+              if (turn === "won") {
                 await releaseThreadTurn(lockOwner, lockDigits, turnClaimedAt).catch(() => {});
               }
-            } catch (e) {
-              await releaseThreadTurn(lockOwner, lockDigits, turnClaimedAt).catch(() => {});
-              throw e;
             }
             ran++;
           }
@@ -2541,6 +2569,12 @@ export async function drainGraphWakeups(
     let next = 0;
     const worker = async (): Promise<void> => {
       while (next < due.length) {
+        // STOP TAKING WORK, do not abandon work in flight (the same rule as
+        // drainOutbox). An unclaimed row is still due and the next drainer -
+        // the heartbeat, the tick chain, the owner's next poll - picks it up;
+        // a row claimed and then frozen at the response boundary is invisible
+        // for the whole lease.
+        if (admitDeadline !== null && Date.now() > admitDeadline) return;
         const cand = due[next++];
         await processOne(cand);
       }
@@ -2819,20 +2853,36 @@ export async function runUserAction(args: {
   // than refusing; if the sibling still holds it, proceed - the send guard's
   // per-recipient pacing serializes the wire, and a traveller's deliberate
   // action outranks an automated turn.
-  {
-    const { claimThreadTurn } = await import("../wa/turn-lock");
-    const claim = await claimThreadTurn(args.userEmail, args.toDigits);
-    if (claim === "lost") {
-      await new Promise((r) => setTimeout(r, 3_000));
-      await claimThreadTurn(args.userEmail, args.toDigits);
+  //
+  // ...AND GIVES IT BACK (audit M40). This entry was the only one that never
+  // released a claim it WON: a "Close the deal" tap pinned the thread for the
+  // rest of the 120s window and, through the straddle rule, into the next
+  // one, so the shop's reply seconds later lost claimThreadTurn and went
+  // unanswered until the recovery sweep. The claim-time timestamp is kept so
+  // the release deletes exactly the two slots the claim inserted; a LOST
+  // claim holds nothing and must release nothing - deleting the sibling's
+  // live rows would let two turns compose against one thread.
+  const { claimThreadTurn, releaseThreadTurn } = await import("../wa/turn-lock");
+  let turnClaimedAt = Date.now();
+  let claim = await claimThreadTurn(args.userEmail, args.toDigits, turnClaimedAt);
+  if (claim === "lost") {
+    await new Promise((r) => setTimeout(r, 3_000));
+    turnClaimedAt = Date.now();
+    claim = await claimThreadTurn(args.userEmail, args.toDigits, turnClaimedAt);
+  }
+  const holdsTurn = claim === "won";
+  try {
+    // THROUGH THE ROUTING AUTHORITY, like every other entry point. engine-route
+    // dispatches user-action kinds to the graph engine deliberately (its nodes
+    // own them) - the point is that the dispatch is SAID in one place, not that
+    // this call bypasses it. The declared TurnEntry "user-action" finally has
+    // its producer.
+    const { runThreadTurn } = await import("../engine-route");
+    const out = await runThreadTurn(input, liveGraphIO(args.send), "user-action");
+    return out.graph ?? null;
+  } finally {
+    if (holdsTurn) {
+      await releaseThreadTurn(args.userEmail, args.toDigits, turnClaimedAt).catch(() => {});
     }
   }
-  // THROUGH THE ROUTING AUTHORITY, like every other entry point. engine-route
-  // dispatches user-action kinds to the graph engine deliberately (its nodes
-  // own them) - the point is that the dispatch is SAID in one place, not that
-  // this call bypasses it. The declared TurnEntry "user-action" finally has
-  // its producer.
-  const { runThreadTurn } = await import("../engine-route");
-  const out = await runThreadTurn(input, liveGraphIO(args.send), "user-action");
-  return out.graph ?? null;
 }

@@ -16,6 +16,7 @@ import { digitsOnly } from "@/lib/phone";
 import { mapLimit } from "@/lib/concurrency";
 import { lidKey } from "@/lib/wa/phone-key";
 import { outboxToKeyPatch } from "@/lib/wa/outbox-columns";
+import { recordOutboundAnchor } from "@/lib/wa/outbox-lifecycle";
 import { planCapacity, batchWindowMs, BATCH_WINDOW_MINUTES } from "@/lib/wa/capacity";
 import { promisedRfq } from "@/lib/wa/thread-context";
 import type { StructuredRFQ } from "@/lib/types";
@@ -286,7 +287,37 @@ export async function POST(req: Request) {
     typeof (body.rfq as { durationDays?: unknown }).durationDays === "number"
       ? (body.rfq as import("@/lib/types").StructuredRFQ)
       : null;
-  const compiledRecent: string[] = [];
+  // A REAL RECENT LIST, NOT `[]` (audit F212 - the bulk half of W-beta30).
+  //
+  // ensureGloballyUnique has two layers: the cross-fleet Redis signature
+  // window and the in-process trigram compare against THIS list. The Redis
+  // layer is a documented no-op without REDIS_URL - the live Cloud Run shape -
+  // so this list is the whole guard, and it started empty: a batch compared
+  // its openers only against its own siblings. Traveller B's 20-shop batch at
+  // 09:20 could not see one sentence of A's batch at 09:00 over the same
+  // shops, so matrix-compiled openers differing only by seed went to the same
+  // numbers from two travellers' phones through one egress IP - the
+  // clustering fingerprint the layer exists to break, on the path that sends
+  // 20-40x more than the single-shop route this was already fixed on.
+  //
+  // Same bounded fleet-wide read the single-shop route and the engine's own
+  // send path use (recentOutboundGlobal: 6h, 200 rows), ONCE per batch and
+  // before the compile loop, off the reply path. The batch keeps pushing each
+  // accepted opener onto it, so the in-batch ledger works exactly as before;
+  // an unreadable store degrades to that old behaviour rather than blocking.
+  const compiledRecent: string[] = rfqForCompile
+    ? await (async () => {
+        const { sbSelect: recentSelect } = await import("@/lib/runtime-config");
+        return recentSelect<{ body: string | null }>(
+          "whatsapp_messages",
+          `select=body&direction=eq.outbound&received_at=gte.${encodeURIComponent(
+            new Date(Date.now() - 6 * 3600_000).toISOString()
+          )}&order=received_at.desc&limit=200`
+        )
+          .then((rows) => rows.map((r) => r.body ?? "").filter(Boolean))
+          .catch(() => [] as string[]);
+      })()
+    : [];
   const wantLocalLang = localLanguageAllowed({ requested: body.localLang, plan: session.plan });
   // COMPILE IS SEQUENTIAL, LOCALIZE IS NOT.
   //
@@ -739,7 +770,16 @@ export async function POST(req: Request) {
     const claim = await claimForSend(session.email, digits, guard.text, true);
     if (!claim.ok) {
       const notBefore = new Date(batchStart + 60_000).toISOString();
-      await sbInsert("wa_outbox", [
+      // READ THE INSERT (audit F015). sbInsert never throws - it answers
+      // false on a timed-out write, a 5xx or the pending-auto unique index -
+      // so the old `.catch(() => {})` was dead and the boolean was the only
+      // signal. It was discarded, and every shop here was reported queued
+      // with a time, the ledger stamped contact_queued, over a row that may
+      // not exist and that no drain could ever send. The sibling branches
+      // above already read it; this one now does too. No retry - a second
+      // 8s wait per failing shop inside a 40-shop loop is not free, and the
+      // honest report is.
+      const parked = await sbInsert("wa_outbox", [
         {
           sender_key: session.email,
           to_number: digits,
@@ -748,9 +788,10 @@ export async function POST(req: Request) {
           not_before: notBefore,
           meta: { ...rowMeta, reason: claim.kind === "duplicate" ? "batch-spacing" : "human pacing gap" },
         },
-      ]).catch(() => {});
-      // FUNNEL LEDGER: parked on the batch's pacing spacing.
-      {
+      ]);
+      // FUNNEL LEDGER: parked on the batch's pacing spacing - only when the
+      // row actually landed. The ledger never asserts a queue that is not there.
+      if (parked) {
         const { advanceThreadStage } = await import("@/lib/funnel/stages");
         await advanceThreadStage(
           { userEmail: session.email, toNumber: digits, vendorId: String(v.id), vendorName: v.name, transport: "evolution" },
@@ -761,10 +802,10 @@ export async function POST(req: Request) {
       results.push({
         id: v.id,
         sent: false,
-        queued: true,
-        queuedUntil: notBefore,
-        queuedReason: "human pacing gap",
-        reason: "queued",
+        queued: parked,
+        queuedUntil: parked ? notBefore : undefined,
+        queuedReason: parked ? "human pacing gap" : undefined,
+        reason: parked ? "queued" : "queue-unavailable",
       });
       continue;
     }
@@ -791,7 +832,10 @@ export async function POST(req: Request) {
     }
     if (ok) {
       await afterSend(session.email, digits);
-      await sbInsert("whatsapp_messages", [
+      // The anchor, with its result read (audit F014): retried once, and a
+      // lost row is breadcrumbed as outbound-log-failed instead of leaving
+      // the shop's reply to die as no-rfq-thread.
+      await recordOutboundAnchor(
         {
           to_number: digits,
           body: guard.text,
@@ -809,7 +853,14 @@ export async function POST(req: Request) {
             ...(sentChatLid ? { lid: sentChatLid } : {}),
           },
         },
-      ]);
+        {
+          senderKey: session.email,
+          toNumber: digits,
+          vendorId: String(v.id),
+          vendorName: v.name,
+          channel: personal ? "personal-wa" : "cloud-api",
+        }
+      );
       // FUNNEL LEDGER: the RFQ reached the shop (TRUTH RULE row above).
       {
         const { advanceThreadStage } = await import("@/lib/funnel/stages");
