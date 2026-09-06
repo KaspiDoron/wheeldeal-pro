@@ -195,17 +195,28 @@ export default function ProfilePage() {
     } catch {}
   }, []);
 
-  // Remove a booking from history (item #10): optimistic, server-verified.
+  // Remove a booking from history (item #10): server-verified, never painted
+  // ahead of the answer (audit M45) - this used to filter the row out of view
+  // without reading the response, so a delete Supabase refused vanished from
+  // the screen and was back on the next load.
   const [bookingDeleting, setBookingDeleting] = useState<number | null>(null);
+  const [bookingMsg, setBookingMsg] = useState<string | null>(null);
   async function removeBooking(id: number) {
     setBookingDeleting(id);
+    setBookingMsg(null);
     try {
-      await fetch("/api/bookings", {
+      const res = await fetch("/api/bookings", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id }),
       });
+      if (!res.ok) {
+        setBookingMsg(t("Could not remove the booking - it is still in your history. Try again."));
+        return;
+      }
       setBookings((bs) => bs.filter((b) => b.id !== id));
+    } catch {
+      setBookingMsg(t("Could not remove the booking - it is still in your history. Try again."));
     } finally {
       setBookingDeleting(null);
     }
@@ -801,6 +812,11 @@ export default function ProfilePage() {
               {t("Open Trips")} →
             </a>
           </div>
+          {bookingMsg && (
+            <p className="mb-2 text-[12px] font-bold text-brandred" role="alert">
+              {bookingMsg}
+            </p>
+          )}
           {bookings.length === 0 ? (
             <p className="text-[12px] text-faint">
               {t("No bookings yet - lock your first deal and it will show up here.")}

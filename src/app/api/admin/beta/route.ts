@@ -37,11 +37,20 @@ export async function PUT(req: Request) {
   const res = await saveBetaAllowlist(entries);
   // HONEST WRITE: a list that did not reach the durable store was not saved -
   // it would reset on the next restart and de-invited nobody. 502, not ok.
+  //
+  // AND NO READ-BACK FROM THE PIN (audit F197). This used to answer the 502
+  // with `entries: await betaAllowlist()`, and betaAllowlist reads through
+  // getConfig, which serves the in-memory copy setConfig pins on a FAILED
+  // write - so the error body echoed the exact testers that were never
+  // stored, and the panel painted "Saved - 30 account(s)" over a 502. The
+  // durable list cannot be proven from this instance right now, so it is not
+  // claimed.
   if (!res.persisted) {
     return NextResponse.json(
       {
+        ok: false,
+        persisted: false,
         error: res.error ?? "The tester list did not persist. Check Supabase and retry.",
-        entries: await betaAllowlist(),
         max: res.max,
       },
       { status: 502 }

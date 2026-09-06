@@ -251,7 +251,7 @@ export async function GET(req: Request) {
   // the send pipeline - a spike here is the first sign something is being
   // held back (cancellations firing, claims contended, fail-closed holds,
   // structurally illegal phase jumps).
-  const { sbSelect, sbCountDark, lostTelemetryWrites } = await import("@/lib/runtime-config");
+  const { sbSelect, sbSelectDark, sbCountDark, lostTelemetryWrites } = await import("@/lib/runtime-config");
   const sinceIso = new Date(Date.now() - 24 * 3600_000).toISOString();
   const guardKinds = [
     "cancelled-send-blocked",
@@ -393,25 +393,36 @@ export async function GET(req: Request) {
       "select=created_at&kind=eq.cron-ping&order=created_at.desc&limit=1"
     ).catch(() => []),
     // QUEUE DEPTH: how many sends are waiting, and how long the oldest has been.
-    sbSelect<{ not_before: string }>(
+    //
+    // THROUGH sbSelectDark, LIKE THE TWELVE COUNTERS ABOVE (audit F090). This
+    // was a permissive `sbSelect(...).catch(() => [])`, and sbSelect maps a
+    // missing connection, a non-2xx and a throw all to `[]` - so during an
+    // outage the panel rendered "queue 0" with no overdue badge at the exact
+    // moment nothing could be drained, while guardCounters in the same
+    // response admitted it could not read agent_events. `null` here is
+    // threaded through as `queue: null` + `queueUnreadable`; queueDepth's own
+    // pure contract (an empty array IS 0/0/null) is untouched. A missing
+    // table still reads [] - a never-migrated outbox is a real zero.
+    sbSelectDark<{ not_before: string }>(
       "wa_outbox",
       "select=not_before&order=not_before.asc&limit=500"
-    ).catch(() => []),
+    ),
     // Per-turn stamps: latency percentiles and which provider actually answered.
-    sbSelect<{ detail: string }>(
+    // Same shape, same repair: null is "unknown", never "no turns".
+    sbSelectDark<{ detail: string }>(
       "agent_events",
       `select=detail&kind=eq.engine-v3-turn&created_at=gte.${encodeURIComponent(
         iso60
       )}&order=created_at.desc&limit=500`
-    ).catch(() => []),
+    ),
     // Push breadcrumbs - a notification that was composed but never delivered
     // leaves a trail nobody was reading.
-    sbSelect<{ kind: string }>(
+    sbSelectDark<{ kind: string }>(
       "agent_events",
       `select=kind&kind=in.(push-sent,push-failed,push-skipped)&created_at=gte.${encodeURIComponent(
         new Date(now - 24 * 3600_000).toISOString()
       )}&limit=2000`
-    ).catch(() => []),
+    ),
   ]);
   const webhookSilent =
     outbound60.length > 0 &&
@@ -432,7 +443,6 @@ export async function GET(req: Request) {
   // i.e. supabase/retention.sql has never been run. That attempt leaves a
   // 'retention-unavailable' breadcrumb, and reading BOTH kinds lets the tile
   // say which of the two things the owner has to do.
-  const { sbSelectDark } = await import("@/lib/runtime-config");
   const retentionRows = await sbSelectDark<{ created_at: string; kind: string }>(
     "agent_events",
     "select=created_at,kind&kind=in.(retention-ran,retention-unavailable)&order=created_at.desc&limit=1"
@@ -516,10 +526,16 @@ export async function GET(req: Request) {
     // The cron watchdog. "never" and "stale" are different failures with
     // different fixes, and the tile says which - see lib/ops/vitals.
     heartbeat: pulse(lastPing[0]?.created_at ?? null, now),
-    queue: queueDepth(queued, now),
-    turnLatencyMs: turnLatency(turns60),
-    providerErrors: providerErrors(turns60),
-    push24h: pushBreadcrumbs(pushes24),
+    // A VITAL FROM A DARK SOURCE IS NULL, NOT ZERO (audit F090). Each `null`
+    // below means "could not read", and the boolean beside it lets the panel
+    // label the tile without inspecting the shape.
+    queue: queued === null ? null : queueDepth(queued, now),
+    queueUnreadable: queued === null,
+    turnLatencyMs: turns60 === null ? null : turnLatency(turns60),
+    providerErrors: turns60 === null ? null : providerErrors(turns60),
+    turnsUnreadable: turns60 === null,
+    push24h: pushes24 === null ? null : pushBreadcrumbs(pushes24),
+    pushUnreadable: pushes24 === null,
     // A ROTATED SESSION_SECRET IS INVISIBLE WITHOUT THIS.
     //
     // SESSION_SECRET is both the cookie signing key and the Key Vault's

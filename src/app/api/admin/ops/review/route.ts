@@ -23,6 +23,28 @@ const VERDICTS: ReviewVerdict[] = ["approve", "reject"];
 const IMPACTS: OutcomeImpact[] = ["improved", "worsened", "neutral"];
 const STATUSES: ReviewStatus[] = ["open", "flagged", "auto_flagged", "resolved"];
 
+/**
+ * An agent_training row KEYED TO THE TRAVELLER IT QUOTES (audit F171).
+ *
+ * Every row this route writes embeds that person's WhatsApp exchange - the
+ * exemplar copies both sides, the correction quotes the shop and the agent,
+ * the lesson quotes the shop - so it carries `user_email`, which is how the
+ * erasure registry and the DSAR export reach it. Attempted WITH the column
+ * and retried WITHOUT it when the write does not confirm (the events.ts
+ * degrade contract), so a database where schema.sql has not been re-run
+ * loses the ownership key, never the lesson.
+ */
+async function insertTrainingRow(
+  row: Record<string, unknown>,
+  userEmail: string
+): Promise<{ id: number }[]> {
+  const stamped = await sbInsertReturning<{ id: number }>("agent_training", [
+    { ...row, user_email: userEmail },
+  ]).catch(() => []);
+  if (stamped.length) return stamped;
+  return sbInsertReturning<{ id: number }>("agent_training", [row]).catch(() => []);
+}
+
 export async function GET(req: Request) {
   const session = await requireOwner();
   if (!session) return NextResponse.json({ error: "Owner only." }, { status: 403 });
@@ -189,7 +211,7 @@ export async function POST(req: Request) {
     // PARKED first. `loadCoaching` reads source="ops-lesson" only, so writing
     // "-pending" means the lesson exists but changes no behaviour yet. It is
     // promoted below, and only if the whole golden suite still passes.
-    const lessonRows = await sbInsertReturning<{ id: number }>("agent_training", [
+    const lessonRows = await insertTrainingRow(
       {
         text: compileMisreadLesson(misread, {
           vendorName: thread[0]?.vendor_name ?? undefined,
@@ -199,7 +221,8 @@ export async function POST(req: Request) {
         added_by: session.email,
         source: "ops-lesson-pending",
       },
-    ]).catch(() => []);
+      userEmail
+    );
 
     // FREEZE THE THREAD AS A GOLDEN CASE. A correction that only edits a prompt
     // can silently rot; a frozen case makes the same misread fail the gate
@@ -355,7 +378,7 @@ export async function POST(req: Request) {
         .sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
         .map((m) => `${m.who}: ${m.text.slice(0, 260)}`)
         .join("\n");
-      await sbInsert("agent_training", [
+      await insertTrainingRow(
         {
           text: `[OPS-EXEMPLAR ${day}] Owner-approved negotiation with ${vendorName}:\n${exchange}`.slice(
             0,
@@ -365,12 +388,13 @@ export async function POST(req: Request) {
           added_by: session.email,
           source: "ops-exemplar",
         },
-      ]).catch(() => {});
+        userEmail
+      );
     }
     if (newCorrection) {
       const lastShop = ins[0]?.body ?? "";
       const lastAgent = outs[0]?.body ?? "";
-      await sbInsert("agent_training", [
+      await insertTrainingRow(
         {
           text:
             `[OPS-CORRECTION ${day}] With ${vendorName}, the shop said: "${lastShop.slice(0, 300)}". ` +
@@ -381,7 +405,8 @@ export async function POST(req: Request) {
           added_by: session.email,
           source: "ops-correction",
         },
-      ]).catch(() => {});
+        userEmail
+      );
     }
   }
 

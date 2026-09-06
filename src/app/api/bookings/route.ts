@@ -279,9 +279,20 @@ export async function DELETE(req: Request) {
   if (!Number.isFinite(id) || id <= 0) {
     return NextResponse.json({ error: "id required" }, { status: 400 });
   }
-  await sbDelete(
+  // HONEST WRITE (audit M45). sbDelete returns res.ok; PostgREST answers a
+  // zero-row DELETE with 204, so `false` is a transport or permission
+  // failure - never "not found" - and the row is still there. The profile
+  // page used to filter the booking out of view on an unconditional ok:true
+  // and find it back on the next load.
+  const removed = await sbDelete(
     "bookings",
     `id=eq.${id}&user_email=eq.${encodeURIComponent(session.email)}`
   );
+  if (!removed) {
+    return NextResponse.json(
+      { ok: false, error: "The booking was not removed - it is still in your history. Try again." },
+      { status: 502 }
+    );
+  }
   return NextResponse.json({ ok: true });
 }

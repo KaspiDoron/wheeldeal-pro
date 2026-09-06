@@ -7,12 +7,15 @@
 import { useEffect, useRef, useState } from "react";
 import { LoadingDots } from "./LoadingDots";
 
+// `null` on a vital means the store could not be read (audit F090) - the
+// route threads it through instead of an empty-array zero, and this panel
+// renders a dash, never "queue 0" over a dead database.
 interface Vitals {
   heartbeat: { state: "beating" | "stale" | "never"; ageMs: number | null; action: string | null };
-  queue: { waiting: number; overdue: number; oldestOverdueMs: number | null };
-  turnLatencyMs: { p50: number | null; p95: number | null; samples: number };
-  providerErrors: { degraded: number; total: number; reasons: { reason: string; count: number }[] };
-  push24h: { sent: number; failed: number; skipped: number; failureRate: number | null };
+  queue: { waiting: number; overdue: number; oldestOverdueMs: number | null } | null;
+  turnLatencyMs: { p50: number | null; p95: number | null; samples: number } | null;
+  providerErrors: { degraded: number; total: number; reasons: { reason: string; count: number }[] } | null;
+  push24h: { sent: number; failed: number; skipped: number; failureRate: number | null } | null;
 }
 
 const agoMins = (ms: number | null | undefined) =>
@@ -113,10 +116,10 @@ export function HealthPanel() {
         d.heartbeat
           ? {
               heartbeat: d.heartbeat,
-              queue: d.queue,
-              turnLatencyMs: d.turnLatencyMs,
-              providerErrors: d.providerErrors,
-              push24h: d.push24h,
+              queue: d.queue ?? null,
+              turnLatencyMs: d.turnLatencyMs ?? null,
+              providerErrors: d.providerErrors ?? null,
+              push24h: d.push24h ?? null,
             }
           : null
       );
@@ -441,35 +444,56 @@ export function HealthPanel() {
             <div className="mt-1 flex flex-wrap gap-1.5 text-[10px] font-bold">
               {/* A deep queue is not a problem - the pacing spreads a batch on
                   purpose. A queue of rows whose time has PASSED is. */}
-              <span className="rounded-full bg-card px-2 py-0.5 text-soft">
-                queue {vitals.queue.waiting}
-              </span>
-              {vitals.queue.overdue > 0 && (
+              {/* A null queue is an UNREADABLE outbox, not an empty one - the
+                  one tile that says whether sends are moving must not read
+                  its most reassuring value during an outage. */}
+              {vitals.queue === null ? (
+                <span className="rounded-full bg-line px-2 py-0.5 text-strong">
+                  queue - (outbox unreadable)
+                </span>
+              ) : (
+                <span className="rounded-full bg-card px-2 py-0.5 text-soft">
+                  queue {vitals.queue.waiting}
+                </span>
+              )}
+              {vitals.queue !== null && vitals.queue.overdue > 0 && (
                 <span className="rounded-full bg-brandred-soft px-2 py-0.5 text-brandred">
                   {vitals.queue.overdue} overdue (oldest {agoMins(vitals.queue.oldestOverdueMs)})
                 </span>
               )}
-              {vitals.turnLatencyMs.samples > 0 && (
+              {vitals.turnLatencyMs === null && (
+                <span className="rounded-full bg-line px-2 py-0.5 text-strong">
+                  reply latency - (unreadable)
+                </span>
+              )}
+              {vitals.turnLatencyMs !== null && vitals.turnLatencyMs.samples > 0 && (
                 <span className="rounded-full bg-card px-2 py-0.5 text-soft">
                   reply p50 {Math.round((vitals.turnLatencyMs.p50 ?? 0) / 1000)}s · p95{" "}
                   {Math.round((vitals.turnLatencyMs.p95 ?? 0) / 1000)}s
                 </span>
               )}
-              {vitals.providerErrors.degraded > 0 && (
+              {vitals.providerErrors !== null && vitals.providerErrors.degraded > 0 && (
                 <span className="rounded-full bg-brandyellow-soft px-2 py-0.5 text-warn">
                   {vitals.providerErrors.degraded}/{vitals.providerErrors.total} turns with no
                   provider
                 </span>
               )}
-              {vitals.push24h.failureRate !== null && vitals.push24h.failureRate > 0 && (
-                <span className="rounded-full bg-brandyellow-soft px-2 py-0.5 text-warn">
-                  push {vitals.push24h.failureRate}% failing ({vitals.push24h.failed}/24h)
+              {vitals.push24h === null && (
+                <span className="rounded-full bg-line px-2 py-0.5 text-strong">
+                  push - (unreadable)
                 </span>
               )}
+              {vitals.push24h !== null &&
+                vitals.push24h.failureRate !== null &&
+                vitals.push24h.failureRate > 0 && (
+                  <span className="rounded-full bg-brandyellow-soft px-2 py-0.5 text-warn">
+                    push {vitals.push24h.failureRate}% failing ({vitals.push24h.failed}/24h)
+                  </span>
+                )}
             </div>
             {/* "No key configured" and "every key is failing" used to look
                 identical. The reasons are the difference. */}
-            {vitals.providerErrors.reasons.length > 0 && (
+            {vitals.providerErrors !== null && vitals.providerErrors.reasons.length > 0 && (
               <ul className="mt-1.5 space-y-0.5 text-[10px] leading-snug text-soft">
                 {vitals.providerErrors.reasons.map((r) => (
                   <li key={r.reason}>

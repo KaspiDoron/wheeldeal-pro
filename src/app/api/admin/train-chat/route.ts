@@ -3,7 +3,7 @@ import { requireManagement } from "@/lib/session";
 import { extractOffer, composeBargain, currencyForRegion, money } from "@/lib/agents";
 import { floorPriceFor } from "@/lib/market";
 import { addTraining } from "@/lib/memory";
-import { sbInsert } from "@/lib/runtime-config";
+import { sbInsert, supabaseConfigured } from "@/lib/runtime-config";
 import type { StructuredRFQ } from "@/lib/types";
 
 // Interactive agent-training studio (New#13). The owner/manager plays a rental
@@ -48,11 +48,30 @@ export async function POST(req: Request) {
     if (transcript.length < 20) {
       return NextResponse.json({ error: "Nothing to save yet." }, { status: 400 });
     }
-    const ex = addTraining(transcript, "training");
-    await sbInsert("agent_training", [
-      { text: ex.text, note: "training", added_by: session.email, source: "training" },
-    ]).catch(() => {});
-    return NextResponse.json({ ok: true, saved: true });
+    // HONEST WRITE (audit M45): this asserted saved:true over an insert whose
+    // boolean was never read, so a session Supabase refused lived only in
+    // this instance's memory until the next cold start. With a durable store
+    // configured it is the truth - a failed insert is a 502 and nothing is
+    // mirrored into memory as proof; without one (demo mode) the in-memory
+    // list is the only store there is, and the answer says so.
+    const durable = supabaseConfigured();
+    if (durable) {
+      const landed = await sbInsert("agent_training", [
+        { text: transcript, note: "training", added_by: session.email, source: "training" },
+      ]).catch(() => false);
+      if (!landed) {
+        return NextResponse.json(
+          {
+            ok: false,
+            saved: false,
+            error: "The session was not saved - Supabase refused the write. Nothing changed; retry.",
+          },
+          { status: 502 }
+        );
+      }
+    }
+    addTraining(transcript, "training");
+    return NextResponse.json({ ok: true, saved: true, persisted: durable });
   }
 
   const history = turns

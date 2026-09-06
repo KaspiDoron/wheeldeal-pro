@@ -815,6 +815,10 @@ async function handlePost(req: Request) {
           transport: result.channel === "cloud-api" ? "cloud" : "evolution",
           sender: session.email,
           ok: true,
+          // The agent's send or the traveller's own words (audit F085): an
+          // rfq/bargain/clarify is automated, a typed "custom" is not. The
+          // launch card counts `raw->>auto=eq.true`, and this row said nothing.
+          auto: isAuto,
           // false when Evolution accepted the request but returned no delivery
           // receipt - the card shows "sent, unverified" instead of a checkmark.
           confirmed: result.unconfirmed ? false : true,

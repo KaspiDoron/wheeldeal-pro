@@ -2247,6 +2247,12 @@ export function liveGraphIO(send: LiveSend): GraphIO {
             raw: {
               ...meta,
               sender: senderKey,
+              // Every send through this io is the agent's (guardOutbound above
+              // runs it as auto:true). The primary engine's meta carries no
+              // `auto` key, so the launch card's `raw->>auto=eq.true` counters
+              // missed every inline reply (audit F085); the drain's rows and
+              // the graph failover's meta already said it. One vocabulary.
+              auto: true,
               confirmed: (result as { unconfirmed?: boolean }).unconfirmed ? false : true,
             },
           },

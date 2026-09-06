@@ -590,9 +590,15 @@ function ReportRow({ report, onChanged }: { report: Report; onChanged: () => voi
   async function remove() {
     if (busy) return;
     setBusy(true);
+    setReplyErr(null);
     try {
       const res = await fetch(`/api/feedback?id=${report.id}`, { method: "DELETE" });
+      // The route answers 502 when the durable delete was refused (audit
+      // M45); the report is still there and the reporter must hear it.
       if (res.ok) onChanged();
+      else setReplyErr(t("Could not delete this report - it is still here. Please try again."));
+    } catch {
+      setReplyErr(t("Could not delete this report - it is still here. Please try again."));
     } finally {
       setBusy(false);
       setConfirmDel(false);

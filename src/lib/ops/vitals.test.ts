@@ -226,12 +226,25 @@ describe("the health surface reports the vitals, not only the roll call", () => 
   const route = readCode("src/app/api/admin/health/route.ts");
   const panel = readCode("src/components/HealthPanel.tsx");
 
-  it("the route computes all five", () => {
+  it("the route computes all five, and threads an unreadable store through as null (F090)", () => {
     expect(route).toMatch(/heartbeat: pulse\(/);
-    expect(route).toMatch(/queue: queueDepth\(/);
-    expect(route).toMatch(/turnLatencyMs: turnLatency\(/);
-    expect(route).toMatch(/providerErrors: providerErrors\(/);
-    expect(route).toMatch(/push24h: pushBreadcrumbs\(/);
+    // The pure reducers keep their contract (an empty array IS 0/0/null); the
+    // route decides between "empty" and "unknown" BEFORE calling them, and
+    // never hands a dark read to a reducer as if it were an empty table.
+    expect(route).toMatch(/queue: queued === null \? null : queueDepth\(/);
+    expect(route).toMatch(/turnLatencyMs: turns60 === null \? null : turnLatency\(/);
+    expect(route).toMatch(/providerErrors: turns60 === null \? null : providerErrors\(/);
+    expect(route).toMatch(/push24h: pushes24 === null \? null : pushBreadcrumbs\(/);
+    expect(route).toMatch(/queueUnreadable: queued === null/);
+    // The three feeds read through sbSelectDark, not the permissive sbSelect.
+    expect(route).toMatch(/sbSelectDark<\{ not_before: string \}>\(\s*"wa_outbox"/);
+    expect(route).not.toMatch(/sbSelect<\{ not_before: string \}>/);
+    // Executed coverage: src/app/api/admin/health/queue-unreadable.test.ts.
+  });
+
+  it("the panel renders a dash for an unreadable queue, never 'queue 0'", () => {
+    expect(panel).toMatch(/vitals\.queue === null \?/);
+    expect(panel).toMatch(/outbox unreadable/);
   });
 
   it("the panel renders the heartbeat RED when it is not beating", () => {

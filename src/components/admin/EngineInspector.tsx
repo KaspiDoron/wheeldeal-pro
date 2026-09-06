@@ -32,12 +32,14 @@ interface Snapshot {
   turns: Turn[];
   stats: {
     turnsLast6h: number | null;
-    failoversLast6h: number;
-    unconfirmedSendsLast6h: number;
+    failoversLast6h: number | null;
+    unconfirmedSendsLast6h: number | null;
     // The rows behind the counts. A number nobody can act on is decoration.
-    failoverDetail?: { shop: string; at: string; detail: string }[];
-    dropped?: { shop: string; at: string; detail: string; kind: string }[];
-    graphTurns?: { shop: string; at: string; detail: string }[];
+    // `detail` is owner-only (null for management): it names shop numbers and
+    // sender emails, and a stale draft's detail quotes the words.
+    failoverDetail?: { shop: string; at: string; detail: string | null }[];
+    dropped?: { shop: string; at: string; detail: string | null; kind: string }[];
+    graphTurns?: { shop: string; at: string; detail: string | null }[];
   };
   session: { lowestByVehicle: { key: string; shop: string; pricePerDay: number; currency: string }[]; activeOffers: number };
   operations?: {
@@ -261,12 +263,22 @@ export function EngineInspector() {
                 helpId="turns6h"
                 value={snap.stats.turnsLast6h == null ? "-" : String(snap.stats.turnsLast6h)}
               />
+              {/* null = unreadable store: a dash, never a reassuring zero. */}
               <StatTile
                 helpId="failovers"
-                value={snap.stats.failoversLast6h}
-                tone={snap.stats.failoversLast6h > 0 ? "text-brandred" : "text-savings"}
+                value={snap.stats.failoversLast6h == null ? "-" : snap.stats.failoversLast6h}
+                tone={
+                  snap.stats.failoversLast6h == null
+                    ? undefined
+                    : snap.stats.failoversLast6h > 0
+                      ? "text-brandred"
+                      : "text-savings"
+                }
               />
-              <StatTile helpId="unverified" value={snap.stats.unconfirmedSendsLast6h} />
+              <StatTile
+                helpId="unverified"
+                value={snap.stats.unconfirmedSendsLast6h == null ? "-" : snap.stats.unconfirmedSendsLast6h}
+              />
             </div>
 
             {/* WHICH SHOP, AND WHY. "5 failovers in 6h" was a bare number while
@@ -282,18 +294,18 @@ export function EngineInspector() {
                 </div>
                 {snap.stats.graphTurns?.map((g, i) => (
                   <div key={`g${i}`} className="text-[11px] font-semibold text-brandred">
-                    <b>{g.shop}</b> - answered by the OLD engine ({ago(g.at)}): {g.detail}
+                    <b>{g.shop}</b> - answered by the OLD engine ({ago(g.at)}){g.detail ? `: ${g.detail}` : ""}
                   </div>
                 ))}
                 {snap.stats.failoverDetail?.map((f, i) => (
                   <div key={`f${i}`} className="text-[11px] font-semibold text-brandred">
-                    <b>{f.shop}</b> - engine failover ({ago(f.at)}): {f.detail}
+                    <b>{f.shop}</b> - engine failover ({ago(f.at)}){f.detail ? `: ${f.detail}` : ""}
                   </div>
                 ))}
                 {snap.stats.dropped?.map((d, i) => (
                   <div key={`d${i}`} className="text-[11px] font-semibold text-ink">
                     <b>{d.shop}</b> - {d.kind === "wa-send-stale" ? "draft dropped as stale" : "message refused"} (
-                    {ago(d.at)}): {d.detail}
+                    {ago(d.at)}){d.detail ? `: ${d.detail}` : ""}
                   </div>
                 ))}
               </div>
