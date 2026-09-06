@@ -52,7 +52,16 @@ describe("losing a seconds-scale lane WAITS to its edge instead of re-parking", 
     // One retryAtMs per refusal site: mutex, mutex straddle, gap, gap
     // straddle, fleet, fleet straddle.
     expect((pacing.match(/retryAtMs:/g) ?? []).length).toBeGreaterThanOrEqual(6);
-    expect(pacing).toMatch(/\(fleetBucket \+ 1\) \* opts\.fleetGapSeconds \* 1000/);
+    // The edge is computed in the units the bucket index is in. Since audit
+    // F243 every pacing slot is keyed on FLEET_SLOT_QUANTUM_SEC (the key no
+    // longer carries the gap), so the edge is a QUANTUM edge - an edge at the
+    // gap from a quantum index is off by gap / quantum. The gap itself lives
+    // in the straddle comparison (`winner + gap`, executed in
+    // fleet-slot-quantum.test.ts); the old `* opts.fleetGapSeconds * 1000`
+    // edge must not come back.
+    expect(pacing).toMatch(/\(fleetBucket \+ 1\) \* quantumMs/);
+    expect(pacing).not.toMatch(/\(fleetBucket \+ 1\) \* opts\.fleetGapSeconds \* 1000/);
+    expect(pacing).not.toMatch(/\(bucket \+ 1\) \* opts\.gapSeconds \* 1000/);
   });
 
   it("the bucket-edge arithmetic is the bucket function's own", () => {
@@ -119,9 +128,17 @@ describe("the reply budget is per sender, like the cold lane always was", () => 
     const guard = readCode("src/lib/wa-guard.ts");
     expect(guard).toMatch(/const drainDeadline = Date\.now\(\) \+ Math\.max\(5_000, opts\?\.budgetMs \?\? 45_000\)/);
     expect(guard).toMatch(/if \(Date\.now\(\) > drainDeadline\)/);
-    // ...and the callers pass budgets sized to their own deadlines.
-    expect(readCode("src/app/api/wa/tick/route.ts")).toMatch(/budgetMs: 40_000/);
-    expect(readCode("src/app/api/wa/reply-tick/route.ts")).toMatch(/budgetMs: 40_000/);
+    // ...and the callers pass budgets sized to their own deadlines. The two
+    // dispatchers pass WHAT IS LEFT of their in-call wall, never a fixed
+    // figure (audit F064: a fixed 40_000 started at t=44.9s ran to t=84.9s),
+    // and never start a drain below the floor pinned above. Executed in
+    // src/app/api/wa/tick-budget-wall.test.ts; the shape is pinned here.
+    for (const p of ["src/app/api/wa/tick/route.ts", "src/app/api/wa/reply-tick/route.ts"]) {
+      const code = readCode(p);
+      expect(code, p).toMatch(/const DRAIN_FLOOR_MS = 5_000;/);
+      expect(code, p).toMatch(/budgetMs: remaining/);
+      expect(code, p).not.toMatch(/budgetMs: 40_000/);
+    }
     expect(readCode("src/app/api/wa/ping/route.ts")).toMatch(/budgetMs: 50_000/);
   });
 });

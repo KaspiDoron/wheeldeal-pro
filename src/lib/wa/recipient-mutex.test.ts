@@ -42,8 +42,17 @@ vi.mock("../runtime-config", () => ({
     if (state.mode === "missing") return { error: "missing" as const };
     if (state.mode === "unavailable") return { error: "unavailable" as const };
     const sender = decodeURIComponent(/sender_key=eq\.([^&]+)/.exec(query)?.[1] ?? "");
-    const slot = decodeURIComponent(/slot_key=eq\.([^&]+)/.exec(query)?.[1] ?? "");
-    const at = state.claims.get(`${sender}|${slot}`);
+    // Both the single-slot read and the gap-wide straddle read
+    // (`slot_key=in.(...)&order=created_at.desc&limit=1`, audit F243).
+    const eq = /slot_key=eq\.([^&]+)/.exec(query)?.[1];
+    const inList = /slot_key=in\.\(([^)]*)\)/.exec(query)?.[1];
+    const slots = eq
+      ? [decodeURIComponent(eq)]
+      : (inList ?? "").split(",").filter(Boolean).map((s) => decodeURIComponent(s));
+    const at = slots
+      .map((s) => state.claims.get(`${sender}|${s}`))
+      .filter((v): v is number => typeof v === "number")
+      .sort((a, b) => b - a)[0];
     return { rows: at ? [{ created_at: new Date(at).toISOString() }] : [] };
   },
 }));

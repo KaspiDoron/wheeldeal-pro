@@ -9,6 +9,10 @@ import { disconnectInstance } from "@/lib/evolution";
 // sever that no host confirmed is a 502 the client shows and the person can
 // retry; "never linked / nothing configured" is a real success with nothing
 // to sever and stays a 200.
+//
+// `purged` (audit M50) says whether the person's parked work went with the
+// link. A false is still a 200 - the link IS gone - but it is named rather
+// than assumed, and the re-link path drains the purge it stands for.
 export async function POST() {
   const session = await getSession();
   if (!session) return NextResponse.json({ error: "Sign in first." }, { status: 401 });
@@ -24,7 +28,12 @@ export async function POST() {
       { status: 502 }
     );
   }
-  return NextResponse.json({ ok: true, severed: true, hostsTried: result.hostsTried });
+  return NextResponse.json({
+    ok: true,
+    severed: true,
+    hostsTried: result.hostsTried,
+    purged: result.purged,
+  });
 }
 
 // maxDuration: lift the request-timeout ceiling for slow upstreams.

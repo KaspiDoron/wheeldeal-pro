@@ -95,15 +95,30 @@ export async function GET(req: Request) {
       const DRAIN_BUDGET_MS = 3_000;
       const bounded = <T,>(p: Promise<T>) =>
         Promise.race([p, new Promise((r) => setTimeout(r, DRAIN_BUDGET_MS))]);
+      // A RACE DOES NOT CANCEL (audit F250). Promise.race answers the poll at
+      // 3s and leaves the loser RUNNING - to drainOutbox's own 45s default
+      // deadline - and on Cloud Run the CPU is throttled to ~0 the instant the
+      // response flushes. So the detached drain froze mid-loop holding a
+      // claimOutboxRow lease, and that row read as "sending" to the cron and
+      // the reply tick for the full 3-minute lease: a shop's answer promised
+      // in 15-25s went out minutes late, depending on which sibling poll had
+      // won the drain slot. Each drain therefore carries its OWN stop. It is
+      // the drain's 5s floor rather than the race's 3s: drainOutbox raises
+      // anything lower to 5_000 silently, so a literal 3_000 still ran 2s
+      // detached while claiming to match the race. The 8s per-recipient floor
+      // and the fleet gap sit inside a single row's send and still run per row.
+      const DRAIN_STOP_MS = 5_000;
       await bounded(
         drainOutbox((senderKey, to, text, lane) => sendFromUser(senderKey, to, text, true, { lane }), {
           senderKey: session.email,
+          budgetMs: DRAIN_STOP_MS,
         }).catch((e) => console.error("[drain:outbox]", e instanceof Error ? e.message : e))
       );
       const { drainGraphWakeups } = await import("@/lib/graph/engine");
       await bounded(
         drainGraphWakeups((senderKey, to, text, lane) => sendFromUser(senderKey, to, text, true, { lane }), {
           userEmail: session.email,
+          budgetMs: DRAIN_STOP_MS,
         }).catch((e) => console.error("[drain:wakeups]", e instanceof Error ? e.message : e))
       );
     }

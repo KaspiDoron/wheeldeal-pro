@@ -3,6 +3,7 @@ import { tableReady } from "../schema-probe";
 import { outboxKey } from "./phone-key";
 import { REPLY_KIND_FILTER, humanizeForOutbound } from "../wa-guard";
 import { insertUserEvent } from "../events";
+import { CLAIM_LEASE_MS, outboxState, type OutboxMeta } from "./outbox-lifecycle";
 
 /**
  * Park an auto-composed WhatsApp message in wa_outbox with STRICT
@@ -114,10 +115,35 @@ export async function parkOutboxOnce(row: {
   // pending rows for a shop stored under two spellings, which is a duplicate
   // risk - and a duplicate is enormously better than silence.
   const hasToKey = (await tableReady("wa_outbox", "to_key")) === "ready";
+  // The one-row-per-shop scope: what the unique index keys on.
   const scope = hasToKey
     ? `sender_key=eq.${encodeURIComponent(row.senderKey)}&to_key=eq.${encodeURIComponent(key)}${REPLY_KIND_FILTER}`
     : `sender_key=eq.${encodeURIComponent(row.senderKey)}&to_number=eq.${encodeURIComponent(row.toNumber)}${REPLY_KIND_FILTER}`;
-  await sbDelete("wa_outbox", scope).catch(() => {});
+  // NEVER A ROW A DRAINER IS MID-SEND ON (audit F021).
+  //
+  // This delete used to match a row that outbox-lifecycle reports as
+  // `sending`: the drainer had claimed it by lease and was sleeping in its
+  // wait-not-repark loop with the body already in memory. Deleting it changed
+  // nothing about that send - the old draft still went out - and the
+  // replacement parked here went out a few seconds after it: two agent
+  // messages to one shop with different bodies, which the idempotency slot
+  // cannot dedupe.
+  //
+  // The predicate is outboxState's lease rule, spelled for PostgREST: a row is
+  // untouchable while `meta.claimedAt` is inside CLAIM_LEASE_MS, and honestly
+  // `due` again once the lease has lapsed - so a crashed drainer's zombie is
+  // still replaceable and can never block the shop's next reply on the unique
+  // index forever (a bare `claimedAt is null` would). `->` rather than `->>`
+  // on the comparison: the jsonb path keeps claimedAt a NUMBER, so `lt` is a
+  // numeric order and not a text one.
+  // Encoded at the interpolation site like every other bound in the repo. It
+  // is an epoch-ms NUMBER, not a timestamp, so pgTimestamp (which would turn
+  // this numeric jsonb compare into a text one) is deliberately NOT used.
+  const leaseLapsedBefore = String(Date.now() - CLAIM_LEASE_MS);
+  const unleased = `&or=(meta->>claimedAt.is.null,meta->claimedAt.lt.${encodeURIComponent(
+    leaseLapsedBefore
+  )})`;
+  await sbDelete("wa_outbox", `${scope}${unleased}`).catch(() => {});
   // HUMANIZE AT PARK (owner report 3, 3.4 #2). The drain re-guards every
   // parked row with `alreadyHumanized: true` - a promise this path never kept:
   // rows parked here went out with the raw composer text, so the dominant
@@ -148,14 +174,36 @@ export async function parkOutboxOnce(row: {
   let ok = await sbInsert("wa_outbox", [record]);
   if (!ok) {
     // The insert failed. Either a concurrent compose already queued a pending
-    // row (unique-index conflict - a reply IS queued, nothing to do) OR a
-    // transient write blip lost it (the delete above may already have removed the
-    // prior pending reply, so we must not leave the shop silent). Distinguish by
-    // probing for an existing pending auto row.
-    const existing = await sbSelect<{ id: number }>("wa_outbox", `select=id&${scope}&limit=1`).catch(
-      () => [] as { id: number }[]
-    );
-    if (existing.length === 0) {
+    // row (unique-index conflict - a reply IS queued, nothing to do), OR the
+    // surviving row is the one a drainer is mid-send on (the lease above kept
+    // it - see below), OR a transient write blip lost it (the delete above may
+    // already have removed the prior pending reply, so we must not leave the
+    // shop silent). Distinguish by probing for an existing pending auto row -
+    // on the plain scope, so a leased row is found and named.
+    const existing = await sbSelect<{ id: number; not_before?: string; meta: OutboxMeta | null }>(
+      "wa_outbox",
+      `select=id,not_before,meta&${scope}&limit=1`
+    ).catch(() => [] as { id: number; not_before?: string; meta: OutboxMeta | null }[]);
+    const live = existing.find((r) => outboxState(r.not_before, r.meta, Date.now()) === "sending");
+    if (live) {
+      // THE COLLISION THE LEASE EXISTS FOR - SAID OUT LOUD, NOT SWALLOWED.
+      // The in-flight draft is the one that reaches the shop; this newer one
+      // is not queued and must not be reported as if it were. The drain's own
+      // stale-draft gate is the designed resolution for a thread that moved
+      // on while a draft waited (it drops the draft and schedules a
+      // recompose), so nothing is retried here - a second row for this shop
+      // is exactly the double this guard prevents.
+      await insertUserEvent(row.senderKey, {
+        kind: "wa-park-failed",
+        vendor_id: String((row.meta as { vendorId?: string } | undefined)?.vendorId ?? ""),
+        vendor_name: String(
+          (row.meta as { vendorName?: string } | undefined)?.vendorName ?? row.toNumber
+        ),
+        detail: `Did not queue a newer composed reply to +${row.toNumber} (sender ${row.senderKey}): outbox row ${live.id} is mid-send under a live drain lease (claimed ${
+          Number.isFinite(Number(live.meta?.claimedAt)) ? new Date(Number(live.meta?.claimedAt)).toISOString() : "unknown"
+        }). The in-flight draft goes out; the drain's stale-draft gate recomposes if the thread has moved on.`,
+      }).catch(() => {});
+    } else if (existing.length === 0) {
       ok = await sbInsert("wa_outbox", [record]); // retry the blip once
       if (!ok) {
         await insertUserEvent(row.senderKey, {

@@ -27,7 +27,7 @@
 // existing JSONB. No column, no schema change, nothing for the owner to run.
 
 import "server-only";
-import { sbSelect, sbUpdate, sbDelete } from "../runtime-config";
+import { sbSelect, sbUpdate, sbDelete, sbInsert } from "../runtime-config";
 
 /**
  * How long a drainer may hold a claimed row. Long enough to cover a guard
@@ -164,6 +164,61 @@ export async function releaseOutboxRow(
 /** The message left (or was deliberately dropped): retire its row. */
 export async function completeOutboxRow(id: number): Promise<void> {
   await sbDelete("wa_outbox", `id=eq.${id}`).catch(() => {});
+}
+
+/**
+ * THE SENT HALF OF THE LIFECYCLE, WRITTEN HONESTLY (audit F014).
+ *
+ * A delivered send is anchored by its outbound whatsapp_messages row: that row
+ * is what resolveThreadContext finds when the shop answers, and without it the
+ * reply dies as `no-rfq-thread` for the life of the thread. The drain, the mass
+ * route and the price re-check all wrote it with a bare `await sbInsert(...)`
+ * and discarded the boolean - and sbInsert never throws, it answers false on
+ * any non-2xx or timed-out write. So one blip on that insert, after the shop
+ * had already received the message, silently killed the conversation while
+ * the card said "contacted".
+ *
+ * This retries the insert once and, if the anchor is still lost, writes the
+ * existing `outbound-log-failed` breadcrumb with the join columns stamped as
+ * COLUMNS (or it is invisible to every per-user surface) and the provider id
+ * in the detail, so a later sweep can re-anchor the thread. It deliberately
+ * does NOT defer the caller's retire of the outbox row: a delivered row left
+ * pending is a second real WhatsApp message to the shop on the next drain,
+ * which is worse than a lost log row. The common case costs exactly the one
+ * insert it always did.
+ */
+export async function recordOutboundAnchor(
+  row: Record<string, unknown> & { wa_message_id?: string | null; body?: string },
+  who: {
+    senderKey: string;
+    toNumber: string;
+    vendorId?: string;
+    vendorName?: string;
+    channel?: string;
+  }
+): Promise<boolean> {
+  let ok = await sbInsert("whatsapp_messages", [row]).catch(() => false);
+  if (!ok) ok = await sbInsert("whatsapp_messages", [row]).catch(() => false);
+  if (ok) return true;
+  const raw = (row.raw ?? {}) as { kind?: unknown };
+  await sbInsert("agent_events", [
+    {
+      kind: "outbound-log-failed",
+      user_email: who.senderKey,
+      to_number: who.toNumber,
+      vendor_id: String(who.vendorId ?? ""),
+      vendor_name: String(who.vendorName ?? who.toNumber),
+      detail: JSON.stringify({
+        email: who.senderKey,
+        channel: who.channel ?? "personal-wa",
+        waMessageId: row.wa_message_id ?? null,
+        kind: typeof raw.kind === "string" ? raw.kind : null,
+        body: String(row.body ?? "").slice(0, 200),
+        note: "the message reached the shop but its outbound row was lost twice - the thread has no anchor until it is re-anchored",
+      }).slice(0, 800),
+    },
+  ]).catch(() => {});
+  return false;
 }
 
 /**

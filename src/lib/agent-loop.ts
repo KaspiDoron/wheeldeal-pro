@@ -458,15 +458,33 @@ export async function processVendorReply(opts: {
         // hands it back, so only an instance killed mid-turn leaves one
         // hanging. Past the lease with nothing settled, that message has been
         // sitting answered-by-nobody, and this is the one place that can take
-        // it over. Deleting first keeps the retake atomic - whoever wins the
-        // re-insert owns the turn.
-        const { claimIsDeadTurn } = await import("./wa/inbound-claim");
+        // it over.
+        //
+        // THE RETAKE IS CONDITIONAL (audit F020). It used to delete by key
+        // alone, under a comment calling that atomic - but two sweeps on two
+        // containers (the ping cron and a traveller's poll) both read the same
+        // dead row, and the second one's unconditional delete removed the
+        // FIRST retaker's fresh claim before re-inserting its own. Both
+        // reached claimedReply; the one that then lost claimThreadTurn
+        // released the only surviving row, the winner's settle patched
+        // nothing, and the next sweep answered the shop a second time.
+        //
+        // sbDeleteReturning with the lease predicate IN the filter is the
+        // repo's atomic-claim shape: the delete can only match the row this
+        // caller actually read - unsettled and older than CLAIM_LEASE_MS - so
+        // a sibling's fresh retake is untouchable and the second retaker gets
+        // nothing back and stands down. Same round trips as before (one delete,
+        // one insert). Both predicate columns were just read strictly above,
+        // so a pre-migration schema never reaches this filter.
+        const { claimIsDeadTurn, CLAIM_LEASE_MS } = await import("./wa/inbound-claim");
         if (!claimIsDeadTurn(existing[0])) return; // a live delivery owns it
-        const { sbDelete } = await import("./runtime-config");
-        await sbDelete(
+        const { sbDeleteReturning, pgTimestamp } = await import("./runtime-config");
+        const retired = await sbDeleteReturning<{ wa_message_id: string }>(
           "wa_processed",
-          `wa_message_id=eq.${encodeURIComponent(existing[0].wa_message_id)}`
-        ).catch(() => {});
+          `wa_message_id=eq.${encodeURIComponent(existing[0].wa_message_id)}` +
+            `&settled_at=is.null&created_at=lt.${pgTimestamp(Date.now() - CLAIM_LEASE_MS)}`
+        );
+        if (retired.length === 0) return; // a sibling retook it first - its fresh claim is live
         const retaken = await sbInsertReturning<{ wa_message_id: string }>("wa_processed", [
           { wa_message_id: replyKey },
         ]);

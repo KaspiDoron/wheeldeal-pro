@@ -377,14 +377,49 @@ export async function POST(req: Request) {
       });
     }
     // Drain due graph wakeups (strategic waits + judge jobs) opportunistically.
-    try {
-      const { drainGraphWakeups } = await import("@/lib/graph/engine");
-      await drainGraphWakeups(async (_s, to, message) => {
-        const r = await sendWhatsApp(to, message);
-        return { ok: r.ok && r.channel === "cloud-api", error: r.error };
-      });
-    } catch {
-      /* best-effort */
+    //
+    // SCOPED, BOUNDED, AND ON THE OWNER'S WIRE (audit F254). This used to be
+    // `drainGraphWakeups(cb)` with no options: the SELECT ran fleet-wide
+    // (`not_before=lte.now&limit=24`), so one shop's webhook claimed up to 24
+    // OTHER travellers' due ticks and ran their full multi-agent composes
+    // inside a stranger's request - the head-of-line stall the Evolution
+    // webhook tail (wa/ingest.ts) was already scoped and bounded to end. And
+    // the callback threw the wakeup's own senderKey away and posted through
+    // sendWhatsApp, the shared company number, so traveller B's next bargain
+    // left on a wire B's shop had never seen - the transport contract says
+    // the reply leg is ALWAYS the traveller's own linked number. resolveTransport
+    // cannot choose the Cloud sender by design (transports/index.ts keeps
+    // "cloud" out of the adapter set) and the evolution adapter IS
+    // sendFromUser, so this calls it directly like every other drain.
+    //
+    // One drain per receiver this delivery actually resolved; an unattributed
+    // batch drains nothing. Each carries its own budgetMs because a race does
+    // not cancel (see the ingest tail): the loser must stop taking rows
+    // itself, or it freezes at the response boundary holding wakeup leases.
+    // The budget is drainOutbox's 5s floor rather than the race's 3s, for the
+    // same reason the poll routes use it - a lower figure is raised silently.
+    {
+      const DRAIN_BUDGET_MS = 3_000;
+      const DRAIN_STOP_MS = 5_000;
+      const boundedDrain = <T,>(p: Promise<T>) =>
+        Promise.race([p, new Promise((r) => setTimeout(r, DRAIN_BUDGET_MS))]);
+      const receivers = new Set(
+        inbound.map(({ receiver }) => receiver).filter((r): r is string => Boolean(r))
+      );
+      for (const receiver of receivers) {
+        try {
+          const { drainGraphWakeups } = await import("@/lib/graph/engine");
+          const { sendFromUser } = await import("@/lib/evolution");
+          await boundedDrain(
+            drainGraphWakeups(
+              (senderKey, to, text, lane) => sendFromUser(senderKey, to, text, true, { lane }),
+              { userEmail: receiver, budgetMs: DRAIN_STOP_MS }
+            ).catch(() => 0)
+          );
+        } catch {
+          /* best-effort */
+        }
+      }
     }
     // FAST COUNTER-REPLY: our just-composed reply is parked ~10-40s out, so kick
     // the dispatchers to wait it out in-process and deliver in seconds.

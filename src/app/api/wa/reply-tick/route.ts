@@ -39,8 +39,15 @@ export const maxDuration = 60;
 
 const CLAIM_WINDOW_MS = 20_000;
 // Inside Cloud Run's --timeout 90 (the real ceiling - `maxDuration` above is
-// a Vercel-only hint, inert on standalone Next), with room to return.
+// a Vercel-only hint, inert on standalone Next), with room to return. A WALL
+// over the whole invocation (audit F064): the clock starts at entry, every
+// drain is clipped to what is left, and none starts below the drain's floor -
+// the same arithmetic as the chain tick. One admitted row's in-flight send may
+// still overshoot (worst case ~29s); 45s + 29s lands inside the 90s kill.
 const IN_CALL_BUDGET_MS = 45_000;
+// drainOutbox raises any budget below this to it silently, so a drain that
+// starts with less than the floor left would cross the wall - do not start it.
+const DRAIN_FLOOR_MS = 5_000;
 const MAX_HOPS = 12; // ~9 min of autonomous reply progression per kick
 const CHAIN_HORIZON_MS = 3 * 60_000; // a reply further out than this is not urgent
 
@@ -57,6 +64,9 @@ export async function GET(req: Request) {
   const sender = (url.searchParams.get("sender") ?? "").trim();
   if (!sender) return NextResponse.json({ error: "sender required" }, { status: 400 });
   const hop = Math.max(0, Number(url.searchParams.get("hop")) || 0);
+  // The clock starts HERE, above the claim: its round trip is invocation time.
+  const started = Date.now();
+  const remainingMs = () => IN_CALL_BUDGET_MS - (Date.now() - started);
 
   const slot = slotFor(sender, Date.now());
   const claim = await sbInsertClaim("wa_send_claims", {
@@ -73,14 +83,17 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: true, ran: false, why: "another reply runner" });
   }
 
-  const started = Date.now();
   let drained = 0;
   const drainOnce = async () => {
     try {
+      // What is LEFT of the wall, never a fixed figure - and not at all below
+      // the floor. Rows not reached stay due for the next hop.
+      const remaining = remainingMs();
+      if (remaining < DRAIN_FLOOR_MS) return;
       const { drainOutbox } = await import("@/lib/wa-guard");
       drained += await drainOutbox(
         (k, to, text, lane) => sendFromUser(k, to, text, true, { lane }),
-        { replyOnly: true, senderKey: sender, budgetMs: 40_000 }
+        { replyOnly: true, senderKey: sender, budgetMs: remaining }
       );
     } catch (e) {
       console.error("[wa:reply-tick]", e instanceof Error ? e.message : e);
@@ -104,8 +117,9 @@ export async function GET(req: Request) {
   for (;;) {
     const due = await nextReplyDueMs();
     if (due === null) break;
-    const remaining = IN_CALL_BUDGET_MS - (Date.now() - started);
-    if (due >= remaining) break;
+    const remaining = remainingMs();
+    // The wait AND a floor-sized drain after it must both fit inside the wall.
+    if (Math.max(0, due) + 400 + DRAIN_FLOOR_MS > remaining) break;
     await new Promise((r) => setTimeout(r, Math.max(0, due) + 400));
     await drainOnce();
   }

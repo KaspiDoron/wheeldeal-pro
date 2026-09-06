@@ -312,6 +312,7 @@ export async function POST(req: Request) {
 
   const { guardOutbound, afterSend } = await import("@/lib/wa-guard");
   const { sendFromUser } = await import("@/lib/evolution");
+  const { recordOutboundAnchor } = await import("@/lib/wa/outbox-lifecycle");
 
   let sent = 0;
   let queued = 0;
@@ -418,7 +419,9 @@ export async function POST(req: Request) {
     if (r.ok) {
       sent += 1;
       await afterSend(session.email, digits);
-      await sbInsert("whatsapp_messages", [
+      // The anchor, with its result read (audit F014) - retried once, and a
+      // lost row is breadcrumbed rather than silently orphaning the thread.
+      await recordOutboundAnchor(
         {
           to_number: digits,
           body: guard.text,
@@ -426,7 +429,14 @@ export async function POST(req: Request) {
           direction: "outbound",
           raw: { channel: "personal-wa", sender: session.email, ok: true, ...meta },
         },
-      ]).catch(() => {});
+        {
+          senderKey: session.email,
+          toNumber: digits,
+          vendorId: info.vendorId,
+          vendorName: info.name,
+          channel: "personal-wa",
+        }
+      );
       detail.push({ name: info.name, state: "sent" });
     } else {
       // Release the idempotency claim on failure, or a failed recheck to a shop

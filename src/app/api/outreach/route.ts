@@ -666,7 +666,11 @@ async function handlePost(req: Request) {
       // pacing loss / unknown claim state: park honestly instead of racing.
       const { jitteredHold } = await import("@/lib/wa/pacing");
       const notBefore = jitteredHold(Date.now(), 1, 2);
-      await sbInsert("wa_outbox", [
+      // "Honestly" includes READING THE INSERT (audit F015): sbInsert never
+      // throws, so the old `.catch(() => {})` was dead and the false it
+      // returns on a lost write was discarded - the traveller was told the
+      // message was queued with a time, over a row nothing could ever send.
+      const parked = await sbInsert("wa_outbox", [
         {
           sender_key: session.email,
           to_number: digits,
@@ -681,15 +685,27 @@ async function handlePost(req: Request) {
             reason: claim.kind === "pacing" ? "human pacing gap" : "sync-retry",
           },
         },
-      ]).catch(() => {});
-      // FUNNEL LEDGER: parked on a pacing/sync hold - queued, not contacted.
-      if (kind === "rfq") {
+      ]);
+      // FUNNEL LEDGER: parked on a pacing/sync hold - queued, not contacted -
+      // and only when the row actually landed.
+      if (parked && kind === "rfq") {
         const { advanceThreadStage } = await import("@/lib/funnel/stages");
         await advanceThreadStage(
           { userEmail: session.email, toNumber: digits, vendorId, vendorName, transport: "evolution" },
           "contact_queued",
           claim.kind === "pacing" ? "RFQ parked: human pacing gap" : "RFQ parked: sync-retry"
         ).catch(() => {});
+      }
+      if (!parked) {
+        // The same words the mass route's card already handles: nothing was
+        // sent, nothing is queued, and the traveller can tap again.
+        return NextResponse.json({
+          allowed: true,
+          sent: false,
+          queued: false,
+          reason: "queue-unavailable",
+          error: "Could not queue the message right now - nothing was sent. Try again in a moment.",
+        });
       }
       return NextResponse.json({
         allowed: true,
