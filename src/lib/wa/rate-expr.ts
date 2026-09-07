@@ -234,6 +234,15 @@ export function scanRates(text: string): RateExpr[] {
 
     const quantity = hasQuantity ? parseInt(rawQty, 10) : 1;
     if (!(quantity > 0)) continue;
+    // A DAY RANGE IS NOT A RATE. "Rental period 2-4 days ok" and "Available for
+    // 4-7 days only" satisfy the separator test above, because the bare hyphen
+    // is in SEP - so the second number was read as the denominator and the
+    // first as the money, minting a 1-per-day phantom out of a message that
+    // holds no money at all. The tell is arithmetic, not vocabulary: a rate
+    // always has more money than units, while a duration range always runs low
+    // to high. Only expressions with NO currency marker are judged this way, so
+    // "500rs/2days" and "1200b./6days" are untouched.
+    if (hasQuantity && !hasCurrency && amount <= quantity) continue;
     const unit = unitOf(rawUnit);
     const perDay = amount / (quantity * UNIT_DAYS[unit]);
     if (!(perDay > 0)) continue;

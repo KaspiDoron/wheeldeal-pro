@@ -2835,7 +2835,14 @@ export async function buildTurnFromThread(
     shopDigits: toDigits,
   });
   const floorRegion = ctx.region || undefined;
-  const floor = await floorPriceFor(floorRegion, rfq).catch(() => null);
+  // The floor speaks the currency this path already resolved (audit F095) -
+  // otherwise `defaultFloor` re-derives one from a label like "My current
+  // location", answers USD, and `floorSameCur` below is null on every tick.
+  const { countryForShop } = await import("../copy/region");
+  const floor = await floorPriceFor(floorRegion, rfq, {
+    currency: cur ?? undefined,
+    countryRegion: countryForShop(toDigits) || undefined,
+  }).catch(() => null);
   const floorSameCur = floor && cur && floor.currency === cur ? floor : null;
 
   return {

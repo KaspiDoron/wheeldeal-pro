@@ -78,7 +78,11 @@ export function effectivePriceFor(args: {
   if (board && Number(board.pricePerDay) > 0) {
     return {
       pricePerDay: Number(board.pricePerDay),
-      currency: board.currency ?? null,
+      // A board row with no currency of its own borrows the ROW's (F097): the
+      // reading is stamped from the same reconciliation the offer used, and a
+      // null here is what the card turns into "$" through its own last-resort
+      // default - a baht board rendered as dollars.
+      currency: board.currency ?? args.rowCurrency ?? null,
       source: "menu-photo",
       vehicle: board.vehicle ?? null,
     };
@@ -92,7 +96,7 @@ export function effectivePriceFor(args: {
     const pick = opts.reduce((a, b) => (a.pricePerDay <= b.pricePerDay ? a : b));
     return {
       pricePerDay: pick.pricePerDay,
-      currency: pick.currency ?? null,
+      currency: pick.currency ?? args.rowCurrency ?? null,
       source: "menu",
       vehicle: pick.label ?? null,
     };

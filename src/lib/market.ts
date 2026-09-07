@@ -83,12 +83,32 @@ const FRESH_MS = 21 * 24 * 3600_000; // web-research refresh cadence: every 3 we
 /**
  * Lowest realistic daily price for this spec near this region.
  * Triggers a lazy AI refresh (once a week per area) when data is missing/stale.
+ *
+ * THE FLOOR HAS TO SPEAK THE THREAD'S CURRENCY (audit F095).
+ *
+ * `defaultFloor` used to re-derive its own currency with
+ * `currencyForRegion(region) ?? "USD"`, and `currencyForRegion` matches nothing
+ * in the labels the geocoder actually leaves behind - "My current location", a
+ * raw "8.0000, 98.0000" pin. So a +66 shop's price of record was THB while its
+ * floor came back USD, `floor.currency === cur` was false, and every
+ * price-sanity net on that thread was skipped. Two optional inputs close it,
+ * both of which the caller already has in hand:
+ *
+ *   `currency`      - the currency the thread ALREADY resolved (phone prefix
+ *                     included). Used instead of re-deriving one, and when the
+ *                     conversion table has no rate for it the answer is NULL:
+ *                     an absent floor is honest, an invented one is not.
+ *   `countryRegion` - the shop's country, added to the stored-row lookup as an
+ *                     EXTRA set of keys. Not a swap: the area row for
+ *                     "Ao Nang, Thailand" is still preferred over "thailand".
  */
 export async function floorPriceFor(
   region: string | undefined,
-  rfq: StructuredRFQ
+  rfq: StructuredRFQ,
+  opts: { currency?: string; countryRegion?: string } = {}
 ): Promise<{ floor: number; typical: number | null; currency: string } | null> {
-  const keys = regionKeysFor(region);
+  // Region keys first (most specific), then the shop-country keys, de-duped.
+  const keys = [...new Set([...regionKeysFor(region), ...regionKeysFor(opts.countryRegion)])];
   if (!keys.length) return null;
   const vkey = vehicleKeyFor(rfq);
 
@@ -96,12 +116,10 @@ export async function floorPriceFor(
     "market_floor_prices",
     `select=region_key,vehicle_key,currency,floor_per_day,typical_per_day,updated_at&vehicle_key=eq.${encodeURIComponent(
       vkey
-    )}&region_key=in.(${keys.map((k) => `"${k}"`).join(",")})&limit=4`
+    )}&region_key=in.(${keys.map((k) => `"${k}"`).join(",")})&limit=6`
   );
-  // Prefer the most specific (area) row.
-  const row =
-    rows.find((r) => r.region_key === keys[0]) ??
-    rows.find((r) => r.region_key === keys[1]);
+  // Prefer the most specific (area) row, in key order.
+  const row = keys.map((k) => rows.find((r) => r.region_key === k)).find(Boolean);
 
   const stale =
     !row ||
@@ -114,7 +132,7 @@ export async function floorPriceFor(
   if (row && row.floor_per_day > 0) {
     return { floor: row.floor_per_day, typical: row.typical_per_day, currency: row.currency };
   }
-  return defaultFloor(region, vkey);
+  return defaultFloor(region, vkey, opts);
 }
 
 export interface GroundedBenchmark {
@@ -224,20 +242,30 @@ import { SCOOTER_RELATIVE, scalesFromScooter } from "./vehicle/class-profile";
 // side; the AI refresh replaces them with area-accurate numbers.
 function defaultFloor(
   region: string | undefined,
-  vkey: string
+  vkey: string,
+  opts: { currency?: string; countryRegion?: string } = {}
 ): { floor: number; typical: number | null; currency: string } | null {
   // Country-researched seed first - the most accurate zero-AI answer we have,
   // but ONLY for the buckets it can honestly scale to. A car is not a big
   // scooter, so a car bucket falls through to its own baseline below rather
   // than to the local scooter floor times a constant.
+  //
+  // The shop-country key is consulted after the region's own, so a label with
+  // no country token ("My current location") still reaches its country's seed.
   const ratio = SCOOTER_RELATIVE[vkey];
-  const country = regionKeysFor(region).pop();
-  const seed = country ? COUNTRY_SCOOTER_FLOOR[country] : undefined;
+  const countryKeys = [
+    regionKeysFor(region).pop(),
+    regionKeysFor(opts.countryRegion).pop(),
+  ].filter((k): k is string => Boolean(k));
+  const seed = countryKeys.map((k) => COUNTRY_SCOOTER_FLOOR[k]).find(Boolean);
   if (seed && scalesFromScooter(vkey) && ratio) {
     const floor = Math.round(seed.perDay * ratio);
     return { floor, typical: Math.round(floor * 1.6), currency: seed.cur };
   }
-  const cur = currencyForRegion(region) ?? "USD";
+  // The currency the CALLER already resolved wins - it consulted the shop's
+  // phone prefix, which this module cannot see. Only when no caller supplied
+  // one does the old region-only derivation (and its USD last resort) apply.
+  const cur = opts.currency || currencyForRegion(region) || currencyForRegion(opts.countryRegion) || "USD";
   // Fallback: USD baseline converted by rough purchasing-power multipliers.
   // Lowest realistic walk-in day rate, in USD, per bucket. The CAR rows are
   // researched car prices rather than a multiple of a scooter: an economy car

@@ -916,7 +916,18 @@ export async function composeBargain(opts: {
   // still show the English draft to the traveller, who decides.
   localizeFailed?: boolean;
 }> {
-  const cur = opts.currency || currencyForRegion(opts.region) || "USD";
+  // THE CURRENCY OF RECORD, OR NONE AT ALL (F094).
+  //
+  // This chain used to end in `|| "USD"`, so a caller that could not resolve a
+  // currency - the manual Bargain route on a country-less region label, or the
+  // engine when the shop's prefix names no country - composed a DOLLAR ask to
+  // a Thai shop, and `money()` printed the very "$" the money rule below then
+  // swore was the shop's own local money. Unknown is now UNDEFINED: `amt`
+  // prints a bare number for it, the ask goes numberless, and the rule tells
+  // the model to mirror whatever money the shop itself used.
+  const cur = opts.currency || currencyForRegion(opts.region) || undefined;
+  /** Money for the prompt: the local currency when we know it, a bare number when we do not. */
+  const amt = (n: number) => (cur ? money(n, cur) : Math.round(n).toLocaleString());
   // Owner-tuned thresholds (defaults = the historical literals below).
   const { getPolicyOverlay, DEFAULT_OVERLAY } = await import("./ops/overlay");
   const overlay = await getPolicyOverlay().catch(() => DEFAULT_OVERLAY);
@@ -1049,13 +1060,15 @@ export async function composeBargain(opts: {
       : "") +
     `Preferred tactic: "${tactic.label}" (${tactic.script}). ` +
     (target
-      ? `THE ASK: ask if ${money(target, cur)}/day is possible for the ${opts.rfq.durationDays}-day rental - this number is anchored to the real local market floor. NEVER propose a number lower than ${money(opts.floorPricePerDay ?? Math.round((quoted ?? target) * overlay.lowballGuard), cur)} - unrealistic lowballs insult the shop. ` +
+      ? `THE ASK: ask if ${amt(target)}/day is possible for the ${opts.rfq.durationDays}-day rental - this number is anchored to the real local market floor. NEVER propose a number lower than ${amt(opts.floorPricePerDay ?? Math.round((quoted ?? target) * overlay.lowballGuard))} - unrealistic lowballs insult the shop. ` +
         (quoted
-          ? `HARD ARITHMETIC RULE: you are asking the shop to LOWER their price, so the ONLY number you may propose is ${money(target, cur)}/day - never a number equal to or ABOVE their current ${money(quoted, cur)}/day (asking for MORE than they offered is nonsensical). `
+          ? `HARD ARITHMETIC RULE: you are asking the shop to LOWER their price, so the ONLY number you may propose is ${amt(target)}/day - never a number equal to or ABOVE their current ${amt(quoted)}/day (asking for MORE than they offered is nonsensical). `
           : "")
       : "Do NOT propose any specific number - just warmly ask for their best price. ") +
     "ABSOLUTE RULE: never claim another shop gave you a price unless one is stated in LEVERAGE below - do NOT invent a competitor, a rival number, or any price you were not given. " +
-    `CRITICAL MONEY RULE: talk about price ONLY in ${cur} - the shop's own local currency. Never write a dollar sign or convert to USD unless ${cur} is USD. Match the numbers the shop uses. ` +
+    (cur
+      ? `CRITICAL MONEY RULE: talk about price ONLY in ${cur} - the shop's own local currency. Never write a dollar sign or convert to USD unless ${cur} is USD. Match the numbers the shop uses. `
+      : "CRITICAL MONEY RULE: we do not know this shop's currency, so never write a currency symbol, a dollar sign or any conversion - use bare numbers and mirror exactly the money words the shop itself used. ") +
     (opts.localLanguage && opts.region
       ? `CRITICAL: think and write NATIVELY in the main local language of ${opts.region} from the first word - never compose in English and translate. Use the casual street register a savvy local uses at the market: local haggling phrases, local currency habits, natural slang (respectful, never rude). Short and punchy. `
       : `The shop speaks a different language than you, so write in SIMPLE, slightly BROKEN non-native English - the way a friendly foreign traveller who learned English as a second language actually types on WhatsApp. Short, telegraphic sentences. Basic common words only. It is FINE (and better) to drop small words or articles occasionally ("is too much for me", "I rent 5 days") - do NOT write polished, fluent, or business English. Stay polite, warm and 100% clear - never rude, never confusing. End with ONE warm emoji. NO idioms, NO wordplay, NO salesy tone. ` +
@@ -1111,31 +1124,16 @@ export async function composeBargain(opts: {
     const derived = opts.rivalDerivedFromDays;
     const leverageFact =
       typeof derived === "number" && derived > 0
-        ? `a real nearby shop in this same search quoted a ${derived}-day package that WORKS OUT TO about ${money(
-            opts.rivalPricePerDay,
-            cur
-          )}/day. That is our arithmetic on their package, NOT a per-day price they gave for ${nDays(
+        ? `a real nearby shop in this same search quoted a ${derived}-day package that WORKS OUT TO about ${amt(opts.rivalPricePerDay)}/day. That is our arithmetic on their package, NOT a per-day price they gave for ${nDays(
             opts.rfq.durationDays
-          )} - say "their ${derived}-day price works out to about ${money(
-            opts.rivalPricePerDay,
-            cur
-          )} a day", never "they gave me ${money(opts.rivalPricePerDay, cur)} a day"`
-        : `a real nearby shop in this same search gave ${money(
-            opts.rivalPricePerDay,
-            cur
-          )}/day for the SAME ${vehicleTerm(opts.rfq.vehicleClass)} for these ${nDays(
+          )} - say "their ${derived}-day price works out to about ${amt(opts.rivalPricePerDay)} a day", never "they gave me ${amt(opts.rivalPricePerDay)} a day"`
+        : `a real nearby shop in this same search gave ${amt(opts.rivalPricePerDay)}/day for the SAME ${vehicleTerm(opts.rfq.vehicleClass)} for these ${nDays(
             opts.rfq.durationDays
           )}`;
     systemWithDirectives +=
-      `\nHARD LEVERAGE RULE: ${leverageFact}. You MUST name the ${money(
-        opts.rivalPricePerDay,
-        cur
-      )} figure AND the ${nDays(
+      `\nHARD LEVERAGE RULE: ${leverageFact}. You MUST name the ${amt(opts.rivalPricePerDay)} figure AND the ${nDays(
         opts.rfq.durationDays
-      )} - never omit or soften them away. Then ask THIS shop for ${money(
-        beat,
-        cur
-      )}/day, which is strictly LOWER than the other offer. ` +
+      )} - never omit or soften them away. Then ask THIS shop for ${amt(beat)}/day, which is strictly LOWER than the other offer. ` +
       `NEVER ask them to "match" it, to do "the same", or to "get close to" it: a matching price leaves the traveller exactly where they already are, so the only outcome worth asking for is a LOWER one. ` +
       `Very simple broken English, e.g. "another shop give me ${opts.rivalPricePerDay} per day for ${nDays(
         opts.rfq.durationDays
@@ -1175,8 +1173,9 @@ export async function composeBargain(opts: {
   }
 
   const user =
-    `Vehicle: ${spec}. Currency: ${cur}. ` +
-    (quoted ? `They quoted ${money(quoted, cur)}/day. ` : "No quote yet. ") +
+    `Vehicle: ${spec}. ` +
+    (cur ? `Currency: ${cur}. ` : "Currency: unknown - mirror the shop's own, never a symbol. ") +
+    (quoted ? `They quoted ${amt(quoted)}/day. ` : "No quote yet. ") +
     // BEAT, NEVER MATCH - the second of the two composeBargain sites that
     // carried "match or beat it" verbatim. See the HARD LEVERAGE RULE above.
     (opts.rivalPricePerDay
@@ -1184,31 +1183,23 @@ export async function composeBargain(opts: {
           typeof opts.rivalDerivedFromDays === "number" && opts.rivalDerivedFromDays > 0
             ? `another shop in the traveller's search quoted a ${
                 opts.rivalDerivedFromDays
-              }-day package that works out to about ${money(
-                opts.rivalPricePerDay,
-                cur
-              )}/day for the same ${vehicleTerm(
+              }-day package that works out to about ${amt(opts.rivalPricePerDay)}/day for the same ${vehicleTerm(
                 opts.rfq.vehicleClass
               )}. Say it as "works out to about" - they never quoted that as a daily price`
-            : `another shop in the traveller's search ALREADY offered ${money(
-                opts.rivalPricePerDay,
-                cur
-              )}/day for the same ${vehicleTerm(opts.rfq.vehicleClass)} for this ${
+            : `another shop in the traveller's search ALREADY offered ${amt(opts.rivalPricePerDay)}/day for the same ${vehicleTerm(opts.rfq.vehicleClass)} for this ${
                 opts.rfq.durationDays
               }-day rental`
-        }. Your message MUST state that ${money(
-          opts.rivalPricePerDay,
-          cur
-        )} figure and the ${nDays(
+        }. Your message MUST state that ${amt(opts.rivalPricePerDay)} figure and the ${nDays(
           opts.rfq.durationDays
-        )}, and then ask THIS shop for a price BELOW it to close now - make clear you'll rent from whoever is cheaper. Never ask them to match it, to do the same, or to get close to it; matching wins the traveller nothing. Friendly, never threatening. Do NOT omit the ${money(
-          opts.rivalPricePerDay,
-          cur
-        )} number or the ${nDays(opts.rfq.durationDays)}. `
+        )}, and then ask THIS shop for a price BELOW it to close now - make clear you'll rent from whoever is cheaper. Never ask them to match it, to do the same, or to get close to it; matching wins the traveller nothing. Friendly, never threatening. Do NOT omit the ${amt(opts.rivalPricePerDay)} number or the ${nDays(opts.rfq.durationDays)}. `
       : "") +
     (target
-      ? `Write our single friendly ask for ${money(target, cur)}/day. All amounts in ${cur}.`
-      : `Write one friendly message asking their best price. All amounts in ${cur}.`);
+      ? `Write our single friendly ask for ${amt(target)}/day.${
+          cur ? ` All amounts in ${cur}.` : " Use bare numbers - no currency symbol."
+        }`
+      : `Write one friendly message asking their best price.${
+          cur ? ` All amounts in ${cur}.` : " Use bare numbers - no currency symbol."
+        }`);
 
   // When bargaining in the LOCAL language, ask for BOTH the local message and
   // a short plain-English gloss (as JSON) so the traveller can read what their
@@ -1248,7 +1239,7 @@ export async function composeBargain(opts: {
   // can tell the user this was a template, not the real agent brain.
   const days = opts.rfq.durationDays;
   const vt = vehicleTerm(opts.rfq.vehicleClass);
-  const q = quoted ? money(quoted, cur) : undefined;
+  const q = quoted ? amt(quoted) : undefined;
   // BEAT, NEVER MATCH - in the LLM-down path too.
   //
   // Every rival template below used `t ?? rival`, so with no computed target the
@@ -1265,14 +1256,14 @@ export async function composeBargain(opts: {
           floorPerDay: opts.floorPricePerDay,
         })
       : undefined;
-  const t = target ? money(target, cur) : beatAsk ? money(beatAsk, cur) : undefined;
-  const rival = opts.rivalPricePerDay ? money(opts.rivalPricePerDay, cur) : undefined;
+  const t = target ? amt(target) : beatAsk ? amt(beatAsk) : undefined;
+  const rival = opts.rivalPricePerDay ? amt(opts.rivalPricePerDay) : undefined;
   // Honest provenance for a per-day we divided out of their package.
   const rivalPhrase =
     typeof opts.rivalDerivedFromDays === "number" && opts.rivalDerivedFromDays > 0
       ? `another shop's ${opts.rivalDerivedFromDays}-day price works out to about ${rival}/day`
       : `another shop offered me ${rival}/day for the same ${vt}`;
-  const ask = t ?? (beatAsk ? money(beatAsk, cur) : rival);
+  const ask = t ?? (beatAsk ? amt(beatAsk) : rival);
   const fallbackPool = rival
     ? opts.round <= 0
       ? [

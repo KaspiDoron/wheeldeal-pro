@@ -96,11 +96,16 @@ they cannot drift.
 
 ### 0.1 The `offers` insert is off limits
 
-`src/lib/agent-loop.ts:1850-1876` is a four-rung degrading insert whose **rung 4
-IS `offerBase`** (`:1792-1816`), and rung 3 is
-`base = { ...offerBase, search_id: searchId }` (`:1850`). So any field added to
-`offerBase` or `base` is present in **all four rungs**: on a database missing
-that column every rung 400s and every priced offer is lost.
+`publishOfferRow` in `src/lib/agent-loop.ts` is a degrading insert whose **floor
+rung IS `offerBase`**, with `base = { ...offerBase, search_id: searchId }` the
+rung above it. So any field added to `offerBase` or `base` is present in **every
+rung**: on a database missing that column every rung 400s and every priced offer
+is lost.
+
+(Audit F011 later added one rung between the deposit rungs and `base` - the
+session stamp plus the provenance pair and nothing else - and a cached schema
+probe in front of the ladder, so a Supabase blip can no longer be read as a
+missing migration. The floor rung and this rule are unchanged.)
 
 The loss would have been invisible twice over. The final `sbInsert` return at
 `:1874` is discarded, and `"offers"` is not in `TELEMETRY_TABLES`
@@ -474,12 +479,10 @@ empty on the path that actually runs.
    `incr` and a never-resolving telemetry write, the turn's returned text is
    byte-identical to the no-hook run and the hook returns inside its ceiling.
 5. **Write target** - a recording double proves the tables written are exactly
-   the sidecar plus at most `agent_events`. *Conceded as partial:* the ideal
-   test would drive the four-rung ladder against a double that 400s on unknown
-   columns, but that block is inline in a very large function and extracting it
-   would break the literal grep that currently guards it. The ladder stays
-   untouched and stays guarded; this test asserts positively where retrieval
-   does write.
+   the sidecar plus at most `agent_events`. The ladder itself is now driven
+   against exactly such a double by `src/lib/offer-provenance-ladder.test.ts`
+   (audit F011): it moved into `publishOfferRow` in the same file, so the
+   literal greps that guard it still hold.
 6. **Erasure** - the filter builder produces the right query, the walker issues
    the delete, and `exportSelect` omits the vector.
 7. **Budget** - `tryConsume` on the new counter eventually returns false, which

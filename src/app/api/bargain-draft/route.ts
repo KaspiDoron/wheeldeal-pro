@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { composeBargain, runSafety, currencyForRegion } from "@/lib/agents";
+import { composeBargain, runSafety } from "@/lib/agents";
 import { getSession } from "@/lib/session";
 import { sbInsert, sbSelect } from "@/lib/runtime-config";
 import type { Vendor, StructuredRFQ } from "@/lib/types";
@@ -41,7 +41,25 @@ export async function POST(req: Request) {
   const vendor = body.vendor as Vendor;
   const region: string | undefined = body.region || undefined;
   const quoted: number | undefined = body.currentPricePerDay;
-  const cur = currencyForRegion(region) || "USD";
+  // THE SHARED SERVER CURRENCY CHAIN (F094).
+  //
+  // This route kept its own region-only lookup with a USD default, and
+  // `currencyForRegion` is a country-token regex that matches nothing in the
+  // labels the geocoder actually leaves behind ("My current location", a raw
+  // "8.0000, 98.0000" pin). So tapping Push harder on a +66 shop composed a
+  // DOLLAR ask, the server-authoritative rival lookup filtered `offers` by
+  // `currency=eq.USD` while every row in the hunt is stamped THB, and the
+  // market-floor gate below dropped the floor too. `resolveLocalCurrency` is
+  // the same order the engine uses - region label, then the SHOP'S PHONE
+  // PREFIX, then undefined. Never "USD": a currency we cannot resolve is a
+  // number without a symbol, not dollars. (Async and dynamic-import backed, so
+  // it stays on this interactive draft route - the reply path and the drain
+  // resolve their own currency already.)
+  const { resolveLocalCurrency } = await import("@/lib/local-currency");
+  const cur = await resolveLocalCurrency({
+    region,
+    shopDigits: digitsOnly(String(vendor.whatsapp ?? "")),
+  });
 
   // SERVER-AUTHORITATIVE DURATION (owner report 5 #7). The draft composed from
   // the CLIENT's live rfq with no reconciliation, then the send re-stamped that
@@ -128,8 +146,10 @@ export async function POST(req: Request) {
   let floorPrice: number | undefined;
   try {
     const { floorPriceFor } = await import("@/lib/market");
-    const floor = await floorPriceFor(region, rfq);
-    if (floor && floor.currency === cur) floorPrice = floor.floor;
+    // The floor is asked for in the currency of record, so the gate below can
+    // actually pass for a country-less label (F094/F095).
+    const floor = await floorPriceFor(region, rfq, { currency: cur });
+    if (floor && cur && floor.currency === cur) floorPrice = floor.floor;
   } catch {
     /* floor is an enhancement, never a blocker */
   }
@@ -153,7 +173,9 @@ export async function POST(req: Request) {
   let rivalDerivedFromDays: number | undefined;
   const clientHint = Number(body.rivalPricePerDay);
   try {
-    if (quoted) {
+    // No currency of record means no like-for-like comparison: a rival row is
+    // only leverage when we know both quotes are in the same money (F094).
+    if (quoted && cur) {
       const { vehicleKeyFor } = await import("@/lib/market");
       const { cheapestRivalQuoteFor } = await import("@/lib/search-session");
       const server = await cheapestRivalQuoteFor(session.email, {
