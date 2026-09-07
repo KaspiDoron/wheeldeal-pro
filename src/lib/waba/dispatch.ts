@@ -250,14 +250,31 @@ export async function sendForLead(
   // ONLY the kill binding is honoured here, on purpose: the tier and spend
   // ceilings meter the PAID template lane, and a flush inside an already-open
   // service window costs neither.
+  //
+  // AND THERE ARE TWO STOPS, not one. WABA_KILL is the LANE's switch (the
+  // governor's). KILL_SWITCH is the owner's GLOBAL one - the Money tab handle
+  // that renders "All paid services and payments are PAUSED for every user" -
+  // and it was enforced in six API routes and in guardOutbound (the Evolution
+  // wire) while this lane never read it. Pulling it therefore silenced the
+  // traveller's own number and left the RENTED business number sending, with
+  // the WABA console still reporting "Sending allowed" during the incident.
+  // killSwitchOn fails closed on an unreadable vault, which is the right
+  // direction for an asset every user shares.
   {
     const { governorVerdict } = await import("./governor");
+    const { killSwitchOn } = await import("../usage");
     const gov = await governorVerdict();
-    if (!gov.allowed && gov.binding === "kill-switch") {
+    const laneKilled = !gov.allowed && gov.binding === "kill-switch";
+    if (laneKilled || (await killSwitchOn())) {
+      // HELD THROUGH holdLead, not merely reported held: the stop can be
+      // lifted, and a lead the flush skipped must still be releasable by the
+      // next inbound or by rung 4's sweep. Reporting "held" without the row
+      // ever reaching that state would drop the enquiry silently.
+      await holdLead(lead.id, fallbackFor(input));
       await noteWabaEvent("held", {
         leadId: lead.id,
         agencyTail: lead.agency_tail,
-        raw: { reason: "kill-switch" },
+        raw: { reason: "kill-switch", scope: laneKilled ? "waba" : "global" },
       });
       return {
         leadId: lead.id,
@@ -468,14 +485,43 @@ export async function onAgencyReplied(
   }
 
   const held = await heldLeadsFor(tail);
+  const { sbInsertClaim, sbDelete } = await import("../runtime-config");
   let flushed = 0;
   for (const lead of held) {
     // Only leads still waiting. A lead already sent a template is waiting on the
     // AGENCY to contact the traveller, not on us to send again - re-sending
     // would double-message the agency about the same person.
     if (lead.state !== "held") continue;
+    // THE FLUSH SLOT - the free-form lane's equivalent of the template lane's
+    // day claim, and for the same reason.
+    //
+    // The state check above is a READ-THEN-ACT across a send: the row only
+    // moves off "held" after wabaSend returns (bounded at 12s), so two
+    // overlapping deliveries for this tail - Meta redelivers whenever the 200
+    // is slow, and a six-lead flush is six serial sends - both read "held" and
+    // both sent. That is two identical handoffs per traveller on a rented,
+    // quality-rated number. One atomic slot per lead settles it.
+    //
+    // A claims-store outage PROCEEDS ("error"), exactly like the template
+    // lane: the window is open and the flush is what the traveller is waiting
+    // for. And the slot is released whenever the send did not happen, because
+    // gcSendClaims prunes non-msg slots only past 2h - an unreleased slot would
+    // strand a still-held lead behind a send that never left the process.
+    const slot = `flush:${lead.id}`;
+    const claim = await sbInsertClaim("wa_send_claims", {
+      sender_key: "waba",
+      slot_key: slot,
+    }).catch(() => "error" as const);
+    if (claim === "lost") continue;
     const out = await sendForLead(lead, "freeform", await render(lead));
-    if (out.outcome === "sent") flushed += 1;
+    if (out.outcome === "sent") {
+      flushed += 1;
+    } else if (claim === "won") {
+      await sbDelete(
+        "wa_send_claims",
+        `sender_key=eq.waba&slot_key=eq.${encodeURIComponent(slot)}`
+      ).catch(() => false);
+    }
   }
   return { opened: true, flushed };
 }

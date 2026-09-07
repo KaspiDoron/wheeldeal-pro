@@ -674,7 +674,10 @@ key in **Admin -> Keys**, so none of it needs a redeploy.
 **Step 1 - get the two URLs.** Open **Admin -> WABA**. The "Paste these into
 Meta" card shows them, resolved from your `APP_DOMAIN`:
 
-- **Callback URL** - `https://<your-domain>/api/webhooks/waba`
+- **Callback URL** - `https://<your-domain>/api/webhooks/waba`. The bare path,
+  never with a `?secret=` on it: a URL parameter lands in every access log, and
+  a reseller that does not sign sends the shared secret in the `x-waba-secret`
+  header instead (the query form is refused).
 - **Template button base** - `https://<your-domain>/h`. The approved template's
   button base must EQUAL this. The card turns red if `WABA_LINK_BASE` does not
   match, because a mismatch is rejected on every send with no other symptom.

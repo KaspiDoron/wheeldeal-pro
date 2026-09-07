@@ -87,7 +87,17 @@ line unless you write down why.
 **WABA lane (only if launching it)**
 - [ ] WABA credentials pasted; MARKETING first-contact template approved by
       Meta; dry-run rehearsal shows the full funnel moving; ONE real opted-in
-      test shop completes lead -> YES -> takeover; kill switch verified.
+      test shop completes lead -> YES -> takeover; BOTH kill switches verified
+      (`WABA_KILL`, the lane's, and `KILL_SWITCH`, the global Money-tab one -
+      the flush honours each).
+- [ ] The provider callback URL is the BARE path,
+      `https://<domain>/api/webhooks/waba`, with NO `?secret=` on it. A
+      reseller that does not sign sends the shared secret in the
+      `x-waba-secret` HEADER; the query-parameter form is refused with 403,
+      because a URL parameter is written into every access log in the path and
+      for a Meta-direct WABA that value is the HMAC signing key. If an existing
+      subscription carries `?secret=`, move the value to the header BEFORE
+      deploying, or its deliveries start failing closed.
 
 ## Adding a beta tester
 

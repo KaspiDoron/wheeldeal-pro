@@ -243,6 +243,23 @@ export interface CreateLeadInput {
   sessionId?: string;
 }
 
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * `waba_leads.session_id` is a UUID COLUMN, and the callers do not hold a uuid.
+ *
+ * The mass path mints its batch id as `randomBytes(6).toString("hex")` - 12 hex
+ * characters - and the single-shop path passes `body.campaign`. Writing either
+ * verbatim is 22P02 -> PostgREST 400 -> no row, for every shop in the batch, so
+ * the whole company-number lane refused with "lead-write-failed" and named the
+ * wrong cause. Anything not genuinely uuid-shaped is dropped here; the batch
+ * grouping already rides `thread_key`, which is text.
+ */
+function asUuid(v: string | null | undefined): string | null {
+  const s = (v ?? "").trim();
+  return UUID_SHAPE.test(s) ? s : null;
+}
+
 export async function createLead(input: CreateLeadInput): Promise<Lead | null> {
   const tail = nationalTail(input.agencyNumber);
   if (!tail) return null;
@@ -254,7 +271,7 @@ export async function createLead(input: CreateLeadInput): Promise<Lead | null> {
     agency_tail: tail,
     agency_number: input.agencyNumber,
     agency_name: input.agencyName ?? null,
-    session_id: input.sessionId ?? null,
+    session_id: asUuid(input.sessionId),
     link_token: mintLinkToken(),
     // The join to the REAL conversation spine (negotiation_threads /
     // whatsapp_messages) - the dead search_sessions uuid could join nothing.
@@ -263,8 +280,11 @@ export async function createLead(input: CreateLeadInput): Promise<Lead | null> {
   const rows = await sbInsertReturning<Lead>("waba_leads", [row]);
   if (rows[0]) return rows[0];
   // Pre-migration fallback: thread_key not yet migrated -> insert without it
-  // (a lead must never be lost to a pending ALTER).
-  const { thread_key: _tk, ...legacy } = row;
+  // (a lead must never be lost to a pending ALTER). session_id goes with it:
+  // it is the OTHER column this row adds, it is read nowhere in the app, and a
+  // lead is worth more than a grouping id on a rung that only runs because a
+  // column already refused the row.
+  const { thread_key: _tk, session_id: _sid, ...legacy } = row;
   const fallback = await sbInsertReturning<Lead>("waba_leads", [legacy]);
   return fallback[0] ?? null;
 }
