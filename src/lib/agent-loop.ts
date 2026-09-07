@@ -1871,11 +1871,11 @@ export async function processVendorReply(opts: {
   // started a second hunt filed its offer under the NEW search - and cross-shop
   // leverage is scoped by search_id. A Krabi scooter price could therefore be
   // cited at a Canggu shop, wearing the new hunt's id. An earlier round of this
-  // same thread already carries the right id; ask it first and fall back to
-  // newest-first only for threads written before the stamp existed. Round one
-  // still falls back to newest-first, which is correct unless the very first
-  // reply arrives after a new hunt began - the residual case, and the one a
-  // search stamp on the thread itself would close.
+  // same thread already carries the right id; ask it first. Round ONE used to
+  // fall back to newest-first here, which is the residual case audit A6 names -
+  // and `searchIdForThread` closes it by anchoring on the hunt that was live
+  // when this thread's FIRST outbound went out (the thread's own start time,
+  // which the messages table has held all along).
   //
   // Lazy + memoised because TWO sites need it and they are mutually exclusive
   // per turn: the offers insert (priced turns) and the rival eviction (declines,
@@ -1887,24 +1887,12 @@ export async function processVendorReply(opts: {
     if (_searchId !== undefined) return _searchId;
     let found: number | null = null;
     if (ctx.sender) {
-      if (ctx.vendorId) {
-        const prior = await sbSelect<{ search_id: number | null }>(
-          "offers",
-          `select=search_id&user_email=eq.${encodeURIComponent(
-            ctx.sender
-          )}&vendor_id=eq.${encodeURIComponent(
-            ctx.vendorId
-          )}&search_id=not.is.null&order=created_at.asc&limit=1`
-        ).catch(() => []);
-        found = prior[0]?.search_id ?? null;
-      }
-      if (found == null) {
-        const s = await sbSelect<{ id: number }>(
-          "searches",
-          `select=id&user_email=eq.${encodeURIComponent(ctx.sender)}&order=created_at.desc&limit=1`
-        ).catch(() => []);
-        found = s[0]?.id ?? null;
-      }
+      const { searchIdForThread } = await import("./search-session");
+      found = await searchIdForThread({
+        userEmail: ctx.sender,
+        vendorId: ctx.vendorId,
+        toDigits: from,
+      }).catch(() => null);
     }
     _searchId = found;
     return found;

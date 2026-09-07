@@ -273,6 +273,9 @@ export async function POST(req: Request) {
   // first sendable shop is always the immediate send (offset 0), and gaps
   // stay a tight 45-75s regardless of how many earlier shops were skipped.
   let sendIndex = 0;
+  // The batch's one live send, held until every other shop is durably queued
+  // (audit A1 - enqueue-first). Null when no shop reached the send stream.
+  let dispatchImmediate: (() => Promise<void>) | null = null;
 
   // MODULE 4 - PER-SHOP COMPILED OPENERS. The root cause of the "identical
   // message to every shop" spam fingerprint was this route sending ONE stored
@@ -724,178 +727,206 @@ export async function POST(req: Request) {
       continue;
     }
 
-    // FUNNEL LEDGER: this shop made the batch - intent, not delivery. No
-    // restart flag (unlike the single Ask): a mass run may sweep shops already
-    // mid-conversation, and forward-only keeps their real stage.
-    {
-      const { advanceThreadStage } = await import("@/lib/funnel/stages");
-      await advanceThreadStage(
-        { userEmail: session.email, toNumber: digits, vendorId: String(v.id), vendorName: v.name, transport: "evolution" },
-        "selected",
-        "mass outreach included this shop"
-      ).catch(() => {});
-    }
-
-    // Shop 1: the immediate, fully-guarded send.
-    const guard = await guardOutbound({
-      senderKey: session.email,
-      toDigits: digits,
-      text: opener.text,
-      auto: true,
-      queueIfBlocked: true,
-      region: String(body.region ?? "") || undefined,
-      // Google truth first: an open shop is NEVER queued as "closed". Only
-      // when openNow is unknown does the local-clock window apply.
-      shopOpenNow: typeof v.openNow === "boolean" ? v.openNow : undefined,
-      meta: rowMeta,
-    });
-    if (!guard.allow) {
-      // FUNNEL LEDGER: parked by the guard - queued, not contacted (the drain
-      // stamps `contacted` when the row delivers).
-      if (guard.queuedUntil) {
-        const { advanceThreadStage } = await import("@/lib/funnel/stages");
-        await advanceThreadStage(
-          { userEmail: session.email, toNumber: digits, vendorId: String(v.id), vendorName: v.name, transport: "evolution" },
-          "contact_queued",
-          `RFQ parked: ${(guard.reason ?? "guard hold").slice(0, 80)}`
-        ).catch(() => {});
-      }
-      results.push({
-        id: v.id,
-        sent: false,
-        queued: Boolean(guard.queuedUntil),
-        queuedUntil: guard.queuedUntil ? new Date(guard.queuedUntil).toISOString() : undefined,
-        // Raw guard reason so the card can explain the hold honestly.
-        queuedReason: guard.queuedUntil ? guard.reason ?? undefined : undefined,
-        reason: guard.queuedUntil ? "queued" : guard.reason,
-      });
-      continue;
-    }
-    // Atomic slots: no concurrent duplicate, no gap-window race.
-    const claim = await claimForSend(session.email, digits, guard.text, true);
-    if (!claim.ok) {
-      const notBefore = new Date(batchStart + 60_000).toISOString();
-      // READ THE INSERT (audit F015). sbInsert never throws - it answers
-      // false on a timed-out write, a 5xx or the pending-auto unique index -
-      // so the old `.catch(() => {})` was dead and the boolean was the only
-      // signal. It was discarded, and every shop here was reported queued
-      // with a time, the ledger stamped contact_queued, over a row that may
-      // not exist and that no drain could ever send. The sibling branches
-      // above already read it; this one now does too. No retry - a second
-      // 8s wait per failing shop inside a 40-shop loop is not free, and the
-      // honest report is.
-      const parked = await sbInsert("wa_outbox", [
-        {
-          sender_key: session.email,
-          to_number: digits,
-          ...(await outboxToKeyPatch(digits)),
-          body: guard.text,
-          not_before: notBefore,
-          meta: { ...rowMeta, reason: claim.kind === "duplicate" ? "batch-spacing" : "human pacing gap" },
-        },
-      ]);
-      // FUNNEL LEDGER: parked on the batch's pacing spacing - only when the
-      // row actually landed. The ledger never asserts a queue that is not there.
-      if (parked) {
-        const { advanceThreadStage } = await import("@/lib/funnel/stages");
-        await advanceThreadStage(
-          { userEmail: session.email, toNumber: digits, vendorId: String(v.id), vendorName: v.name, transport: "evolution" },
-          "contact_queued",
-          "RFQ parked: batch spacing"
-        ).catch(() => {});
-      }
-      results.push({
-        id: v.id,
-        sent: false,
-        queued: parked,
-        queuedUntil: parked ? notBefore : undefined,
-        queuedReason: parked ? "human pacing gap" : undefined,
-        reason: parked ? "queued" : "queue-unavailable",
-      });
-      continue;
-    }
-
-    let ok = false;
-    let ambiguous = false;
-    let reason: string | undefined;
-    let sentChatLid = "";
-    if (personal) {
-      const r = await sendFromUser(session.email, digits, guard.text);
-      ok = r.ok;
-      ambiguous = Boolean(r.ambiguous);
-      reason = r.error;
-      sentChatLid = lidKey(r.chatJid);
-      if (r.rateLimited) {
-        await releaseSendClaim(session.email, digits, guard.text).catch(() => {});
-        results.push({ id: v.id, sent: false, reason: "rate-limit" });
-        break; // budget exhausted - stop the batch quietly
-      }
-    } else if (cloud) {
-      const r = await sendWhatsApp(to, guard.text);
-      ok = r.ok && r.channel === "cloud-api";
-      reason = r.error;
-    }
-    if (ok) {
-      await afterSend(session.email, digits);
-      // The anchor, with its result read (audit F014): retried once, and a
-      // lost row is breadcrumbed as outbound-log-failed instead of leaving
-      // the shop's reply to die as no-rfq-thread.
-      await recordOutboundAnchor(
-        {
-          to_number: digits,
-          body: guard.text,
-          type: "text",
-          direction: "outbound",
-          raw: {
-            channel: personal ? "personal-wa" : "cloud-api",
-            // Which wire carried it (one vocabulary: evolution | cloud | waba).
-            transport: personal ? "evolution" : "cloud",
-            ok: true,
-            ...meta,
-            // The chat's privacy identity, when the provider reported one -
-            // this outbound anchor is what resolves the shop's FIRST @lid
-            // reply (wa/lid-alias reads raw.lid on both directions).
-            ...(sentChatLid ? { lid: sentChatLid } : {}),
-          },
-        },
-        {
-          senderKey: session.email,
-          toNumber: digits,
-          vendorId: String(v.id),
-          vendorName: v.name,
-          channel: personal ? "personal-wa" : "cloud-api",
-        }
-      );
-      // FUNNEL LEDGER: the RFQ reached the shop (TRUTH RULE row above).
+    // ENQUEUE-FIRST (audit A1). Slot 0 is the ONE shop this request puts on
+    // the wire itself, and it used to be sent right here - inside the first
+    // loop iteration, before shops 2..N had a durable row anywhere. The whole
+    // batch therefore hung behind one guard + claim + live Evolution round
+    // trip, and a request that died in that window (a client abort, the Cloud
+    // Run request ceiling, a wedged WhatsApp host) left every remaining shop
+    // unqueued: no row, no drain, no error - the hunt that simply stopped
+    // (RUNBOOK problem 17, "enqueue-first outreach: never built").
+    //
+    // The dispatch is deferred to after the loop, so the queue is durable
+    // before anything is sent. ONLY the dispatch moves: opener compile and
+    // localization stay at enqueue time, because the drain delivers parked
+    // bodies verbatim (`alreadyHumanized`) and re-running the persona/variance
+    // pass at drain would mutate the text and change the idempotency slot hash.
+    const dispatchIndex = results.length;
+    // The result row is reserved in vendor order and filled by the dispatch
+    // below, so deferring the send does not reorder what the traveller reads.
+    results.push({ id: v.id, sent: false });
+    dispatchImmediate = async () => {
+      // FUNNEL LEDGER: this shop made the batch - intent, not delivery. No
+      // restart flag (unlike the single Ask): a mass run may sweep shops already
+      // mid-conversation, and forward-only keeps their real stage.
       {
         const { advanceThreadStage } = await import("@/lib/funnel/stages");
         await advanceThreadStage(
+          { userEmail: session.email, toNumber: digits, vendorId: String(v.id), vendorName: v.name, transport: "evolution" },
+          "selected",
+          "mass outreach included this shop"
+        ).catch(() => {});
+      }
+
+      // Shop 1: the immediate, fully-guarded send.
+      const guard = await guardOutbound({
+        senderKey: session.email,
+        toDigits: digits,
+        text: opener.text,
+        auto: true,
+        queueIfBlocked: true,
+        region: String(body.region ?? "") || undefined,
+        // Google truth first: an open shop is NEVER queued as "closed". Only
+        // when openNow is unknown does the local-clock window apply.
+        shopOpenNow: typeof v.openNow === "boolean" ? v.openNow : undefined,
+        meta: rowMeta,
+      });
+      if (!guard.allow) {
+        // FUNNEL LEDGER: parked by the guard - queued, not contacted (the drain
+        // stamps `contacted` when the row delivers).
+        if (guard.queuedUntil) {
+          const { advanceThreadStage } = await import("@/lib/funnel/stages");
+          await advanceThreadStage(
+            { userEmail: session.email, toNumber: digits, vendorId: String(v.id), vendorName: v.name, transport: "evolution" },
+            "contact_queued",
+            `RFQ parked: ${(guard.reason ?? "guard hold").slice(0, 80)}`
+          ).catch(() => {});
+        }
+        results[dispatchIndex] = {
+          id: v.id,
+          sent: false,
+          queued: Boolean(guard.queuedUntil),
+          queuedUntil: guard.queuedUntil ? new Date(guard.queuedUntil).toISOString() : undefined,
+          // Raw guard reason so the card can explain the hold honestly.
+          queuedReason: guard.queuedUntil ? guard.reason ?? undefined : undefined,
+          reason: guard.queuedUntil ? "queued" : guard.reason,
+        };
+        return;
+      }
+      // Atomic slots: no concurrent duplicate, no gap-window race.
+      const claim = await claimForSend(session.email, digits, guard.text, true);
+      if (!claim.ok) {
+        const notBefore = new Date(batchStart + 60_000).toISOString();
+        // READ THE INSERT (audit F015). sbInsert never throws - it answers
+        // false on a timed-out write, a 5xx or the pending-auto unique index -
+        // so the old `.catch(() => {})` was dead and the boolean was the only
+        // signal. It was discarded, and every shop here was reported queued
+        // with a time, the ledger stamped contact_queued, over a row that may
+        // not exist and that no drain could ever send. The sibling branches
+        // above already read it; this one now does too. No retry - a second
+        // 8s wait per failing shop inside a 40-shop loop is not free, and the
+        // honest report is.
+        const parked = await sbInsert("wa_outbox", [
           {
-            userEmail: session.email,
+            sender_key: session.email,
+            to_number: digits,
+            ...(await outboxToKeyPatch(digits)),
+            body: guard.text,
+            not_before: notBefore,
+            meta: { ...rowMeta, reason: claim.kind === "duplicate" ? "batch-spacing" : "human pacing gap" },
+          },
+        ]);
+        // FUNNEL LEDGER: parked on the batch's pacing spacing - only when the
+        // row actually landed. The ledger never asserts a queue that is not there.
+        if (parked) {
+          const { advanceThreadStage } = await import("@/lib/funnel/stages");
+          await advanceThreadStage(
+            { userEmail: session.email, toNumber: digits, vendorId: String(v.id), vendorName: v.name, transport: "evolution" },
+            "contact_queued",
+            "RFQ parked: batch spacing"
+          ).catch(() => {});
+        }
+        results[dispatchIndex] = {
+          id: v.id,
+          sent: false,
+          queued: parked,
+          queuedUntil: parked ? notBefore : undefined,
+          queuedReason: parked ? "human pacing gap" : undefined,
+          reason: parked ? "queued" : "queue-unavailable",
+        };
+        return;
+      }
+
+      let ok = false;
+      let ambiguous = false;
+      let reason: string | undefined;
+      let sentChatLid = "";
+      if (personal) {
+        const r = await sendFromUser(session.email, digits, guard.text);
+        ok = r.ok;
+        ambiguous = Boolean(r.ambiguous);
+        reason = r.error;
+        sentChatLid = lidKey(r.chatJid);
+        if (r.rateLimited) {
+          await releaseSendClaim(session.email, digits, guard.text).catch(() => {});
+          results[dispatchIndex] = { id: v.id, sent: false, reason: "rate-limit" };
+          // This shop's send budget is spent. The rest of the batch is ALREADY
+          // queued (enqueue-first), and the drain re-runs the full guard per row
+          // at its own time, so standing down here costs nobody their slot.
+          return;
+        }
+      } else if (cloud) {
+        const r = await sendWhatsApp(to, guard.text);
+        ok = r.ok && r.channel === "cloud-api";
+        reason = r.error;
+      }
+      if (ok) {
+        await afterSend(session.email, digits);
+        // The anchor, with its result read (audit F014): retried once, and a
+        // lost row is breadcrumbed as outbound-log-failed instead of leaving
+        // the shop's reply to die as no-rfq-thread.
+        await recordOutboundAnchor(
+          {
+            to_number: digits,
+            body: guard.text,
+            type: "text",
+            direction: "outbound",
+            raw: {
+              channel: personal ? "personal-wa" : "cloud-api",
+              // Which wire carried it (one vocabulary: evolution | cloud | waba).
+              transport: personal ? "evolution" : "cloud",
+              ok: true,
+              ...meta,
+              // The chat's privacy identity, when the provider reported one -
+              // this outbound anchor is what resolves the shop's FIRST @lid
+              // reply (wa/lid-alias reads raw.lid on both directions).
+              ...(sentChatLid ? { lid: sentChatLid } : {}),
+            },
+          },
+          {
+            senderKey: session.email,
             toNumber: digits,
             vendorId: String(v.id),
             vendorName: v.name,
-            transport: personal ? "evolution" : "cloud",
-          },
-          "contacted",
-          "RFQ delivered to the shop"
-        ).catch(() => {});
+            channel: personal ? "personal-wa" : "cloud-api",
+          }
+        );
+        // FUNNEL LEDGER: the RFQ reached the shop (TRUTH RULE row above).
+        {
+          const { advanceThreadStage } = await import("@/lib/funnel/stages");
+          await advanceThreadStage(
+            {
+              userEmail: session.email,
+              toNumber: digits,
+              vendorId: String(v.id),
+              vendorName: v.name,
+              transport: personal ? "evolution" : "cloud",
+            },
+            "contacted",
+            "RFQ delivered to the shop"
+          ).catch(() => {});
+        }
+      } else if (!ambiguous) {
+        await releaseSendClaim(session.email, digits, guard.text).catch(() => {});
       }
-    } else if (!ambiguous) {
-      await releaseSendClaim(session.email, digits, guard.text).catch(() => {});
-    }
-    // AMBIGUOUS (status-0 timeout): keep the claim - the intro may have landed,
-    // and releasing it would let the next mass run re-introduce the same shop.
-    results.push({
-      id: v.id,
-      sent: ok,
-      reason: ok ? undefined : reason ?? "not-on-whatsapp",
-      // Give the traveller the EXACT text we sent + its faithful English gloss
-      // so the status panel shows what really went out (never a paraphrase).
-      text: ok ? guard.text : undefined,
-      gloss: ok ? englishGloss : undefined,
-    });
+      // AMBIGUOUS (status-0 timeout): keep the claim - the intro may have landed,
+      // and releasing it would let the next mass run re-introduce the same shop.
+      results[dispatchIndex] = {
+        id: v.id,
+        sent: ok,
+        reason: ok ? undefined : reason ?? "not-on-whatsapp",
+        // Give the traveller the EXACT text we sent + its faithful English gloss
+        // so the status panel shows what really went out (never a paraphrase).
+        text: ok ? guard.text : undefined,
+        gloss: ok ? englishGloss : undefined,
+      };
+    };
   }
+
+  // THE DISPATCH, ONCE THE QUEUE IS DURABLE (audit A1). Everything above has
+  // landed in wa_outbox; this is the only thing left that can be lost, and
+  // losing it costs one shop rather than the rest of the hunt.
+  if (dispatchImmediate) await dispatchImmediate();
 
   // LIVENESS: kick the self-chaining drain so the staggered batch keeps
   // progressing even if the user locks their phone right now.

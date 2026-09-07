@@ -43,6 +43,8 @@ import {
   validateGraphSpec,
 } from "./default-graph";
 import { evalGraphCondition, explainCondition } from "./conditions";
+// BEAT, NEVER MATCH: one definition, both engines (audit A3).
+import { citesAMatch } from "../negotiation/beat-rival";
 import { deterministicChoice, runDirector } from "./director";
 import { composeForNode, computeRoundTarget } from "./nodes";
 import { credibleFloor } from "./math";
@@ -1396,6 +1398,69 @@ async function runTailGates(args: {
         glossInvalidated = true;
         if (!text.trim()) {
           return { delivered: "blocked", detail: "commitment guard: nothing left to send" };
+        }
+      }
+    }
+
+    // (0.95) BEAT, NEVER MATCH (owner report 5 #2, audit A3) - the same rail
+    // SPTE runs, from the one definition in negotiation/beat-rival.
+    //
+    // The numeric guard below cannot catch this, and that is the whole point:
+    // "could you match the 200 another shop quoted?" cites a REAL, grounded
+    // rival, so checkOutboundNumbers passes it and the ask goes out. Matching
+    // is not bargaining - it spends the traveller's single strongest card, and
+    // the best outcome it can produce is the price they already had. The graph
+    // engine is the live failover AND the sole engine on both user-action
+    // routes, so until now the rail simply did not exist on those paths; the
+    // "beat it" line in the composer's prompt is advice, not a guarantee.
+    //
+    // Scoped to the two moves that ask for a number, exactly as spte/rails.ts
+    // scopes it: a `confirm` or an `answer` that happens to say "the same bike"
+    // is ordinary English.
+    if (args.nodeKind === "bargain" || args.nodeKind === "momentum") {
+      const matched = citesAMatch(text);
+      if (matched) {
+        // Repair, never a silent strip: the ask IS the message here, so there
+        // is no sentence to remove that leaves a message behind. The safe ask
+        // is the ladder's already-clamped target - strictly below the shop's
+        // quote, and naming no rival at all.
+        const { money } = await import("../agents");
+        const safe =
+          args.nodeKind === "bargain"
+            ? buildSafeBargainAsk({
+                target: args.target,
+                ceiling: args.shopCeiling,
+                floor: input.floorPrice,
+                durationDays: input.rfq?.durationDays,
+                currency: input.currency,
+                money,
+              })
+            : null;
+        if (safe) {
+          push({
+            stage: "safety",
+            nodeId: "safety",
+            input: text,
+            reasoning: `beat-not-match guard: the draft asked the shop to match rather than beat ("${matched.phrase}") - repaired to a below-quote ask at the market-anchored target`,
+            output: safe,
+            verdict: "revised",
+          });
+          text = safe;
+          englishGloss = undefined;
+          glossInvalidated = true;
+        } else {
+          // No honest repair available (no clamped target to ask for). Block:
+          // the run-budget rollback in the caller lets the next event recompose
+          // cleanly, and a matched price is worth nothing to the traveller.
+          push({
+            stage: "safety",
+            nodeId: "safety",
+            input: text,
+            reasoning: `beat-not-match guard: the draft asked the shop to match rather than beat ("${matched.phrase}") - blocking this send`,
+            output: "(blocked)",
+            verdict: "blocked",
+          });
+          return { delivered: "blocked", detail: `beat-not-match: ${matched.rule}` };
         }
       }
     }

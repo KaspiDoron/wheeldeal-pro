@@ -371,7 +371,8 @@ describe("honest events on every path", () => {
     const engine = readCode("src/lib/graph/engine.ts");
     expect(engine).toMatch(/let glossInvalidated = false/);
     const sets = engine.match(/glossInvalidated = true/g) ?? [];
-    expect(sets.length).toBe(4); // duration, commitment, hard-constraint, numeric
+    // duration, commitment, beat-not-match (audit A3), hard-constraint, numeric
+    expect(sets.length).toBe(5);
     expect(engine).toMatch(/finishBeforeResponse\("outbound-regloss"/);
     expect(engine).toMatch(/translateToEnglish\(finalText\)/);
   });

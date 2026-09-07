@@ -137,7 +137,14 @@ describe("a rival is scoped to the hunt and the machine it belongs to", () => {
   });
 
   it("a reply files its offer under the thread's own hunt, not the newest one", () => {
+    // The resolution moved to search-session.searchIdForThread (audit A6),
+    // which also closes the round-ONE hole this assertion could not see: with
+    // no stamped offer yet, the fallback now anchors on the hunt that was live
+    // when this thread's FIRST outbound went out, not on the newest hunt.
+    const session = readCode("src/lib/search-session.ts");
+    expect(session).toMatch(/search_id=not\.is\.null&order=created_at\.asc&limit=1/);
+    expect(session).toMatch(/created_at=lte\.\$\{pgTimestamp\(anchor\)\}/);
     const loop = readCode("src/lib/agent-loop.ts");
-    expect(loop).toMatch(/search_id=not\.is\.null&order=created_at\.asc&limit=1/);
+    expect(loop).toMatch(/searchIdForThread\(/);
   });
 });
