@@ -1036,6 +1036,38 @@ export function leverageLost(
   return lost;
 }
 
+/**
+ * Which node kinds get the deterministic numeric guard (audit F143).
+ *
+ * It used to be four - bargain, momentum, close, answer - which left the two
+ * highest-stakes numerals unguarded: the deal-closing price (a client-supplied
+ * figure stated to the shop as "as we agreed") and the clarify question (the
+ * extraction model's own sentence, forwarded verbatim). Every kind that can put
+ * a numeral on the wire is guarded now; only `bargain` also gets the ask bounds
+ * (checkAskBounds), so a confirmation is never judged as if it were an ask.
+ *
+ * The ONE exemption is a clarify on a turn that carried media: a price read off
+ * a photo of a price board or out of a voice note is legitimately absent from
+ * the text history, and a provenance rung there would silence the one move
+ * whose whole job is to ask about what we could not read.
+ */
+function guardedNumericKind(kind: string, input: GraphTurnInput): boolean {
+  if (kind === "clarify") {
+    const hadMedia = input.event.images.length > 0 || Boolean(input.transcript);
+    return !hadMedia;
+  }
+  return [
+    "bargain",
+    "momentum",
+    "close",
+    "answer",
+    "closing-message",
+    "deposit-probe",
+    "fulfillment-probe",
+    "custom-llm",
+  ].includes(kind);
+}
+
 async function runTailGates(args: {
   draft: string;
   englishGloss?: string;
@@ -1162,6 +1194,10 @@ async function runTailGates(args: {
       const fresh = await ensureGloballyUnique(text, recent);
       if (fresh.changed) {
         freshNote = ` re-varied (overlap ${(fresh.maxOverlap * 100).toFixed(0)}%)`;
+      } else if (fresh.mutated) {
+        // Mutated but still colliding: say so (audit F112). The old trace read
+        // "re-varied" for a mutation that provably could not move the score.
+        freshNote = ` collision unresolved (overlap ${(fresh.maxOverlap * 100).toFixed(0)}%)`;
       }
       text = enforceEmojiTone(fresh.text, spec.settings.emojiTone);
     } else {
@@ -1395,7 +1431,7 @@ async function runTailGates(args: {
       text = decline;
       englishGloss = undefined;
       glossInvalidated = true;
-    } else if (["bargain", "momentum", "close", "answer"].includes(args.nodeKind)) {
+    } else if (guardedNumericKind(args.nodeKind, input)) {
       // (2) NUMERIC SANITY: fabricated rival (any of these nodes) + the
       // sub-floor / inverted-ask bounds (the price-asking bargain node only).
       const isBargain = args.nodeKind === "bargain";
@@ -1431,6 +1467,13 @@ async function runTailGates(args: {
             input.history,
             input.event.kind !== "tick" ? input.event.shopMessage : undefined,
             ...input.priorOutbound,
+            // The traveller's OWN facts on a user-action event (audit F143):
+            // a street number in the delivery address or a time in "when" is
+            // something they typed, not a price the engine invented. The
+            // payload's pricePerDay is deliberately NOT grounded here - that
+            // is the very number nodes.ts now checks against the thread.
+            typeof input.event.payload?.address === "string" ? input.event.payload.address : undefined,
+            typeof input.event.payload?.when === "string" ? input.event.payload.when : undefined,
           ]),
         ].filter((n): n is number => typeof n === "number" && n > 0),
         durationDays: input.rfq?.durationDays,
@@ -2174,6 +2217,7 @@ export function liveGraphIO(send: LiveSend): GraphIO {
             delivered: "blocked",
             detail: "duplicate in flight - another invocation is delivering this message",
             finalText: verdict.text,
+            inFlight: true,
           };
         }
         const { jitteredHold, RECIPIENT_LOCK_SEC } = await import("../wa/pacing");

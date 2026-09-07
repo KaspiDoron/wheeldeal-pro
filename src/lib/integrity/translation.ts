@@ -77,15 +77,55 @@ export function significantNumbers(s: string): string[] {
 }
 
 /**
- * True when every significant number in `source` still appears in `translated`.
+ * EVERY numeral the text asserts, price-scale or not.
+ *
+ * `significantNumbers` ignores 1-2 digit runs because a correct translation may
+ * spell a small count out in words, and rejecting that would downgrade the hunt
+ * to English for output that was right. That reasoning holds only in the DROP
+ * direction: a numeral the translation ADDED was never spelled out anywhere -
+ * it is new text asserting a new fact.
+ */
+export function allNumerals(s: string): string[] {
+  const flat = normalizeDigits(s).replace(SEPARATOR_BETWEEN_DIGITS, "");
+  return Array.from(new Set(flat.match(/\d+/g) ?? []));
+}
+
+/** Which way a translation broke fidelity, or null when it did not. */
+export type NumberDrift = "dropped" | "added";
+
+/**
+ * THE CHECK IS SYMMETRIC (F142).
+ *
+ * On the primary engine every number rail - `checkOutboundNumbers`,
+ * `correctDuration` - runs over the ENGLISH draft, and the LOCALIZED string is
+ * what actually reaches WhatsApp. This function was the only thing standing
+ * between the two, and it was a one-directional subset test over 3+ digit runs:
+ * a translation could invent "ปกติ 800" (a price the thread never held, shown
+ * back to the traveller as their own words) or turn the 4-day rental every
+ * prior message asserted into 7, and both passed. The graph failover has no
+ * such gap - it localizes first and rails afterwards - so the two engines
+ * disagreed about which text the rails guard.
+ *
+ * Deliberately still a FIDELITY check and not the grounded provenance rail:
+ * re-running a basis tuned on English drafts over Thai or Vietnamese wire text
+ * would produce false rejections, and a false rejection flips that shop to
+ * English for the rest of the hunt - the exact downgrade this file argues
+ * against. An INVENTED numeral is unambiguous in any script.
  *
  * Fails CLOSED on the caller's side (the caller retries, then keeps the English
  * source) because sending an English message the shop can read beats sending a
  * local-language message that quotes the wrong price.
  */
-export function numbersPreserved(source: string, translated: string): boolean {
+export function numberDrift(source: string, translated: string): NumberDrift | null {
   const want = significantNumbers(source);
-  if (!want.length) return true;
   const have = new Set(significantNumbers(translated));
-  return want.every((n) => have.has(n));
+  if (!want.every((n) => have.has(n))) return "dropped";
+  const known = new Set(allNumerals(source));
+  if (!allNumerals(translated).every((n) => known.has(n))) return "added";
+  return null;
+}
+
+/** True when the translation carries the source's numbers and invents none. */
+export function numbersPreserved(source: string, translated: string): boolean {
+  return numberDrift(source, translated) === null;
 }

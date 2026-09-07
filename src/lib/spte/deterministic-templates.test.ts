@@ -120,7 +120,14 @@ describe("EXECUTED: the shop's own money, in symbols", () => {
   it("the owner's sentence still comes out whole", () => {
     const t = templateFor(ctx({ quoted: 300, rivals: [{ pricePerDay: 200 }] }), "bargain")!;
     expect(t).toContain("Another shop offered");
-    expect(t).toMatch(/could you do/i);
+    // The ASK is a FAMILY now, not one fixed clause (F111): the rival cite and
+    // the beat target are arithmetic and never move, but the sentence around
+    // them has to differ between turns, or the second deterministic turn on a
+    // thread composes a byte-identical body and the outbound guard's
+    // idempotency preflight drops it terminally. Whichever member is drawn, the
+    // message still ends in a concrete ask at the beat target.
+    expect(t).toMatch(/could you do|would .+ work|any chance of|is .+ possible/i);
+    expect(t).toContain("฿190/day");
   });
 });
 

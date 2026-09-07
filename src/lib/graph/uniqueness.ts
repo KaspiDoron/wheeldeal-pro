@@ -38,46 +38,163 @@ const OPENER_SWAPS: [RegExp, string[]][] = [
   [/^thanks\b/i, ["Thank you", "Appreciate it", "Thanks a lot", "Ta"]],
 ];
 
+/**
+ * THE SKELETON PASS (audit F112). Both similarity metrics - trigrams() above
+ * and normalizeForSig()/shingles() in copy/hash.ts - lowercase the text and
+ * delete everything that is not a letter, a digit or a space. An emoji swap
+ * and a punctuation jitter are therefore INVISIBLE to the very scores that
+ * triggered the re-variation, so the old mutation could never resolve a
+ * collision: it only made the bytes differ.
+ *
+ * These are meaning-preserving phrase swaps - the same sentence in different
+ * WORDS, which is the only thing the metrics count. Each rule lists every form
+ * it knows, and the picker chooses one that is not the form already present,
+ * so no two rules can undo each other inside one pass. Nothing here touches a
+ * numeral, a currency or the vehicle class: the price, the duration and the
+ * rival citation are the message, and a re-variation that moved one would be a
+ * lie on the wire. The numeral guard below enforces that structurally.
+ */
+const REWRITES: [RegExp, readonly string[]][] = [
+  [/\b(any chance|is there any way|any way)\b/i, ["any chance", "is there any way", "any way"]],
+  [
+    /\b(could you|can you|would you be able to)\b/i,
+    ["could you", "can you", "would you be able to"],
+  ],
+  [/\b(a day|per day|each day)\b/i, ["a day", "per day", "each day"]],
+  [/\b(best price|best rate|lowest price)\b/i, ["best price", "best rate", "lowest price"]],
+  [
+    /\b(the best you can do|the lowest you can go|the lowest you can do)\b/i,
+    ["the best you can do", "the lowest you can go", "the lowest you can do"],
+  ],
+  [/\b(right now|today|straight away)\b/i, ["right now", "today", "straight away"]],
+  [/\b(i am|i'm)\b/i, ["I am", "I'm"]],
+  [/\b(i would|i'd)\b/i, ["I would", "I'd"]],
+  [/\b(what is|what's)\b/i, ["what is", "what's"]],
+  [/\b(it is|it's)\b/i, ["it is", "it's"]],
+  [/\b(quoted|offered|is asking)\b/i, ["quoted", "offered", "is asking"]],
+  [
+    /\b(another shop|a nearby shop|another place)\b/i,
+    ["another shop", "a nearby shop", "another place"],
+  ],
+  [/\b(the same|an identical|the very same)\b/i, ["the same", "an identical", "the very same"]],
+  [/\b(comparing|checking|looking at)\b/i, ["comparing", "checking", "looking at"]],
+  [/\b(a few|a couple of|a handful of)\b/i, ["a few", "a couple of", "a handful of"]],
+  [/\b(deliver|bring it over)\b/i, ["deliver", "bring it over"]],
+  [/\b(to the hotel|to my hotel)\b/i, ["to the hotel", "to my hotel"]],
+  [/\b(that cost|that come to|that run to)\b/i, ["that cost", "that come to", "that run to"]],
+  [
+    /\b(book with you|take it with you|go ahead with you)\b/i,
+    ["book with you", "take it with you", "go ahead with you"],
+  ],
+  [
+    /\b(match that|do the same|come down to that)\b/i,
+    ["match that", "do the same", "come down to that"],
+  ],
+  [/\b(hi|hello|hey)\b/i, ["Hi", "Hello", "Hey"]],
+  [/\b(please|if possible|if you can)\b/i, ["please", "if possible", "if you can"]],
+  [/\b(thanks|thank you|much appreciated)\b/i, ["thanks", "thank you", "much appreciated"]],
+  [/\b(any room|any flexibility|any movement)\b/i, ["any room", "any flexibility", "any movement"]],
+  [/\b(what deposit|how much deposit)\b/i, ["what deposit", "how much deposit"]],
+  [/\b(do you need|do you take|do you want)\b/i, ["do you need", "do you take", "do you want"]],
+];
+
+/** How many skeleton swaps one re-variation attempt makes. Three is what it
+ * takes to push a 15-20 word draft under the 0.75 trigram threshold (each swap
+ * kills the three trigrams that contain it), and few enough that the sentence
+ * still reads like one person wrote it. */
+const MAX_REWRITES = 3;
+
+/** Every numeral in the text, in order - the re-variation's own rail. */
+function numeralsOf(s: string): string {
+  return (s.match(/\d+(?:[.,]\d+)?/g) ?? []).join("|");
+}
+
+/** Capitalization of the form we are replacing, carried onto the new one.
+ * "I"/"I'm" is the pronoun and is always capital, wherever it sits. */
+function matchCase(src: string, alt: string): string {
+  if (/^I\b|^I'/.test(alt)) return alt;
+  const head = src.charAt(0);
+  const upper = /[A-Z]/.test(head);
+  return upper ? alt.charAt(0).toUpperCase() + alt.slice(1) : alt.charAt(0).toLowerCase() + alt.slice(1);
+}
+
+/** A form from the pool that is not the one already in the text. */
+function pickAlt(match: string, pool: readonly string[], rng: () => number): string | null {
+  const cands = pool.filter((p) => p.toLowerCase() !== match.toLowerCase());
+  if (!cands.length) return null;
+  return cands[Math.floor(rng() * cands.length) % cands.length];
+}
+
+/** Seeded visiting order over the rule table (Fisher-Yates on the rng). */
+function seededOrder(n: number, rng: () => number): number[] {
+  const idx = Array.from({ length: n }, (_, i) => i);
+  for (let i = n - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1)) % (i + 1);
+    const t = idx[i];
+    idx[i] = idx[j];
+    idx[j] = t;
+  }
+  return idx;
+}
+
 /** Seeded variant of revary (Module 4): deterministic given an rng, so the
  * compiler's collision re-variation is replayable and unit-testable. */
 export function revarySeeded(text: string, rng: () => number): string {
   let out = text;
+  // The opener is claimed first, and the skeleton pass below never reaches back
+  // into it - rewriting "Thanks a lot" a second time produced "Much appreciated
+  // a lot".
+  let openerEnd = 0;
   for (const [rx, pool] of OPENER_SWAPS) {
     if (rx.test(out)) {
-      out = out.replace(rx, pool[Math.floor(rng() * pool.length)]);
+      const swap = pool[Math.floor(rng() * pool.length)];
+      out = out.replace(rx, swap);
+      openerEnd = swap.length;
       break;
     }
   }
+  // The pass the metrics can actually see.
+  let applied = 0;
+  for (const i of seededOrder(REWRITES.length, rng)) {
+    if (applied >= MAX_REWRITES) break;
+    const [rx, pool] = REWRITES[i];
+    const m = rx.exec(out.slice(openerEnd));
+    if (!m) continue;
+    const at = openerEnd + m.index;
+    const alt = pickAlt(m[0], pool, rng);
+    if (!alt) continue;
+    const next = out.slice(0, at) + matchCase(m[0], alt) + out.slice(at + m[0].length);
+    // THE RAIL: a re-variation may never move a price, a duration or any other
+    // numeral. If it did, drop the swap and keep looking.
+    if (numeralsOf(next) !== numeralsOf(out)) continue;
+    out = next;
+    applied++;
+  }
+  // Cosmetic tail: the emoji jitter. Kept because the wire likes it, but it is
+  // no longer mistaken for a re-variation - both metrics strip it.
   const emojiRx = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u;
   const fresh = EMOJI_POOL[Math.floor(rng() * EMOJI_POOL.length)];
   out = emojiRx.test(out) ? out.replace(emojiRx, fresh) : `${out} ${fresh}`;
-  if (rng() < 0.5) out = out.replace(/\bcan you\b/i, (m) => (m[0] === "C" ? "Could you" : "could you"));
   if (rng() < 0.4) out = out.replace(/!$/, ".");
   return out;
 }
 
-/** Deterministic mutation used when a draft collides globally. */
+/** Deterministic mutation used when a draft collides globally. Seeded by the
+ * text itself - never Math.random - so a re-parked send recomposes the same
+ * bytes it was guarded on. */
 export function revary(text: string): string {
-  let out = text;
-  for (const [rx, pool] of OPENER_SWAPS) {
-    if (rx.test(out)) {
-      out = out.replace(rx, pool[Math.floor(Math.random() * pool.length)]);
-      break;
-    }
-  }
-  // Swap the emoji (or add one) - changes the payload without the meaning.
-  const emojiRx = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u;
-  const fresh = EMOJI_POOL[Math.floor(Math.random() * EMOJI_POOL.length)];
-  out = emojiRx.test(out) ? out.replace(emojiRx, fresh) : `${out} ${fresh}`;
-  // Light punctuation/wording jitter.
-  if (Math.random() < 0.5) out = out.replace(/\bcan you\b/i, (m) => (m[0] === "C" ? "Could you" : "could you"));
-  if (Math.random() < 0.4) out = out.replace(/!$/, ".");
-  return out;
+  return revarySeeded(text, mulberry32(fnv1a32(text)));
 }
 
 export interface FreshnessVerdict {
   text: string;
+  /** The draft was re-varied AND the collision it collided on is gone. This is
+   * what the Ops trace calls "re-varied", so it may never be asserted for a
+   * mutation that did not move the score (audit F112). */
   changed: boolean;
+  /** The text was mutated at all - true even when the collision survived, so
+   * the trace can say "collision unresolved" instead of claiming a fix. */
+  mutated: boolean;
   maxOverlap: number;
 }
 
@@ -93,7 +210,7 @@ export function ensureGloballyFresh(
   threshold = 0.75
 ): FreshnessVerdict {
   let text = draft;
-  let changed = false;
+  let mutated = false;
   for (let attempt = 0; attempt < 3; attempt++) {
     let max = 0;
     for (const prior of recentGlobal) {
@@ -101,13 +218,16 @@ export function ensureGloballyFresh(
       if (o > max) max = o;
       if (max >= 1) break;
     }
-    if (max < threshold) return { text, changed, maxOverlap: max };
+    // Below the threshold: whatever mutation got us here really did re-vary.
+    if (max < threshold) return { text, changed: mutated, mutated, maxOverlap: max };
     text = revary(text);
-    changed = true;
+    mutated = true;
   }
   let final = 0;
   for (const prior of recentGlobal) final = Math.max(final, trigramOverlap(text, prior));
-  return { text, changed, maxOverlap: final };
+  // Out of attempts and still colliding: ship the best attempt as before, but
+  // report it honestly - `changed` is a claim about the SCORE, not the bytes.
+  return { text, changed: mutated && final < threshold, mutated, maxOverlap: final };
 }
 
 // ---------------------------------------------------------------------------
@@ -175,15 +295,35 @@ export async function ensureGloballyUnique(
   opts: { threshold?: number; record?: boolean } = {}
 ): Promise<FreshnessVerdict> {
   // Layer 1: the existing in-process compare (raw strings, DB-fed).
-  let verdict = ensureGloballyFresh(draft, recentFallback, opts.threshold ?? 0.75);
-  // Layer 2: the cross-fleet signature window.
+  const threshold = opts.threshold ?? 0.75;
+  const first = ensureGloballyFresh(draft, recentFallback, threshold);
+  let text = first.text;
+  let mutated = first.mutated;
+  // Layer 2: the cross-fleet signature window. Same attempt budget as before
+  // (at most three ZRANGE round trips), but the verdict now records whether
+  // the skeleton actually cleared instead of asserting it.
   const rng = mulberry32(fnv1a32(draft));
+  let cleared = true;
   for (let attempt = 0; attempt < 3; attempt++) {
-    if (!(await collidesGlobally(verdict.text))) break;
-    verdict = { text: revarySeeded(verdict.text, rng), changed: true, maxOverlap: verdict.maxOverlap };
+    if (!(await collidesGlobally(text))) {
+      cleared = true;
+      break;
+    }
+    cleared = false;
+    const next = revarySeeded(text, rng);
+    if (next === text) break; // nothing honest left to change
+    text = next;
+    mutated = true;
   }
-  if (opts.record !== false) await recordCopySignature(verdict.text);
-  return verdict;
+  // A layer-2 mutation invalidates layer 1's score, so re-measure the text we
+  // are actually about to send (pure CPU over the same short list).
+  let maxOverlap = first.maxOverlap;
+  if (text !== first.text) {
+    maxOverlap = 0;
+    for (const prior of recentFallback) maxOverlap = Math.max(maxOverlap, trigramOverlap(text, prior));
+  }
+  if (opts.record !== false) await recordCopySignature(text);
+  return { text, mutated, changed: mutated && cleared && maxOverlap < threshold, maxOverlap };
 }
 
 const EMOJI_ANY = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2764}]/u;

@@ -401,9 +401,13 @@ describe("the live inbound turn runs on the reconciled promise", () => {
     // under spte/ reconciles anything itself (it imports no rental-params), so
     // this chain IS the fix for the rail rewriting a correct draft into the
     // wrong duration - the rail was only ever as right as its input.
-    expect(read("src/lib/spte/rails.ts")).toMatch(
-      /correctDuration\(text, ctx\.session\.rfq\.durationDays\)/
-    );
+    // The call now also carries the protected foreign spans (F106 - a rival's
+    // package basis is not ours to correct), so the pin is the ARGUMENT that
+    // matters here: the rail is still fed the reconciled RFQ duration, and the
+    // only day-counts exempted are the rivals' own stamped bases.
+    const rails = read("src/lib/spte/rails.ts");
+    expect(rails).toMatch(/correctDuration\(\s*text,\s*ctx\.session\.rfq\.durationDays,/);
+    expect(rails).toMatch(/ctx\.session\.rivals\.map\(\(r\) => r\.derivedFromDays\)/);
   });
 
   it("the wakeup/tick entry still reads the same field", () => {

@@ -63,6 +63,24 @@ describe("every automatic push now survives the response", () => {
     expect(ingest).toMatch(/finishBeforeResponse\("ingest-push"/);
     expect(ingest).toMatch(/finishBeforeResponse\("wa-disconnected-push"/);
   });
+
+  it("...nor in SPTE, the engine that actually answers shops (audit F039)", () => {
+    // This invariant only read agent-loop.ts and ingest.ts, so the primary
+    // engine's own "your best price just fell through" push - a bare
+    // `void (async () => ...)()` around a Supabase read and an https request -
+    // was never covered by the rule its doctrine file describes.
+    const live = readCode("src/lib/spte/live.ts");
+    expect(live).not.toMatch(/void \(async \(\) => \{/);
+    expect(live).toMatch(/finishBeforeResponse\(\s*"lost-best-push"/);
+  });
+
+  it("and the push itself cannot hang: web-push gets an explicit timeout", () => {
+    // web-push sets an https timeout ONLY when the option is passed. Awaiting
+    // the push (above) is only safe because one dead endpoint is cut loose.
+    const push = readCode("src/lib/push.ts");
+    expect(push).toMatch(/timeout: PUSH_TIMEOUT_MS/);
+    expect(push).not.toMatch(/sendNotification\(\s*\{ endpoint: s\.endpoint[\s\S]{0,120}?\n\s*data\n\s*\);/);
+  });
 });
 
 describe("the one push that skipped the gate no longer does", () => {

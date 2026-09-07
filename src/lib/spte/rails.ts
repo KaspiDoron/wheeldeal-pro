@@ -12,6 +12,7 @@ import { citesAMatch } from "../negotiation/beat-rival";
 import { inventsADate } from "../negotiation/traveller-disclosure";
 import type { RailResult, TurnArtifact, TurnContext } from "./types";
 import { quoteOnTable } from "./policy";
+import { askTargetFor, templateBargainTarget } from "./pass";
 import { normalizeDigits } from "../integrity/translation";
 import { citesPrice } from "../integrity/money-context";
 
@@ -309,7 +310,19 @@ export function runPostRails(ctx: TurnContext, artifact: TurnArtifact): RailResu
   }
 
   // 1) Duration integrity: rewrite any wrong day-count to the RFQ's real value.
-  text = correctDuration(text, ctx.session.rfq.durationDays).text;
+  //    EXCEPT a span that is not ours to correct (F106). The leverage card
+  //    orders the model to state a rival's OWN package span - "another shop's
+  //    7-day price works out to about 200/day" - because the per-day figure was
+  //    divided out of it and no shop ever typed it. Rewriting that 7 into the
+  //    traveller's 10 asserts a 10-day rival price nobody gave: the blind rail
+  //    inverted the honesty chain `derivedFromDays` exists for, at the last hop
+  //    before the wire. Explicit spans only; a bare hallucinated count in the
+  //    same draft is still corrected.
+  text = correctDuration(
+    text,
+    ctx.session.rfq.durationDays,
+    ctx.session.rivals.map((r) => r.derivedFromDays)
+  ).text;
 
   // 2) Numeric integrity: fabricated-rival / below-floor / inverted-ask. The
   //    ONE real rival is the cheapest sibling offer; the ceiling is the shop's
@@ -332,7 +345,15 @@ export function runPostRails(ctx: TurnContext, artifact: TurnArtifact): RailResu
       ctx.inbound.verified.sheetPricePerDay,
       ...(ctx.thread.digest.options ?? []).map((o) => o.pricePerDay),
     ].filter((n): n is number => typeof n === "number" && n > 0),
-    excludeExact: [ctx.session.rfq.durationDays, ctx.session.rfq.engineSizeCc ?? 0].filter(Boolean),
+    // A DAY COUNT IS NOT A PRICE - including one that is not ours (F106). The
+    // RFQ duration was already excluded; a rival's package basis has to be too,
+    // or "another shop's 7-day price works out to about 200/day" reads as a
+    // rival claim of 7 and the honest phrasing is rejected as a fabrication.
+    excludeExact: [
+      ctx.session.rfq.durationDays,
+      ctx.session.rfq.engineSizeCc ?? 0,
+      ...ctx.session.rivals.map((r) => r.derivedFromDays ?? 0),
+    ].filter(Boolean),
     // PROVENANCE: every price-scale numeral must be a number this thread's
     // structured state holds or a closed derivation of one (total/days,
     // daily*days, rounding). Derived rates are legal - "1200 for 6 days"
@@ -350,6 +371,19 @@ export function runPostRails(ctx: TurnContext, artifact: TurnArtifact): RailResu
       // and a within-bounds ask IS the ladder - what provenance adds is that
       // no OTHER number ("Your price 300 is too much") can ride along.
       artifact.counterPricePerDay,
+      // THE ENGINE'S OWN LADDER (F141). With no known floor `insideAskRange`
+      // below cannot ground anything, and this basis carried only the
+      // model's self-reported counter - so the target the prompt was shown,
+      // and the figure the deterministic bargain template PRINTED, were both
+      // rejected as inventions, the same template was re-composed and
+      // re-rejected, and a shop that had just quoted got silence. The graph
+      // engine has always grounded `args.target`; these are the two figures
+      // this engine computes (two ladders, which need not agree). Pure
+      // arithmetic on data already in ctx - nothing is added to the reply
+      // path's round trips - and never a free pass: for price moves the
+      // bounds rung below still refuses a target under a KNOWN floor.
+      askTargetFor(ctx),
+      templateBargainTarget(ctx),
       ctx.session.benchmark?.pricePerDay,
       ...(ctx.thread.digest.options ?? []).map((o) => o.pricePerDay),
       // Every numeral the conversation VERBATIM contains - the shop's own

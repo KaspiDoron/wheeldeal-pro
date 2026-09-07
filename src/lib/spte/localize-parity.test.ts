@@ -30,10 +30,16 @@ const localizeCalls: Array<{
   street?: boolean;
   opts?: { greet?: boolean };
 }> = [];
+// A FAITHFUL fixture. This used to return "ลดเหลือ 450 ได้ไหมครับ" whatever the
+// draft said, which models a translation that INVENTED a price - a shape the
+// symmetric fidelity check now refuses (F142), and rightly: a numeral the
+// English draft never held has passed every number rail the turn ran. The
+// guarantee this file pins is the wiring (local text out, English gloss
+// stamped), so the fixture is made honest rather than the check loosened.
 const localizeResult = {
   value: {
-    text: "ลดเหลือ 450 ได้ไหมครับ",
-    english: "Can you do 450?",
+    text: "ลดราคาได้ไหมครับ สำหรับ 4 วัน",
+    english: "Can you do better for the 4 days?",
     localized: true,
   } as { text: string; english?: string; localized: boolean; reason?: string },
 };
@@ -134,8 +140,8 @@ function input(partial: Partial<GraphTurnInput> = {}): GraphTurnInput {
 beforeEach(() => {
   localizeCalls.length = 0;
   localizeResult.value = {
-    text: "ลดเหลือ 450 ได้ไหมครับ",
-    english: "Can you do 450?",
+    text: "ลดราคาได้ไหมครับ สำหรับ 4 วัน",
+    english: "Can you do better for the 4 days?",
     localized: true,
   };
 });
@@ -158,13 +164,13 @@ describe("SPTE localizes - parity with the failover engine", () => {
     // and rises when the shop uses emoji with us. The invariant that survives -
     // and the one this test is really about - is that the LOCAL text goes out
     // and never carries a stack of them.
-    expect(sent[0].text.startsWith("ลดเหลือ 450 ได้ไหมครับ")).toBe(true);
+    expect(sent[0].text.startsWith("ลดราคาได้ไหมครับ สำหรับ 4 วัน")).toBe(true);
     const emojis = [...sent[0].text.matchAll(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2764}]/gu)];
     expect(emojis.length).toBeLessThanOrEqual(1);
     // ...and `meta` is spread into `whatsapp_messages.raw` by guardAndSend, so
     // this IS raw.englishGloss - the field W1.5 already renders in the thread
     // peek, the activity feed, the deals view and the Ops transcript.
-    expect(sent[0].meta.englishGloss).toBe("Can you do 450?");
+    expect(sent[0].meta.englishGloss).toBe("Can you do better for the 4 days?");
     expect(sent[0].meta.language).toBe("local");
   });
 

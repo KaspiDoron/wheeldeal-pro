@@ -376,6 +376,14 @@ export function advanceConfirmState(
  * states prefer OURS (the losing write just processed the newest event),
  * pending doubts union by subject preferring ours.
  */
+/** The object's set keys only - a `{k: undefined}` read back from a stored row
+ *  must not erase a value the other side holds. */
+function definedOnly<T extends object>(o: T): Partial<T> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(o)) if (v !== undefined) out[k] = v;
+  return out as Partial<T>;
+}
+
 export function mergeStoredDigests(winnerRaw: unknown, oursRaw: unknown): Partial<ThreadDigest> {
   const w = digestFromStored(winnerRaw);
   const o = digestFromStored(oursRaw);
@@ -407,8 +415,20 @@ export function mergeStoredDigests(winnerRaw: unknown, oursRaw: unknown): Partia
         }
       : undefined;
   return persistableDigest({
+    // SEEDED FROM BOTH STORED DIGESTS FIRST (audit F031). The merged object
+    // used to be a hand-listed key set, so a durable key nobody remembered to
+    // list - `lastAskPerDay`, the concession ladder's whole memory - was
+    // silently deleted by every lost race. Ours wins over the winner's for any
+    // key the union rules below do not name (the losing write is the one that
+    // just processed the newest event), and `definedOnly` keeps a read-back
+    // `undefined` from erasing a value the winner does hold. The explicit rules
+    // that follow still override every key they name, so the deliberate union
+    // semantics (facts, pending, confirmAsked, the OR-latches) are untouched.
+    ...w,
+    ...definedOnly(o),
     facts: facts.slice(Math.max(0, facts.length - MAX_FACTS)),
     quotedPricePerDay: o.quotedPricePerDay ?? w.quotedPricePerDay,
+    lastAskPerDay: o.lastAskPerDay ?? w.lastAskPerDay,
     round: Math.max(w.round, o.round),
     tone: o.tone ?? w.tone,
     comprehension: comp,
@@ -555,6 +575,13 @@ export function mergeDigest(
         ? verified.pricePerDay
         : prev.quotedPricePerDay,
     round: prev.round + (artifact.move === "bargain" ? 1 : 0),
+    // THE CONCESSION LADDER'S MEMORY, CARRIED (audit F031). live.ts overwrites
+    // it after a bargain actually reaches the wire; every other turn must leave
+    // it alone, or the ratchet that stops us re-asking below our own last ask
+    // is erased by the next answer or confirm.
+    ...(typeof prev.lastAskPerDay === "number" && prev.lastAskPerDay > 0
+      ? { lastAskPerDay: prev.lastAskPerDay }
+      : {}),
     tone: prev.tone,
     ...(comprehension ? { comprehension } : {}),
     confirmAsked,

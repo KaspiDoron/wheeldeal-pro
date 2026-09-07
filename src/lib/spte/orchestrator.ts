@@ -7,6 +7,7 @@
 import type {
   ConfirmSubject,
   MoveKind,
+  RailResult,
   ThreadDigest,
   TurnArtifact,
   TurnContext,
@@ -64,7 +65,7 @@ export async function runTurn(ctx: TurnContext): Promise<TurnOutcome> {
       digestPatch: [],
     };
     const rail = runPostRails(ctx, artifact);
-    return finalize(ctx, artifact, { tier: "R", reason: "reflex" }, rail.ok ? rail.finalText : undefined);
+    return finalize(ctx, artifact, { tier: "R", reason: "reflex" }, rail);
   }
 
   // REPLAY: no network, no model, byte-stable. The legal move set and every
@@ -73,7 +74,7 @@ export async function runTurn(ctx: TurnContext): Promise<TurnOutcome> {
   if (ctx.deterministic) {
     const fb = fallbackArtifact(ctx);
     const rail = runPostRails(ctx, fb);
-    return finalize(ctx, fb, { tier: "R", reason: "replay" }, rail.ok ? rail.finalText : undefined);
+    return finalize(ctx, fb, { tier: "R", reason: "replay" }, rail);
   }
 
   // TIER F / M: the turn's ONE LLM call, schema-validated + move-coerced.
@@ -139,10 +140,10 @@ export async function runTurn(ctx: TurnContext): Promise<TurnOutcome> {
       ctx,
       out,
       { tier: "R", reason: `rail-rejected:${rail.rejected?.rule ?? "unknown"}` },
-      fbRail.ok ? fbRail.finalText : undefined
+      fbRail
     );
   }
-  return finalize(ctx, artifact, route, rail.finalText);
+  return finalize(ctx, artifact, route, rail);
 }
 
 /**
@@ -203,13 +204,73 @@ function contextForResolution(ctx: TurnContext): string {
   );
 }
 
+/**
+ * A NON-SILENT MOVE WITH NOTHING TO SEND IS NOT A TURN (F072).
+ *
+ * Two paths produced exactly that shape: a model artifact carrying a move and
+ * an empty (or absent) message - the rails call an empty message "nothing to
+ * verify" and return ok with no text - and a reflex line a post-rail rejected.
+ * Neither reached the `!rail.ok` ladder in runTurn, so `finalize` rendered
+ * `text: undefined` under a move that was not silent. live.ts then sent
+ * nothing, armed no re-entry (the 3-minute tick is keyed on move === "silent"),
+ * and the agent loop settled the inbound claim as delivered: the shop's
+ * question was never answered and nothing ever re-entered the thread. With
+ * move "bargain" the same shape also spent a round, and with "verify-recap" it
+ * latched the once-per-thread recap, because mergeDigest keys both off the
+ * MOVE.
+ *
+ * So: same move's template first (the decision stands - only the wording was
+ * missing or refused), then the ladder, each through the real rails; and when
+ * nothing survives the turn says SILENT out loud, so the round is not spent,
+ * the recap is not latched, and the caller schedules its re-entry instead of
+ * believing it spoke. Runs BEFORE mergeDigest for exactly that reason.
+ */
+function rescueEmptyTurn(
+  ctx: TurnContext,
+  artifact: TurnArtifact,
+  rail: RailResult
+): { artifact: TurnArtifact; text?: string; reason: ModelRoute["reason"] } {
+  const reason: ModelRoute["reason"] = rail.rejected
+    ? `rail-rejected:${rail.rejected.rule}`
+    : `empty-draft:${artifact.move}`;
+  const sameMove = templateFor(ctx, artifact.move);
+  if (sameMove) {
+    const fb: TurnArtifact = {
+      ...artifact,
+      read: { intent: "fallback" },
+      think: `${reason} - deterministic ${artifact.move}`,
+      message: sameMove,
+      counterPricePerDay: undefined,
+      leverageUsed: fallbackLeverage(ctx, artifact.move, sameMove),
+    };
+    const r = runPostRails(ctx, fb);
+    if (r.ok && r.finalText) return { artifact: fb, text: r.finalText, reason };
+  }
+  const ladder = fallbackArtifact(ctx);
+  if (ladder.move !== "silent") {
+    const r = runPostRails(ctx, ladder);
+    if (r.ok && r.finalText) return { artifact: ladder, text: r.finalText, reason };
+  }
+  return { artifact: { ...artifact, move: "silent", message: undefined }, text: undefined, reason };
+}
+
 function finalize(
   ctx: TurnContext,
   artifact: TurnArtifact,
   route: ModelRoute,
-  finalText?: string
+  rail: RailResult
 ): TurnOutcome {
   const v = ctx.inbound.verified;
+  let finalText = rail.ok ? rail.finalText : undefined;
+  // THE SINGLE PLACE THAT CANNOT EMIT A HALF-SENT TURN. `present` is state-only
+  // by design (it marks the deal presentable and sends nothing), and silent is
+  // silent; every other move either carries text or becomes silent here.
+  if (!finalText && artifact.move !== "silent" && artifact.move !== "present") {
+    const rescued = rescueEmptyTurn(ctx, artifact, rail);
+    artifact = rescued.artifact;
+    finalText = rescued.text;
+    route = { ...route, tier: "R", reason: rescued.reason };
+  }
   // WHICH FACT A CONFIRM IS ABOUT is decided by the policy, never by the model:
   // the model picks the MOVE from a closed vocabulary, and the subject is
   // already determined by what the comprehension pass could not settle. Stamped

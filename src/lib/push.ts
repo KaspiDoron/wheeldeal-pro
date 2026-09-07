@@ -219,6 +219,11 @@ export async function sendPushCollapsed(
  * Send a push to all of a user's subscribed devices. Best-effort: prunes dead
  * subscriptions (410 Gone / 404) and never throws. No-op when VAPID is unset.
  */
+/** Per-endpoint https timeout for one push. Short on purpose: the callers that
+ *  await this sit inside a webhook, and a dead endpoint must not spend their
+ *  whole after-work budget. */
+const PUSH_TIMEOUT_MS = 4_000;
+
 export async function sendPushToUser(
   email: string,
   payload: { title: string; body: string; url?: string; tag?: string }
@@ -253,7 +258,12 @@ export async function sendPushToUser(
       try {
         await webpush.sendNotification(
           { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } },
-          data
+          data,
+          // A REQUEST THAT CANNOT HANG (audit F039). web-push sets an https
+          // timeout only when this option is passed, and it was not - so an
+          // endpoint that accepted the connection and then went quiet held the
+          // send open with nothing to cut it, on a path the reply now awaits.
+          { timeout: PUSH_TIMEOUT_MS }
         );
         out.delivered += 1;
         out.results.push({ endpoint: s.endpoint, ok: true });

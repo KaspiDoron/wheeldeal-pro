@@ -681,5 +681,10 @@ export interface ModelRoute {
     // went out instead - suffixed with the rule that fired. This used to be
     // recorded as "quota-overflow", so Ops could not tell an outage from a
     // misbehaving model.
-    | `rail-rejected:${string}`;
+    | `rail-rejected:${string}`
+    // The model picked a non-silent move and wrote NOTHING (an empty or
+    // absent message), so the deterministic template went out under the
+    // move it chose - suffixed with that move. Before this was recorded the
+    // turn sent nothing while claiming to have acted (F072).
+    | `empty-draft:${string}`;
 }

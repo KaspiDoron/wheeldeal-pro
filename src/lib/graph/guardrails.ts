@@ -320,12 +320,31 @@ export function citedDurationDays(text: string): number[] {
  * a token whose resolved day-count differs from durationDays AND is a plausible
  * rental length (1..90) - a stray "open 3 days a week" style number outside that
  * band is left alone. Returns the corrected text and whether anything changed.
+ *
+ * NOT EVERY DAY-COUNT IN OUR OWN COPY IS OURS (F106). A rival's per-day figure
+ * that we DIVIDED out of their multi-day package has to be phrased as the
+ * arithmetic it is - "another shop's 7-day price works out to about 200/day" -
+ * and `session-rivals` stamps `derivedFromDays` for exactly that reason.
+ * Rewriting that 7 into the traveller's own 10 turns an honest derivation into
+ * a quote no rival ever gave: the precise lie the provenance chain exists to
+ * prevent, asserted at the last hop before the wire. `protectedDays` carries
+ * those foreign spans; a token resolving into that set is left alone.
+ * Everything else - including a bare hallucinated count in the same message -
+ * is still rewritten, so the production 5 -> 3 case is untouched. Deliberately
+ * an explicit set rather than a clause heuristic: "another shop" also opens our
+ * own bargain template, so phrasing cannot tell a real basis from an invention.
  */
 export function correctDuration(
   text: string,
-  durationDays: number | undefined
+  durationDays: number | undefined,
+  protectedDays?: ReadonlyArray<number | undefined | null>
 ): { text: string; changed: boolean; from: number[] } {
   if (!text || !durationDays || durationDays < 1) return { text, changed: false, from: [] };
+  const spared = new Set(
+    (protectedDays ?? []).filter(
+      (n): n is number => typeof n === "number" && Number.isFinite(n) && n > 0
+    )
+  );
   const from: number[] = [];
   const canonical = `${durationDays} ${durationDays === 1 ? "day" : "days"}`;
   // MATCH ON THE FOLDED TEXT, SPLICE INTO THE ORIGINAL.
@@ -355,6 +374,9 @@ export function correctDuration(
     // leave untouched.
     if (resolved === durationDays) continue;
     if (resolved < 1 || resolved > 90) continue;
+    // A span that belongs to somebody else (a rival's package basis, a span the
+    // shop itself stated). Correcting it would be the lie, not the fix.
+    if (spared.has(resolved)) continue;
     from.push(resolved);
     out += text.slice(cursor, at) + canonical;
     cursor = at + whole.length;

@@ -92,8 +92,22 @@ function buildPrompt(ctx: TurnContext): { system: string; user: string } {
   // quoted what - only that a real, live, cheaper quote exists in this search.
   // Handing it the names is how a name ends up in a message to a competitor;
   // not handing them over is the structural half of the disclosure rule.
+  // ...AND NEVER A DERIVED FIGURE PASSED OFF AS A QUOTE (F137). The model is
+  // told to cite one of these verbatim, so a line that reads like a per-day
+  // quote IS the claim it makes. `session-brief` already prints this exact
+  // suffix; the list the composer works from carried the bare number while the
+  // leverage card in the same prompt ordered "works out to about", which is a
+  // contradiction the model resolves however it likes.
   const rivalLines = s.rivals.length
-    ? s.rivals.map((r) => `- another shop this search: ${r.pricePerDay} ${r.currency}/day`).join("\n")
+    ? s.rivals
+        .map(
+          (r) =>
+            `- another shop this search: ${r.pricePerDay} ${r.currency}/day` +
+            (typeof r.derivedFromDays === "number" && r.derivedFromDays > 0
+              ? ` (their ${r.derivedFromDays}-day package worked out per day - not a price they typed, say "works out to about")`
+              : "")
+        )
+        .join("\n")
     : "(no other shop has quoted yet)";
   const bench = s.benchmark
     ? `Grounded market rate: ${s.benchmark.pricePerDay} ${s.benchmark.currency}/day (verified from a real listing).`
@@ -633,18 +647,72 @@ function vehicleLine(ctx: TurnContext): string {
  * GREETINGS (first outbound only) and sign-offs, and these are all mid-thread
  * bodies with neither.
  *
- * Seeded on the thread, so one shop always hears the same phrasing from the
- * same traveller - a person does not rephrase themselves at random - while two
- * shops in the same hunt hear different ones. `fnv1a32` + `mulberry32` is the
- * pair the copy layer already draws from; the inline djb2 is retired rather
- * than copied a second time.
+ * Seeded on the thread, so one shop hears a phrasing that is theirs rather than
+ * the fleet's, while two shops in the same hunt hear different ones. `fnv1a32`
+ * + `mulberry32` is the pair the copy layer already draws from; the inline djb2
+ * is retired rather than copied a second time.
  *
  * `salt` separates families that share a thread, so the licence draw and the
  * deposit draw are independent rather than always landing on the same index.
+ *
+ * AND THE ROUND IS AN AXIS TOO (F111). The seed was `threadKey|salt` alone, so
+ * the draw was turn-INVARIANT: two consecutive deterministic turns on one
+ * thread - a provider outage, or two rail rejections in a row - composed the
+ * same sentence byte for byte. `guardOutbound`'s idempotency preflight drops a
+ * byte-identical body to the same shop inside 6h with `terminal: true`, and
+ * only NON-terminal verdicts are re-parked, so the second reply was discarded
+ * outright and the shop's message went unanswered. Nothing downstream can be
+ * relied on to save it: a localized thread carries a gloss and so skips
+ * `ensureGloballyUnique` entirely, and a voice profile that never uses emoji
+ * makes `enforceEmojiTone` a deterministic no-op.
+ *
+ * The round SHIFTS the thread's own index rather than reseeding, so round 0 is
+ * byte-for-byte what it always was, consecutive rounds can never collide (every
+ * family has more members than the 4-round cap), and the whole thing stays pure
+ * arithmetic over `ctx` - the replay arm remains byte-stable.
  */
 function seededFamily(ctx: TurnContext, salt: string, family: readonly string[]): string {
   const rng = mulberry32(fnv1a32(`${ctx.thread.threadKey}|${salt}`));
-  return family[Math.floor(rng() * family.length) % family.length];
+  const base = Math.floor(rng() * family.length) % family.length;
+  const round = Math.max(0, Math.floor(ctx.thread.digest.round ?? 0));
+  return family[(base + round) % family.length];
+}
+
+/**
+ * THE FIGURE THE RIVAL-CITE BARGAIN TEMPLATE PRINTS, or undefined when there is
+ * no cheaper rival on a priced thread.
+ *
+ * A NUMBER A PERSON WOULD SAY OUT LOUD. `beatRivalTarget` solved decimals
+ * ("189.5/day reads as a machine wrote it") and stopped there, so the
+ * deterministic ask emitted 219 against a rival at 230, 178 against 187, 1378
+ * against 1450. Nobody haggling in a shop says 1378. `niceRound` exists for
+ * exactly this and was reachable from here the whole time - the prompt path
+ * started using it and the template, which is what actually goes out on every
+ * provider failure and every rail rejection, did not.
+ *
+ * `niceRoundBelow` for the clamp, not `niceRound`: rounding to the NEAREST
+ * step turns a beating ask of 219 into 220 and then, against a rival at 220,
+ * back ONTO the rival - a match, not leverage. Rounding down into the bound is
+ * the whole reason that function exists.
+ *
+ * Exported for the provenance rail: this is a SECOND ladder (askTargetFor runs
+ * computeRoundTarget with the sheet-anchor clamp; this rounds beatRivalTarget),
+ * the two need not agree, and the rail has to ground the figure that was
+ * actually printed - not merely the one the prompt was shown.
+ */
+export function templateBargainTarget(ctx: TurnContext): number | undefined {
+  const quoteNow = quoteOnTable(ctx);
+  const rival = cheapestCheaperRival(ctx.session.rivals, quoteNow);
+  if (!rival || typeof quoteNow !== "number" || quoteNow <= 0) return undefined;
+  const raw = beatRivalTarget({
+    rivalPricePerDay: rival.pricePerDay,
+    quotePerDay: quoteNow,
+    floorPerDay: ctx.guards.floorPerDay,
+  });
+  const rounded = raw > 0 ? niceRound(raw) : raw;
+  const target =
+    rounded > 0 && rounded >= rival.pricePerDay ? niceRoundBelow(raw, rival.pricePerDay) : rounded;
+  return target > 0 ? target : undefined;
 }
 
 export function templateFor(ctx: TurnContext, move: MoveKind): string | undefined {
@@ -664,30 +732,7 @@ export function templateFor(ctx: TurnContext, move: MoveKind): string | undefine
       const rival = cheapestCheaperRival(ctx.session.rivals, quoteNow);
       if (rival && typeof quoteNow === "number" && quoteNow > 0) {
         const cur = rival.currency ?? ctx.session.currency ?? "";
-        // A NUMBER A PERSON WOULD SAY OUT LOUD.
-        //
-        // `beatRivalTarget` solved decimals ("189.5/day reads as a machine
-        // wrote it") and stopped there, so the deterministic ask emitted 219
-        // against a rival at 230, 178 against 187, 1378 against 1450. Nobody
-        // haggling in a shop says 1378. `niceRound` exists for exactly this and
-        // was reachable from here the whole time - the prompt path started
-        // using it this round and the template, which is what actually goes out
-        // on every provider failure and every rail rejection, did not.
-        //
-        // `niceRoundBelow` for the clamp, not `niceRound`: rounding to the
-        // NEAREST step turns a beating ask of 219 into 220 and then, against a
-        // rival at 220, back ONTO the rival - a match, not leverage. Rounding
-        // down into the bound is the whole reason that function exists.
-        const raw = beatRivalTarget({
-          rivalPricePerDay: rival.pricePerDay,
-          quotePerDay: quoteNow,
-          floorPerDay: ctx.guards.floorPerDay,
-        });
-        const rounded = raw > 0 ? niceRound(raw) : raw;
-        const target =
-          rounded > 0 && rounded >= rival.pricePerDay
-            ? niceRoundBelow(raw, rival.pricePerDay)
-            : rounded;
+        const target = templateBargainTarget(ctx) ?? 0;
         // THE SHOP'S OWN MONEY, IN SYMBOLS. This printed the currency CODE -
         // "THB 219/day" - where the failover engine and the traveller's own UI
         // both print a symbol. A shop reading "THB 219" is reading an invoice,
@@ -695,20 +740,53 @@ export function templateFor(ctx: TurnContext, move: MoveKind): string | undefine
         // that already knows every symbol this app supports, and it falls back
         // to "219 THB" for a currency it has no symbol for.
         const money = (n: number) => agentMoney(n, cur || undefined);
+        // SAY THE ARITHMETIC WHEN IT IS ARITHMETIC (F137). A per-day we DIVIDED
+        // out of that shop's multi-day package is not a price anyone quoted for
+        // this rental, and `validRivals` stamps `derivedFromDays` for exactly
+        // that reason. The LLM arm's leverage card has always been ordered to
+        // say "works out to about"; this arm - the one that runs on every
+        // provider failure and every rail rejection - claimed the figure as a
+        // quote. The rival's own span is protected from the duration rail
+        // (spte/rails: correctDuration protectedDays), so it reaches the wire
+        // as the span it actually is.
+        const basis = rival.derivedFromDays;
+        const offer =
+          typeof basis === "number" && basis > 0
+            ? `Another shop's ${basis}-day price works out to about ${money(rival.pricePerDay)}/day for the same ${ctx.session.rfq.vehicleClass}`
+            : `Another shop offered ${money(rival.pricePerDay)}/day for the same ${ctx.session.rfq.vehicleClass}`;
+        // ONE HAND, MORE THAN ONE WAY TO PLAY IT (F111). The cite and the beat
+        // target are arithmetic and must not move, but the sentence around them
+        // was a constant - so the second deterministic turn on a thread composed
+        // the first one byte for byte and the outbound guard's idempotency
+        // preflight dropped it terminally. The families run through
+        // `seededFamily`, which now carries the round, so consecutive turns
+        // cannot collide while one thread still keeps its own voice.
         return target > 0 && target < rival.pricePerDay
-          ? `Thanks! Another shop offered ${money(rival.pricePerDay)}/day for the same ${ctx.session.rfq.vehicleClass} - could you do ${money(target)}/day for ${nDays(days)}?`
-          : `Thanks! Another shop offered ${money(rival.pricePerDay)}/day for the same ${ctx.session.rfq.vehicleClass} - could you go lower than that for ${nDays(days)}?`;
+          ? seededFamily(ctx, "bargain-rival", [
+              `Thanks! ${offer} - could you do ${money(target)}/day for ${nDays(days)}?`,
+              `Thanks for that! ${offer} - would ${money(target)}/day work for ${nDays(days)}?`,
+              `Appreciate it! ${offer} - any chance of ${money(target)}/day for ${nDays(days)}?`,
+              `Got it, thanks! ${offer} - is ${money(target)}/day possible for ${nDays(days)}?`,
+            ])
+          : seededFamily(ctx, "bargain-rival-open", [
+              `Thanks! ${offer} - could you go lower than that for ${nDays(days)}?`,
+              `Thanks for that! ${offer} - what could you do below that for ${nDays(days)}?`,
+              `Appreciate it! ${offer} - any chance you can beat that for ${nDays(days)}?`,
+              `Got it, thanks! ${offer} - is there anything under that for ${nDays(days)}?`,
+            ]);
       }
       return v.pricePerDay
         ? seededFamily(ctx, "bargain-soft", [
             `Thanks! Any chance you can do a bit better for ${nDays(days)}?`,
             `Appreciate it! Is there any room on that for ${nDays(days)}?`,
             `Thanks for that! Could you stretch a little for ${nDays(days)}?`,
+            `Got it, thanks! Is that your best rate for ${nDays(days)}?`,
           ])
         : seededFamily(ctx, "bargain-ask", [
             `Could you share your best price for ${nDays(days)}?`,
             `What would your best price be for ${nDays(days)}?`,
             `Could you let me know your best rate for ${nDays(days)}?`,
+            `What is the best you can do for ${nDays(days)}?`,
           ]);
     }
     case "confirm-vehicle":
@@ -905,16 +983,33 @@ export function templateFor(ctx: TurnContext, move: MoveKind): string | undefine
       if (nudgeRival && nudgeRival.pricePerDay > 0) {
         const rm = (n: number) =>
           agentMoney(n, nudgeRival.currency ?? ctx.session.currency ?? undefined);
+        // ...AND IT CITES THE FIGURE AS WHAT IT IS (F137). "has quoted" /
+        // "someone else here is at" are claims about what a shop SAID. When the
+        // per-day was divided out of that shop's multi-day package nobody said
+        // it, so the nudge states the arithmetic instead - the same directive
+        // the leverage card gives the LLM arm, on the arm that actually runs
+        // when the providers are down.
+        const nudgeBasis = nudgeRival.derivedFromDays;
+        if (typeof nudgeBasis === "number" && nudgeBasis > 0) {
+          return seededFamily(ctx, "momentum-rival-derived", [
+            `Just checking in! Another shop's ${nudgeBasis}-day price works out to about ${rm(nudgeRival.pricePerDay)}/day - could you let me know your best price for ${nDays(days)}?`,
+            `Hope you're well! Another shop's ${nudgeBasis}-day price works out to about ${rm(nudgeRival.pricePerDay)}/day - what could you do for ${nDays(days)}?`,
+            `Following up - another shop's ${nudgeBasis}-day price works out to about ${rm(nudgeRival.pricePerDay)}/day. Any chance you can beat that for ${nDays(days)}?`,
+            `Checking back in - another shop's ${nudgeBasis}-day price works out to about ${rm(nudgeRival.pricePerDay)}/day. Is there anything you can do for ${nDays(days)}?`,
+          ]);
+        }
         return seededFamily(ctx, "momentum-rival", [
           `Just checking in! Another shop here has quoted ${rm(nudgeRival.pricePerDay)}/day - could you let me know your best price for ${nDays(days)}?`,
           `Hope you're well! We already have ${rm(nudgeRival.pricePerDay)}/day from another shop nearby - what could you do for ${nDays(days)}?`,
           `Following up - someone else here is at ${rm(nudgeRival.pricePerDay)}/day. Any chance you can beat that for ${nDays(days)}?`,
+          `Checking back in - we already have ${rm(nudgeRival.pricePerDay)}/day from another shop here. Could you beat that for ${nDays(days)}?`,
         ]);
       }
       return seededFamily(ctx, "momentum", [
         `Just checking in - were you able to check a price for ${nDays(days)}?`,
         `Hope you're well! Any word on a rate for ${nDays(days)}?`,
         `Following up gently - could you let me know your best price for ${nDays(days)}?`,
+        `Checking back in - what would your best rate be for ${nDays(days)}?`,
       ]);
     case "verify-recap": {
       // STEP 7 - DETERMINISTIC BY DESIGN, grounded by construction: every
