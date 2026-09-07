@@ -520,7 +520,25 @@ export async function composeForNode(args: ComposeArgs): Promise<NodeResult> {
 
     case "closing-message": {
       const p = input.event.payload ?? {};
-      const price = Number(p.pricePerDay) || f.pricePerDay;
+      // THE CLOSING PRICE IS THE THREAD'S, NOT THE BROWSER'S (audit F143).
+      // /api/negotiate/close-deal forwards `Number(body.pricePerDay)` straight
+      // from the rendered card, and this line used to prefer it outright. A
+      // card drawn before the shop amended its quote then told the shop
+      // "250/day as we agreed" while the standing quote in the same thread was
+      // 300 - a price the traveller never agreed to, asserted in their name.
+      // The thread's own field is the record of what the shop actually said, so
+      // it wins whenever the two disagree; the disagreement is traced.
+      const claimed = Number(p.pricePerDay) || undefined;
+      const held = f.pricePerDay;
+      const disagrees =
+        typeof claimed === "number" &&
+        typeof held === "number" &&
+        held > 0 &&
+        Math.abs(claimed - held) > Math.max(1, held * 0.01);
+      const price = disagrees ? held : claimed ?? held;
+      const priceNote = disagrees
+        ? ` (the card posted ${claimed}/day but this thread holds ${held}/day - sent the thread's number)`
+        : "";
       const cur = String(p.currency ?? f.currency ?? currencyForRegion(input.ctx.region) ?? "");
       const when = typeof p.when === "string" ? p.when : "";
       const fulfillment = (p.fulfillment as string) || f.fulfillment || "";
@@ -541,7 +559,7 @@ export async function composeForNode(args: ComposeArgs): Promise<NodeResult> {
       return {
         message: pick(CLOSING_LINES).replace("{details}", details).slice(0, 400),
         kind: "deal-close",
-        reasoning: "the traveller locked this deal - telling the shop and handing the chat back",
+        reasoning: `the traveller locked this deal - telling the shop and handing the chat back${priceNote}`,
       };
     }
 

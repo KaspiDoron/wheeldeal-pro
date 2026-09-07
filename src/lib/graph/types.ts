@@ -496,6 +496,14 @@ export interface DeliverResult {
   queuedUntil?: string;
   /** The wa_outbox row the message is parked in - the Ops join key (F10). */
   outboxRowId?: number;
+  /**
+   * `blocked`, but NOT dropped: another invocation holds the send claim for
+   * this exact message and is delivering it right now. Every other block is
+   * a drop (takeover, cancellation, a stale draft, a guard veto), and a caller
+   * that latched state off the MOVE must re-open it; on this one it must not,
+   * or the shop receives the message twice (F073).
+   */
+  inFlight?: boolean;
 }
 
 // ---------------------------------------------------------------------------

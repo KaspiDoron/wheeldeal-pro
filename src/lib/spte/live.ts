@@ -46,6 +46,15 @@ const DEFAULT_MAX_ROUNDS = 4;
  * re-entry, armed at most once per thread.
  */
 const PRICE_WATCH_MINUTES = 22;
+/**
+ * The budget for the lost-best push (audit F039). Much smaller than
+ * AFTER_BUDGET_MS: this runs inside the Evolution inbound webhook after the
+ * reply has already spent its send budget, and the work is two Supabase reads
+ * plus one https request - so a stalled push endpoint is abandoned long before
+ * the webhook's own 200 is at risk. Awaited rather than detached, because a
+ * detached promise on Cloud Run does not finish, it stops (see lib/after.ts).
+ */
+const LOST_BEST_PUSH_BUDGET_MS = 2_000;
 import { buildLedger } from "../thread/ledger";
 import type { MoveKind, SessionSnapshot, ThreadDigest, TurnContext, VerifiedExtraction } from "./types";
 import { shopAskedLocation, shopAskedLicense, shopAskedLicensePhoto } from "../wa/detectors";
@@ -1138,10 +1147,19 @@ async function localizeSpteOutbound(args: {
       // BELT AND BRACES on the one rail that matters. localizeMessage already
       // refuses a drifted rewrite; asserting it again here means a change to
       // that function can never quietly ship a wrong price to a shop.
-      const { numbersPreserved } = await import("../integrity/translation");
-      if (!numbersPreserved(text, localized.text)) {
-        await fallbackEvent("numbers-drifted", region);
-        return { text, skipped: "numbers-drifted" };
+      // ...AND IN BOTH DIRECTIONS (F142). Every number rail ran on the ENGLISH
+      // draft; THIS string is what the shop actually receives, so a numeral the
+      // translation INVENTED - a price the thread never held, or a changed
+      // rental length - has passed every guard the turn ran. The drift reason
+      // is reported separately, so the added-numeral rejection rate can be
+      // measured on the localize-fallback event before anything stricter than a
+      // fidelity check is considered on this hop.
+      const { numberDrift } = await import("../integrity/translation");
+      const drift = numberDrift(text, localized.text);
+      if (drift) {
+        const reason = drift === "added" ? "numbers-added" : "numbers-drifted";
+        await fallbackEvent(reason, region);
+        return { text, skipped: reason };
       }
       return { text: localized.text, gloss: localized.english ?? text };
     }
@@ -1228,7 +1246,20 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
           undefined,
           { budgetMs: 6_000 }
         ).catch(() => null);
-        if (read?.value?.answered && !read.value.stillUnclear) {
+        const answered = read?.value?.answered === true && read.value.stillUnclear !== true;
+        // AN ANSWER IS NOT A YES (F132). The classifier's own instructions
+        // count a correction and a plain "no" as answers, and this gate used
+        // to confirm on either - so "no, deposit is 3000 and we do not
+        // deliver" stamped shop_confirmed and made a rejected deal
+        // presentable. Only an explicit affirmative confirms. An explicit
+        // non-affirmative is the shop amending the terms, and takes the same
+        // once-only amendment path as the price correction above (the
+        // corrected facts flow in through the ordinary comprehension merge);
+        // once that amendment is spent it changes nothing, and the delivered
+        // recap's clock still releases the thread with the honest caveat. A
+        // read with no verdict - an outage, or a model that omitted the
+        // field - is "not confirmed yet", exactly as before.
+        if (answered && read?.value?.affirmed === true) {
           dg.recapConfirmedAt = io.now();
           const { advanceThreadStage } = await import("../funnel/stages");
           await advanceThreadStage(
@@ -1250,6 +1281,10 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
               fulfillment: priorState?.fields.fulfillment ?? null,
             })
             .catch(() => {});
+        } else if (answered && read?.value?.affirmed === false && !dg.recapAmended) {
+          dg.recapSent = undefined;
+          dg.recapSentAt = undefined;
+          dg.recapAmended = true;
         }
       }
     } catch {
@@ -1366,6 +1401,9 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
   // that has been read as a delivery bug more than once. Ops can now join to
   // the row and render what it is ACTUALLY doing right now.
   let outboxRowId: number | null = null;
+  // A `blocked` verdict that is actually a delivery by a sibling invocation
+  // (see DeliverResult.inFlight) - the recap latch below must not re-open on it.
+  let sendInFlight = false;
   // ---- W4.6: WHICH LANGUAGE THIS THREAD IS IN --------------------------------
   //
   // A DECISION, not a per-turn recomputation. `nextThreadLanguage` changes it
@@ -1478,6 +1516,7 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
       const res = await io.guardAndSend({ senderKey, toNumber, text: send, meta, shopOpenNow: input.shopOpenNow });
       delivered = res.delivered;
       outboxRowId = res.outboxRowId ?? null;
+      sendInFlight = res.inFlight === true;
     } catch {
       // Post-decision send failure: park it so the drain retries, never re-run
       // the whole turn (that path belongs to the pre-send fallback only).
@@ -1504,8 +1543,23 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
   // and advanceConfirmState measure against; without them a shop that never
   // replies freezes the thread forever (the confirm-wait finding).
   const reachedWire = send && delivered !== "blocked" && delivered !== "failed";
-  if (reachedWire && outcome.move === "verify-recap") {
-    outcome.digest.recapSentAt = io.now();
+  // THE RECAP LATCH FOLLOWS DELIVERY (F073). mergeDigest latches `recapSent`
+  // off the MOVE - deterministically, so golden replays see it - but a recap
+  // the shop never received is not a recap sent. Persisting that latch with
+  // no clock froze completed deals: policy.ts never made verify-recap legal
+  // again (latched) and never made present legal either (no confirmation, and
+  // no clock to expire), so the traveller's card never showed the finished
+  // deal. A duplicate-in-flight verdict is the one block that IS a delivery -
+  // a sibling invocation holds the claim for this exact text - so it keeps the
+  // latch and takes the clock; every other block, and a failed send, re-open
+  // the latch so the next turn may recap again.
+  if (outcome.move === "verify-recap") {
+    if (reachedWire || sendInFlight) {
+      outcome.digest.recapSentAt = io.now();
+    } else {
+      outcome.digest.recapSent = undefined;
+      outcome.digest.recapSentAt = undefined;
+    }
   }
   if (reachedWire && outcome.move === "confirm") {
     const w = outcome.digest.pending?.find((p) => p.state === "waiting");
@@ -1732,8 +1786,20 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
       (low!.vendorId === input.ctx.vendorId ||
         (typeof mine === "number" && typeof low!.pricePerDay === "number" && mine <= low!.pricePerDay));
     if (wasBest) {
-      void (async () => {
-        try {
+      // AWAITED, WITH A BUDGET (audit F039). This was the last detached
+      // `void (async () => ...)()` on the reply path, and after.ts explains why
+      // that is not "background work": Cloud Run throttles the container's CPU
+      // to ~0 the instant the response is flushed, so the promise stops
+      // mid-flight - no notification, and no markPushSent, so the budget ledger
+      // disagreed with what the traveller actually received. The budget is
+      // deliberately much smaller than AFTER_BUDGET_MS: this block sits inside
+      // the Evolution inbound webhook AFTER the reply already spent its send
+      // budget, and it is two reads plus one https call, so one stalled push
+      // endpoint must never cost the webhook its 200.
+      const { finishBeforeResponse } = await import("../after");
+      await finishBeforeResponse(
+        "lost-best-push",
+        async () => {
           const { worthAnInterruption } = await import("../notify/significance");
           const { notifyState, markPushSent } = await import("../notify/state");
           const g = worthAnInterruption({ kind: "agent-blocked" }, await notifyState(input.ctx.sender!));
@@ -1746,10 +1812,9 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
             tag: `lost:${input.ctx.vendorId ?? "best"}`,
           });
           await markPushSent(input.ctx.sender!, `agent-blocked: ${g.reason}`);
-        } catch {
-          /* a notification is never worth breaking a turn for */
-        }
-      })();
+        },
+        LOST_BEST_PUSH_BUDGET_MS
+      );
     }
   }
 

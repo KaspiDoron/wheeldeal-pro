@@ -36,8 +36,16 @@ export interface LeverageCard {
 }
 
 export interface LeverageInput {
-  /** Other shops' live quotes this search, same currency, same vehicle. */
-  rivals: Array<{ pricePerDay: number; currency?: string; shop?: string }>;
+  /** Other shops' live quotes this search, same currency, same vehicle.
+   *  `derivedFromDays` is the provenance `validRivals` stamps when the per-day
+   *  was DIVIDED out of a multi-day package - it travels WITH the row so the
+   *  figure and the claim about it can never be picked from different rivals. */
+  rivals: Array<{
+    pricePerDay: number;
+    currency?: string;
+    shop?: string;
+    derivedFromDays?: number;
+  }>;
   /** This shop's live quote. */
   quotePerDay?: number;
   currency?: string;
@@ -82,17 +90,28 @@ export interface LeverageInput {
   isSessionLow?: boolean;
 }
 
-/** A rival only counts when it is genuinely CHEAPER than what is on the table. */
+/**
+ * A rival only counts when it is genuinely CHEAPER than what is on the table.
+ *
+ * THE PROVENANCE TRAVELS WITH THE FIGURE (F137). This used to rebuild a bare
+ * `{pricePerDay, currency}` and drop `derivedFromDays`, so every caller that
+ * asked "which rival do I cite?" got a number with no way to know whether any
+ * shop had ever said it. The deterministic bargain and momentum templates then
+ * put "Another shop offered 333/day" on live WhatsApp for a figure that was
+ * somebody's 3-day package divided out - the exact claim `validRivals` stamps
+ * the basis to prevent, and the one the leverage card's own directive forbids
+ * in the same prompt.
+ */
 export function cheapestCheaperRival(
   rivals: LeverageInput["rivals"],
   quotePerDay?: number
-): { pricePerDay: number; currency?: string } | null {
+): { pricePerDay: number; currency?: string; derivedFromDays?: number } | null {
   if (typeof quotePerDay !== "number") return null;
-  let best: { pricePerDay: number; currency?: string } | null = null;
+  let best: { pricePerDay: number; currency?: string; derivedFromDays?: number } | null = null;
   for (const r of rivals) {
     if (typeof r.pricePerDay !== "number" || r.pricePerDay >= quotePerDay) continue;
     if (!best || r.pricePerDay < best.pricePerDay) {
-      best = { pricePerDay: r.pricePerDay, currency: r.currency };
+      best = { pricePerDay: r.pricePerDay, currency: r.currency, derivedFromDays: r.derivedFromDays };
     }
   }
   return best;
@@ -151,7 +170,12 @@ export function planLeverage(input: LeverageInput): LeverageCard[] {
     // package was never quoted by anyone for this rental length, so it is
     // phrased as the arithmetic it is instead of as a quote (owner report 5
     // #2 - the Thai draft that cited "167 baht/day", a number no shop said).
-    const derivedDays = input.rivalDerivedFromDays;
+    // THE BASIS OF THE ROW WE ARE ACTUALLY CITING, not of whatever row the
+    // caller happened to look at first: `cheapestCheaperRival` may pick a
+    // different rival than `rivals[0]` whenever the cheapest one is not below
+    // this shop's quote, and a provenance note attached to the wrong figure is
+    // its own false claim. The caller's value stays as the fallback.
+    const derivedDays = rival.derivedFromDays ?? input.rivalDerivedFromDays;
     const offerPhrase =
       typeof derivedDays === "number" && derivedDays > 0
         ? `another shop's ${derivedDays}-day price works out to about ${rival.pricePerDay} ${rivalCur}/day - say it EXACTLY that way ("works out to about"), never as a per-day price they quoted you`
@@ -204,60 +228,190 @@ export function leadCard(cards: LeverageCard[]): LeverageCard | null {
   return cards[0] ?? null;
 }
 
+/** Vehicle and shop nouns: in every shop name and in every message. */
+const GENERIC = new Set([
+  "rental",
+  "rentals",
+  "rent",
+  "shop",
+  "shops",
+  "moto",
+  "motor",
+  "motorbike",
+  "scooter",
+  "bike",
+  "bikes",
+  "car",
+  "cars",
+  "hire",
+  "service",
+  "services",
+  "center",
+  "centre",
+  "travel",
+  "tour",
+  "tours",
+  "the",
+  "and",
+]);
+
 /**
- * Every name/alias a rival shop is known by, for the disclosure rail. Short and
- * generic words are dropped: rejecting a draft because it contains "rental" or
- * "the" would reject every draft.
+ * WORDS THE ENGINE ITSELF SAYS.
+ *
+ * A rival called "Best Price Rental" used to turn "best" and "price" into
+ * rejection tokens, and "7 Days Rental" turned "days" into one - so every
+ * bargain ask, every licence reflex and every deterministic template the
+ * ladder falls back to was refused, and the thread went mute for the rest of
+ * the hunt. A word the engine's own outbound copy uses is not an identity; it
+ * cannot disclose anything.
+ *
+ * Hand-maintained, and therefore PINNED: negotiation/rival-name-tokens.test.ts
+ * composes every real template and reflex line and fails the moment a word of
+ * them is missing here. Edit a template, run the test, extend this set.
+ */
+const OUTBOUND_VOCABULARY = new Set(
+  (
+    "able about again agreed already alright also amount another appreciate asked available " +
+    "back beat before best better between cash category chance check checking collect compare " +
+    "comparing confirm correct could couple course daily days decide deliver delivered deposit " +
+    "details difference driving else exact expect finalize finalizing following from further " +
+    "gently good great happy have here hold honesty hope hotel idea international just know " +
+    "later letting license licence little look looking lower make mean model models more much " +
+    "nearby need next offer offered okay once only options other passport perfect photo pick " +
+    "pickup picked place places please possible price prices problem quick quote quoted rate " +
+    "rates ready " +
+    "right room same send settled share should some someone something soon sounds staying " +
+    "still stock stretch sure take telling than thank thanks that them then there these they " +
+    "thing think this those three time today tomorrow total valid very want week weeks well " +
+    "were what when where whether which while will with word work worries would your yours"
+  ).split(" ")
+);
+
+/**
+ * HOW OUR OWN COPY POINTS AT A RIVAL WITHOUT NAMING ONE.
+ *
+ * The rival-cite templates say "another shop offered 220/day", "someone else
+ * here is at 200" - a deictic plus a shop noun, deliberately anonymous. So a
+ * "name" made of nothing but those words is not an identity at all, and
+ * treating it as one refuses every rival-cite draft the engine composes (the
+ * golden coherence seed "a real rival licenses the push" replays exactly that:
+ * its synthetic rival is called "Another shop", and the phrase rule muted the
+ * bargain). A real name anchored by ordinary words - "Best Price Rental",
+ * "A1 Rental" - is untouched: neither "best" nor "a1" points at anything.
+ */
+const RIVAL_DEICTIC = new Set([
+  "a",
+  "an",
+  "another",
+  "other",
+  "different",
+  "nearby",
+  "competing",
+  "rival",
+  "next",
+  "someone",
+  "somewhere",
+  "else",
+  "elsewhere",
+  "this",
+  "that",
+  "some",
+]);
+
+/** The competitor nouns a deictic points at - the same nouns the fabricated-
+ *  rival detector in graph/guardrails.ts keys on. Kept local rather than folded
+ *  into GENERIC: this list governs PHRASES only, so a rival named "Sunrise
+ *  Place" still yields "sunrise" as a token exactly as before. */
+const RIVAL_NOUN = new Set([
+  "shop",
+  "shops",
+  "place",
+  "places",
+  "store",
+  "stores",
+  "guy",
+  "guys",
+  "dude",
+  "vendor",
+  "vendors",
+  "rental",
+  "rentals",
+  "dealer",
+  "dealers",
+  "company",
+  "owner",
+  "owners",
+  "seller",
+  "sellers",
+  "one",
+  "people",
+]);
+
+/** A word that could appear in our own copy, and so can never be an identity
+ *  on its own: a generic noun, a word of the engine's vocabulary, or anything
+ *  carrying a digit - prices, day-counts and engine sizes are in every line. */
+const ordinary = (w: string): boolean =>
+  GENERIC.has(w) ||
+  OUTBOUND_VOCABULARY.has(w) ||
+  RIVAL_DEICTIC.has(w) ||
+  RIVAL_NOUN.has(w) ||
+  /\d/.test(w);
+
+/**
+ * Every name/alias a rival shop is known by, for the disclosure rail.
+ *
+ * IDENTITY-SHAPED, not word-shaped: a multi-word name matches as a PHRASE, and
+ * a single word of it is a token only when it is distinctive - not a generic
+ * noun and not a word the engine's own templates use. "Marlin Krabi Motorbike
+ * Rental" still yields "marlin" (and "krabi", and the full name); "Best Price
+ * Rental" yields only the full phrase, because "best" and "price" are what we
+ * say to every shop. A name made of nothing but generic nouns ("Scooter
+ * Rental") has no identity to leak and yields nothing - and so does a name
+ * made of nothing but our own vocabulary with no shop noun to anchor it
+ * ("Best Price"): its phrase IS the bargain ask, and matching it would mute
+ * the thread exactly as the single word did.
  */
 export function rivalIdentityTokens(shops: Array<string | undefined>): string[] {
-  const GENERIC = new Set([
-    "rental",
-    "rentals",
-    "rent",
-    "shop",
-    "shops",
-    "moto",
-    "motor",
-    "motorbike",
-    "scooter",
-    "bike",
-    "bikes",
-    "car",
-    "cars",
-    "hire",
-    "service",
-    "services",
-    "center",
-    "centre",
-    "travel",
-    "tour",
-    "tours",
-    "the",
-    "and",
-  ]);
   const out = new Set<string>();
   for (const shop of shops) {
     const cleaned = String(shop ?? "")
       .toLowerCase()
-      .replace(/[^a-z0-9\s]/g, " ")
+      .replace(/[^a-z0-9]+/g, " ")
       .trim();
     if (!cleaned) continue;
-    // The full name, and each distinctive word in it.
-    if (cleaned.length >= 4) out.add(cleaned);
-    for (const w of cleaned.split(/\s+/)) {
-      if (w.length >= 4 && !GENERIC.has(w)) out.add(w);
+    const words = cleaned.split(" ");
+    // The full name as a PHRASE - when something in it is distinctive, or when
+    // a shop noun anchors otherwise ordinary words ("Best Price Rental", "A1
+    // Rental": no template says those words in a row). Not when it is nothing
+    // but nouns every shop's name carries, and not when it is nothing but
+    // words we say ourselves ("Best Price").
+    const distinctive = words.some((w) => !ordinary(w));
+    const anchored = words.some((w) => GENERIC.has(w)) && !words.every((w) => GENERIC.has(w));
+    // ...unless the whole "name" is how we refer to a rival ourselves.
+    const deicticOnly = words.every(
+      (w) => RIVAL_DEICTIC.has(w) || RIVAL_NOUN.has(w) || GENERIC.has(w)
+    );
+    if (cleaned.length >= 4 && words.length > 1 && (distinctive || (anchored && !deicticOnly))) {
+      out.add(cleaned);
+    }
+    for (const w of words) {
+      if (w.length >= 4 && !ordinary(w)) out.add(w);
     }
   }
   return [...out];
 }
 
-/** Does this draft name a rival shop? Word-boundary matched, so a name that
- *  merely appears inside a longer word is not a false positive. */
+/** Does this draft name a rival shop? Whole-word (and whole-phrase) matched
+ *  over the same normalisation the tokens were built with, so a name that
+ *  merely appears inside a longer word is not a false positive, and a phrase
+ *  written with punctuation between its words ("best-price rental") still is. */
 export function namesRival(text: string, tokens: string[]): string | null {
-  const s = String(text ?? "").toLowerCase();
+  const norm = ` ${String(text ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()} `;
   for (const token of tokens) {
-    const rx = new RegExp(`(?:^|[^a-z0-9])${token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:[^a-z0-9]|$)`);
-    if (rx.test(s)) return token;
+    if (token && norm.includes(` ${token} `)) return token;
   }
   return null;
 }

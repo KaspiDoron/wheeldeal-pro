@@ -273,6 +273,14 @@ export const ConfirmAnswer = z.object({
    * wiser", which must not end the wait either.
    */
   stillUnclear: z.boolean(),
+  /**
+   * They accepted what we put to them AS STATED. A correction, a refusal or a
+   * new condition is an answer (answered: true) that is NOT an affirmation -
+   * the recap gate in spte/live confirms only on this (F132). Optional because
+   * a "passport or cash?" question has no yes: the confirm-wait reader ignores
+   * it, and a model that omits it reads as "no verdict", never as a yes.
+   */
+  affirmed: z.boolean().optional(),
   confidence: z.number().min(0).max(1),
 });
 export type ConfirmAnswer = z.infer<typeof ConfirmAnswer>;
@@ -286,7 +294,7 @@ export function readConfirmAnswer(
   return semanticParse({
     schema: ConfirmAnswer,
     shape:
-      '{"answered": boolean, "answer": string|null, "stillUnclear": boolean, "confidence": 0..1}',
+      '{"answered": boolean, "answer": string|null, "stillUnclear": boolean, "affirmed": boolean, "confidence": 0..1}',
     instructions:
       "We are the traveller's agent. We asked this shop ONE question and have been waiting for " +
       `their reply. OUR QUESTION WAS: "${question.slice(0, 220)}"\n` +
@@ -297,7 +305,10 @@ export function readConfirmAnswer(
       "NOT, however friendly it is. If they responded but we are still no wiser (they repeated " +
       "the same ambiguous wording, or answered a different question), set answered false and " +
       "stillUnclear true. Report what they settled it as in their own words when they did " +
-      "settle it, and never invent an answer they did not give.",
+      "settle it, and never invent an answer they did not give. Set affirmed true ONLY when " +
+      "they accept what we asked exactly as we stated it ('yes', 'correct', 'ok see you'); a " +
+      "correction ('deposit is 3000'), a refusal ('no') or a new condition is answered true " +
+      "but affirmed false.",
     text,
     context,
     options: {
