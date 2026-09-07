@@ -172,6 +172,35 @@ export function identityKey(input: string | null | undefined): string {
   return nationalTail(input) || waDigits(input);
 }
 
+/**
+ * THE ONE `negotiation_threads.thread_key` BUILDER (audit F133).
+ *
+ * There were two, and they disagreed. The funnel ledger keyed
+ * `email:identityKey(number)` (the national tail) while the engine keyed
+ * `email:digitsOnly(number)`, so for essentially every real international
+ * number one shop got TWO rows in a primary-keyed table - the one carrying
+ * `stage` and vendor identity, and the one carrying `phase`/`fields`/the
+ * digest. Ops listed the shop twice and the transcript read `stage: null` for
+ * every live thread.
+ *
+ * WHY THE FULL NUMBER AND NOT THE TAIL. The tail is the stronger IDENTITY (it
+ * survives country-code and leading-zero variation), but a thread key is not
+ * only an identity: `buildTurnFromThread` (graph/engine.ts) rebuilds the
+ * turn's `toDigits` - the SEND TARGET - by slicing the key at its last colon,
+ * and the turn lock keys its slot on those same digits. A national tail there
+ * would address WhatsApp with a number missing its country code. So the key
+ * carries the canonical DIALABLE spelling, and the cross-spelling case is
+ * closed where it belongs: both writers do a spelling-tolerant adoption read
+ * (`numberFilter` on `to_number`) before creating a row, so whichever side
+ * writes first, the other joins that row instead of splitting beside it.
+ */
+export function canonicalThreadKey(
+  userEmail: string | undefined,
+  number: string | null | undefined
+): string {
+  return `${userEmail ?? "system"}:${waDigits(number)}`;
+}
+
 /** Do two numbers denote the same shop, allowing legacy spellings? */
 export function sameNumber(a: string | null | undefined, b: string | null | undefined): boolean {
   const av = new Set(numberVariants(a));

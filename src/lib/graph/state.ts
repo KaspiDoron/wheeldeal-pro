@@ -4,7 +4,7 @@
 // the migration ran (golden rule: everything degrades gracefully).
 
 import type { ExtractedOffer } from "../agents";
-import { digitsOnly } from "../phone";
+import { canonicalThreadKey } from "../wa/phone-key";
 import { boundedSet } from "../bounded-map";
 import type { VehicleConfirmationState } from "../vehicle/confirmation";
 import type {
@@ -14,8 +14,42 @@ import type {
   ThreadPhase,
 } from "./types";
 
+/** ONE builder for both writers of this table - see wa/phone-key
+ *  canonicalThreadKey (audit F133). */
 export function threadKeyFor(userEmail: string | undefined, toDigits: string): string {
-  return `${userEmail ?? "system"}:${digitsOnly(toDigits)}`;
+  return canonicalThreadKey(userEmail, toDigits);
+}
+
+/**
+ * THE SPELLING-TOLERANT ADOPTION READ (audit F133).
+ *
+ * A shop reaches the two writers of `negotiation_threads` in two spellings:
+ * the funnel ledger stamps `selected`/`contacted` with the number Google
+ * Places gave us (often NATIONAL, "081236954642") while the engine keys the
+ * reply off the inbound JID (always INTERNATIONAL, "6281236954642"). An exact
+ * `thread_key=eq.` read misses across that gap, and the miss branch INSERTS -
+ * which is how one shop ended up with two rows, one holding the stage and one
+ * holding the state. The ledger already looks for a row under any spelling
+ * before creating one (funnel/stages.ts); this is the engine's half of the
+ * same rule. Scoped to the owner, so it can never reach another traveller's
+ * thread, and only ever run on a miss - the steady path pays nothing.
+ */
+async function adoptExistingThreadRow(threadKey: string): Promise<Row | null> {
+  const sep = threadKey.lastIndexOf(":");
+  if (sep <= 0) return null;
+  const email = threadKey.slice(0, sep);
+  const digits = threadKey.slice(sep + 1);
+  if (!email || !digits) return null;
+  const { sbSelect } = await import("../runtime-config");
+  const { numberFilter } = await import("../wa/phone-key");
+  const rows = await sbSelect<Row>(
+    "negotiation_threads",
+    `select=*&user_email=eq.${encodeURIComponent(email)}${numberFilter(
+      "to_number",
+      digits
+    )}&order=updated_at.desc&limit=1`
+  );
+  return rows[0] ?? null;
 }
 
 export function newThreadState(args: {
@@ -329,6 +363,11 @@ export async function loadThreadState(
       `select=*&thread_key=eq.${encodeURIComponent(threadKey)}&limit=1`
     );
     if (rows[0]) return fromRow(rows[0]);
+    // Nothing under THIS spelling - a row written under another one is still
+    // this thread (audit F133). fromRow carries the adopted `thread_key`, so
+    // every later save lands on that row rather than beside it.
+    const adopted = await adoptExistingThreadRow(threadKey);
+    if (adopted) return fromRow(adopted);
   } catch {
     /* table missing / Supabase unset - memory fallback below */
   }
@@ -351,7 +390,9 @@ export async function saveThreadState(state: NegotiationThreadState): Promise<vo
   // authoritative store; an evicted cold thread is re-read on next access).
   boundedSet(mem(), state.threadKey, next, 2000);
   try {
-    const { sbSelect, sbInsert, sbUpdate } = await import("../runtime-config");
+    const { sbSelect, sbInsert, sbUpdate, sbUpdateReturning } = await import(
+      "../runtime-config"
+    );
     const row = {
       thread_key: next.threadKey,
       user_email: next.userEmail,
@@ -366,17 +407,51 @@ export async function saveThreadState(state: NegotiationThreadState): Promise<vo
       last_decision_id: next.lastDecisionId ?? null,
       updated_at: next.updatedAt,
     };
+    // The version this write is guarded on. It is the version we loaded,
+    // unless we adopt a row created under another spelling below - then it is
+    // THAT row's version, because that is the row we are about to write.
+    let guardVersion = state.version;
+    let writeRow: Record<string, unknown> = row;
     const existing = await sbSelect<{ version: number; phase: string }>(
       "negotiation_threads",
       `select=version,phase&thread_key=eq.${encodeURIComponent(next.threadKey)}&limit=1`
     );
     if (existing.length === 0) {
-      await sbInsert("negotiation_threads", [row]);
-      return;
+      // ADOPT BEFORE INSERTING (audit F133). The ledger may have created this
+      // shop's row under the other spelling since we loaded - inserting here
+      // would split the shop in two, one row with the stage and one with the
+      // state. Re-target the write instead.
+      const adopted = await adoptExistingThreadRow(next.threadKey);
+      if (adopted) {
+        // AND GUARD IT LIKE ANY OTHER WRITE. This branch used to PATCH the
+        // whole `fields` blob under a bare `thread_key=eq.` filter on the
+        // reasoning that it was "the creation path either way" - but the row
+        // it targets already EXISTS, so a ledger write landing between the
+        // adoption read and this one was silently overwritten: exactly the
+        // unversioned-writer shape M38 exists to eliminate. Falling through to
+        // the guarded write below gives it the same CAS and, on a loss, the
+        // same merge as every other save.
+        next.threadKey = adopted.thread_key;
+        next.version = (adopted.version ?? 0) + 1;
+        guardVersion = adopted.version ?? 0;
+        writeRow = {
+          ...row,
+          thread_key: adopted.thread_key,
+          version: next.version,
+        };
+        // The ledger stamped the shop's identity when it created the row; a
+        // turn that does not know it must not blank it.
+        if (!next.vendorId) delete writeRow.vendor_id;
+        if (!next.vendorName) delete writeRow.vendor_name;
+        boundedSet(mem(), adopted.thread_key, next, 2000);
+      } else {
+        await sbInsert("negotiation_threads", [row]);
+        return;
+      }
     }
     // Structural sanity (free - piggybacks on the version read): an illegal
     // phase jump is logged, never blocked.
-    if (existing[0].phase && !validatePhaseTransition(existing[0].phase, next.phase)) {
+    if (existing[0]?.phase && !validatePhaseTransition(existing[0].phase, next.phase)) {
       await sbInsert("agent_events", [
         {
           kind: "phase-anomaly",
@@ -386,21 +461,43 @@ export async function saveThreadState(state: NegotiationThreadState): Promise<vo
         },
       ]).catch(() => {});
     }
-    // Optimistic write - only wins if nobody else bumped the version.
-    await sbUpdate(
+    // Optimistic write - only wins if nobody else bumped the version. THE
+    // WRITE ITSELF IS THE ANSWER (audit F032): this used to be a fire-and-
+    // forget PATCH followed by a re-read that inferred the outcome from
+    // `after.version !== next.version`, and the commonest race defeats that
+    // test - two turns loading the same version both compute version+1, so a
+    // LOST cas read back as a win and the losing turn's whole write was
+    // dropped in silence, merge and all. `return=representation` says whether
+    // the row matched, and a clean win now also skips the trailing read.
+    const won = await sbUpdateReturning<Row>(
       "negotiation_threads",
-      `thread_key=eq.${encodeURIComponent(next.threadKey)}&version=eq.${state.version}`,
-      row
+      `thread_key=eq.${encodeURIComponent(next.threadKey)}&version=eq.${guardVersion}`,
+      writeRow
     );
     // Lost race? Merge counters with the winner (max of each) - counters only
     // ever grow, so max is the safe union; a doubled counter is safer than an
     // under-count (it can only make the agent MORE polite, never pushier).
-    const after = await sbSelect<Row>(
-      "negotiation_threads",
-      `select=*&thread_key=eq.${encodeURIComponent(next.threadKey)}&limit=1`
-    );
-    if (after[0] && after[0].version !== next.version) {
+    const after = won.length
+      ? []
+      : await sbSelect<Row>(
+          "negotiation_threads",
+          `select=*&thread_key=eq.${encodeURIComponent(next.threadKey)}&limit=1`
+        );
+    if (after[0]) {
       const winner = fromRow(after[0]);
+      // A SEARCH CLOSE OUTRANKS AN IN-FLIGHT TURN (audit F033). closeSearchSession
+      // resets the per-hunt half of `fields` under its own version guard, so a
+      // turn that loaded BEFORE the close must not merge its pre-close reads
+      // back over the reset - not its counters, not its digest, not its price.
+      // The stamp differs only when the winner is a close this turn never saw.
+      const closedUnderUs =
+        typeof winner.fields.searchClosedAt === "string" &&
+        winner.fields.searchClosedAt !== next.fields.searchClosedAt;
+      if (closedUnderUs) {
+        mem().set(state.threadKey, winner);
+        if (next.threadKey !== state.threadKey) mem().set(next.threadKey, winner);
+        return;
+      }
       const nodeRuns = mergeCounters(winner.nodeRuns, next.nodeRuns);
       // RE-ENGAGEMENT survives the race, but CONSERVATIVELY: the winner's
       // decline is authoritative UNLESS our write carried an EXPLICIT
@@ -413,8 +510,36 @@ export async function saveThreadState(state: NegotiationThreadState): Promise<vo
         typeof next.fields.pricePerDay === "number" &&
         next.fields.pricePerDay > 0;
       const declined = nextReengaged ? false : winner.fields.declined ?? false;
+      // KEY-WISE UNION, WINNER AUTHORITATIVE (audit F032). `...winner.fields`
+      // alone deleted every key the losing turn wrote and the winner never
+      // touched - the durable language switch the shop asked for, the pending-
+      // confirm chip, the deposit and handover facts - so an inbound turn that
+      // lost the version race to a user action silently forgot the message it
+      // had just read. Union first, winner second: a key BOTH wrote still
+      // resolves to the winner's value.
       const mergedFields = {
+        ...next.fields,
         ...winner.fields,
+        // A DELIBERATE CLEAR IS NOT A GAP. persistThreadOutcome deletes
+        // priceBasisDays when a quote stops being a divided package and unsets
+        // restockHint when stock returns (spte/live.ts); both are absent from
+        // the winner's JSON row, so the union would resurrect the loser's stale
+        // copy - a package basis re-entering rival leverage as a daily rate,
+        // and a restock promise the shop has already kept.
+        priceBasisDays: winner.fields.priceBasisDays,
+        restockHint: winner.fields.restockHint,
+        // Same rule, third key. spte/live.ts sets awaitingConfirmation to
+        // `undefined` the moment the shop answers the pending question, and an
+        // undefined value never reaches the JSON row, so a union cannot tell
+        // "the winner resolved it" from "the winner never had one" - and the
+        // resolved case is the one that hurts: the card would go on showing a
+        // question the shop has already answered. This field is the CARD'S
+        // MIRROR of the digest (spte/digest.ts), never the engine's own state:
+        // the digest carries `awaitingConfirmation` and `pending` and is
+        // merged by mergeStoredDigests just below, so pinning the mirror to
+        // the winner costs at most one turn of display before the next turn
+        // re-mirrors it, while unioning it can leave a stale chip on screen.
+        awaitingConfirmation: winner.fields.awaitingConfirmation,
         firmCount: Math.max(winner.fields.firmCount ?? 0, next.fields.firmCount ?? 0),
         rounds: Math.max(winner.fields.rounds ?? 0, next.fields.rounds ?? 0),
         toneDegraded: winner.fields.toneDegraded || next.fields.toneDegraded,
@@ -462,6 +587,9 @@ export async function saveThreadState(state: NegotiationThreadState): Promise<vo
         }
       ).catch(() => {});
       mem().set(state.threadKey, merged);
+      // An adopted write moved the key out from under us; keep the fallback
+      // cache addressable under both spellings until the next read.
+      if (next.threadKey !== state.threadKey) mem().set(next.threadKey, merged);
     }
   } catch {
     /* Supabase unavailable - memory copy is already saved */

@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { composeBargain, runSafety } from "@/lib/agents";
 import { getSession } from "@/lib/session";
-import { sbInsert, sbSelect } from "@/lib/runtime-config";
+import { sbInsert, sbSelect, sbSelectStrict } from "@/lib/runtime-config";
+import type { SessionShopRow } from "@/lib/graph/types";
 import type { Vendor, StructuredRFQ } from "@/lib/types";
 import { digitsOnly } from "@/lib/phone";
 import { can, localLanguageAllowed } from "@/lib/entitlements";
@@ -169,13 +170,59 @@ export async function POST(req: Request) {
   //
   // Now: the server lookup is the ONLY source. The client hint is used for
   // exactly one thing - noticing that it disagrees, which is worth an event.
+  // WHO IS STILL IN THE HUNT (audit F136).
+  //
+  // `offers` records what a shop SAID, and no writer retires that row when the
+  // shop later declines or says it has nothing for those dates - the
+  // withdrawal lands on `negotiation_threads.fields` (declined /
+  // shopUnavailable) and, where Redis is configured, as a cache eviction. With
+  // REDIS_URL unset the offers table is the ONLY source, so this route could
+  // tell shop A to beat a price from a shop that had already refused to rent -
+  // and then compute a target to undercut that dead number.
+  //
+  // This is a user tap, not the 72s turn wall, so it can afford the one bounded
+  // read that answers it. It fails CLOSED: a store that cannot say who has
+  // withdrawn must not be read as "nobody has", so the draft goes out with no
+  // leverage rather than with leverage nobody can verify.
+  let withdrawn: Set<string> | null = null;
+  try {
+    const { currentSession } = await import("@/lib/search-session");
+    const { withdrawnVendorIds } = await import("@/lib/negotiation/session-rivals");
+    const since = (await currentSession(session.email)).sinceIso;
+    const read = await sbSelectStrict<{
+      vendor_id: string | null;
+      phase: string | null;
+      fields: { declined?: boolean; shopUnavailable?: boolean } | null;
+    }>(
+      "negotiation_threads",
+      `select=vendor_id,phase,fields&user_email=eq.${encodeURIComponent(
+        session.email
+      )}&updated_at=gte.${encodeURIComponent(since)}&limit=200`
+    );
+    if ("rows" in read) {
+      withdrawn = withdrawnVendorIds(
+        read.rows.map(
+          (t): SessionShopRow => ({
+            vendorId: t.vendor_id ?? "",
+            vendorName: t.vendor_id ?? "",
+            phase: (t.phase ?? undefined) as SessionShopRow["phase"],
+            declined: t.fields?.declined === true ? true : undefined,
+            outOfStock: t.fields?.shopUnavailable === true ? true : undefined,
+          })
+        )
+      );
+    }
+  } catch {
+    withdrawn = null; // unreadable - fail closed below
+  }
+
   let rival: number | undefined;
   let rivalDerivedFromDays: number | undefined;
   const clientHint = Number(body.rivalPricePerDay);
   try {
     // No currency of record means no like-for-like comparison: a rival row is
     // only leverage when we know both quotes are in the same money (F094).
-    if (quoted && cur) {
+    if (quoted && cur && withdrawn) {
       const { vehicleKeyFor } = await import("@/lib/market");
       const { cheapestRivalQuoteFor } = await import("@/lib/search-session");
       const server = await cheapestRivalQuoteFor(session.email, {
@@ -186,6 +233,8 @@ export async function POST(req: Request) {
         // Duration-aware: a per-day divided out of someone's 3-day package is
         // not a like-for-like rival for a 1-day rental.
         durationDays: rfq.durationDays,
+        // ...and never a shop that has left the hunt (F136).
+        excludeVendorIds: withdrawn,
       });
       if (server) {
         rival = server.pricePerDay;

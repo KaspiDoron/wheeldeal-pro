@@ -71,6 +71,7 @@ import {
 import { validateMediaCoherence } from "./coherence";
 import { enforceEmojiTone, ensureGloballyUnique } from "./uniqueness";
 import { sessionTableRows } from "./session-table";
+import { withdrawnVendorIds } from "../negotiation/session-rivals";
 
 /**
  * How long a drainer's lease on a graph_wakeup holds before another drainer may
@@ -599,6 +600,34 @@ export async function runGraphTurn(
     }
   }
 
+  // ---- the session board, read ONCE per turn ---------------------------------
+  //
+  // SCOPE THE SESSION TABLE TO THE SAME MACHINE. This call passed no vehicle
+  // key at all, so the director's rival board could hold a price for a
+  // different machine entirely - a 150cc quoted in another thread, cited at a
+  // shop that quoted a 125cc. Leverage has to compare like with like.
+  //
+  // AND IT IS NEEDED EARLIER THAN THE DIRECTOR (audit F136). Nothing retires an
+  // `offers` row when a shop declines or runs out of stock - only the Redis
+  // copy is evicted, and with REDIS_URL unset the Postgres path is the only
+  // path - so the comparator's rival lookup has to be TOLD which vendors have
+  // left the hunt. These are the rows that already carry that fact, so the bar
+  // costs no extra query: the read is memoized here and BOTH the comparator and
+  // the director step loop take the same rows (the loop used to re-read it once
+  // per step).
+  const { vehicleKeyFor: sessionVehicleKeyFor } = await import("../market");
+  const sessionVehicleKey = sessionVehicleKeyFor(input.rfq);
+  let sessionRowsOnce: Promise<SessionShopRow[]> | null = null;
+  const loadSessionRows = (): Promise<SessionShopRow[]> => {
+    if (!(input.ctx.sender && io.llmAllowed)) return Promise.resolve([]);
+    return (sessionRowsOnce ??= io
+      .sessionTable(input.ctx.sender, input.ctx.vendorId, sessionVehicleKey, {
+        engineSizeCc: input.rfq.engineSizeCc,
+        durationDays: input.rfq.durationDays,
+      })
+      .catch(() => []));
+  };
+
   // ---- comparator (floor + rival + round target) ------------------------------
   let rivalPrice: number | undefined;
   let target: number | undefined;
@@ -612,6 +641,9 @@ export async function runGraphTurn(
     // competitor offers can be used as honest leverage the moment they exist.
     if (input.ctx.sender && input.ctx.vendorId) {
       const { vehicleKeyFor } = await import("../market");
+      // A SHOP THAT SAID NO IS NOT LEVERAGE, and the offers table cannot say
+      // so - the withdrawal lands on the thread rows this board already holds.
+      const withdrawn = withdrawnVendorIds(await loadSessionRows());
       rivalPrice = await io
         .cheapestRival({
           userEmail: input.ctx.sender,
@@ -619,6 +651,7 @@ export async function runGraphTurn(
           currency: input.currency,
           vehicleKey: vehicleKeyFor(input.rfq),
           belowPrice: f.pricePerDay!,
+          excludeVendorIds: withdrawn,
           // Omitted, so every package-derived rival was dropped even when this
           // rental covers the package - see the type's note.
           durationDays: input.rfq.durationDays,
@@ -699,27 +732,14 @@ export async function runGraphTurn(
         });
     }
     let choice: DirectorChoice;
-    // SCOPE THE SESSION TABLE TO THE SAME MACHINE. This call passed no vehicle
-    // key at all, so the director's rival board could hold a price for a
-    // different machine entirely - a 150cc quoted in another thread, cited at a
-    // shop that quoted a 125cc. Leverage has to compare like with like.
-    const { vehicleKeyFor: sessionVehicleKeyFor } = await import("../market");
-    const sessionVehicleKey = sessionVehicleKeyFor(input.rfq);
     if (nodeOn("director")) {
       choice = await runDirector({
         input,
         state,
         facts,
         legal,
-        session:
-          input.ctx.sender && io.llmAllowed
-            ? await io
-                .sessionTable(input.ctx.sender, input.ctx.vendorId, sessionVehicleKey, {
-                  engineSizeCc: input.rfq.engineSizeCc,
-                  durationDays: input.rfq.durationDays,
-                })
-                .catch(() => [])
-            : [],
+        // The board hoisted above the comparator - the same rows, read once.
+        session: await loadSessionRows(),
         settings: spec.settings,
         instructions: nodesById.get("director")?.instructions ?? "",
         target,
@@ -1755,7 +1775,15 @@ export function liveGraphIO(send: LiveSend): GraphIO {
   return {
     loadState: loadThreadState,
     saveState: saveThreadState,
-    async cheapestRival({ userEmail, vendorId, currency, vehicleKey, belowPrice, durationDays }) {
+    async cheapestRival({
+      userEmail,
+      vendorId,
+      currency,
+      vehicleKey,
+      belowPrice,
+      durationDays,
+      excludeVendorIds,
+    }) {
       // REAL session boundary (latest search, 18h-clamped) + the shared pure
       // predicate - the same function the playground filters through, so
       // owner tests exercise production selection logic byte-for-byte.
@@ -1766,6 +1794,9 @@ export function liveGraphIO(send: LiveSend): GraphIO {
         vehicleKey,
         belowPrice,
         durationDays,
+        // The shops the caller already knows have withdrawn (F136). The offers
+        // table cannot say so, and this seam must not buy a second read.
+        excludeVendorIds,
       });
     },
     async sessionTable(userEmail, thisVendorId, vehicleKey, spec) {

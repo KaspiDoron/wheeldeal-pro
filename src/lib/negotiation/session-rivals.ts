@@ -28,6 +28,30 @@ import type { SessionShopRow, ThreadPhase } from "../graph/types";
 /** Phases whose price is no longer something the traveller could act on. */
 const DEAD_PHASES: ReadonlySet<ThreadPhase> = new Set<ThreadPhase>(["dead", "closed", "closing"]);
 
+/**
+ * WHO HAS LEFT THE HUNT - the one rule, in one place.
+ *
+ * `validRivals` below applies it to the rows it was handed, but the OTHER
+ * rival path reads `offers` (search-session.ts) and an offers row is never
+ * retired when a shop withdraws: only the Redis copy is evicted, and with no
+ * REDIS_URL the Postgres path is the only path. So that path has to be TOLD
+ * which vendors to bar, and it must be told by the same predicate - the two
+ * paths must not disagree about which shops are still in the hunt.
+ *
+ * Pure, and over rows the caller already holds, so naming the withdrawn shops
+ * costs no extra query anywhere.
+ */
+export function withdrawnVendorIds(rows: readonly SessionShopRow[]): Set<string> {
+  const out = new Set<string>();
+  for (const r of rows) {
+    if (!r.vendorId) continue;
+    if (r.declined === true || r.outOfStock === true || (r.phase && DEAD_PHASES.has(r.phase))) {
+      out.add(r.vendorId);
+    }
+  }
+  return out;
+}
+
 export interface RivalQuote {
   vendorId: string;
   shop: string;
@@ -83,9 +107,13 @@ export function validRivals(rows: SessionShopRow[], opts: RivalOptions): RivalQu
     // reads to say "this shop passed" - while the phase stays wherever the
     // negotiation had got to. So the rival card could tell shop B to beat a
     // price from a shop that had already refused to rent: exactly the defect
-    // the hot-cache eviction closes on the Redis side. The two paths now apply
-    // the same rule, because one of them SHORT-CIRCUITS the other and they must
-    // not disagree about which shops are still in the hunt.
+    // the hot-cache eviction closes on the Redis side.
+    //
+    // THAT CLAIM WAS HALF TRUE FOR A WHILE (audit F136): this predicate applied
+    // the rule and the OFFERS path did not, so whichever path answered first
+    // decided whether a withdrawn shop was leverage. The rule now lives once,
+    // in `withdrawnVendorIds` above, and the offers path is handed its output -
+    // the two paths must not disagree about which shops are still in the hunt.
     if (r.declined === true || r.outOfStock === true) continue;
     // A FOURTH KIND OF ROW THAT IS NOT LEVERAGE (owner report 5 #2): a per-day
     // figure that only exists because we divided someone's multi-day package.

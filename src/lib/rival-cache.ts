@@ -324,6 +324,14 @@ export interface CachedRivalQuery {
   vehicleKey: string;
   currency: string;
   excludeVendorId: string;
+  /**
+   * Shops that have WITHDRAWN (declined, out of stock, dead thread). The
+   * eviction below is the primary mechanism, but it can only fire on the turn
+   * that hears the refusal, and a failed `zrem` degrades to "the Postgres path
+   * stays authoritative" - which was only true once THAT path learned the same
+   * rule (audit F136). Passing the bar here keeps the short-circuit honest.
+   */
+  excludeVendorIds?: Iterable<string>;
   /** Only a rival STRICTLY cheaper than this quote is leverage. */
   belowPrice: number;
 }
@@ -340,8 +348,10 @@ export async function cheapestCachedRival(q: CachedRivalQuery): Promise<number |
   try {
     if ((await r.exists(liveFlagKey(q.searchId))) !== 1) return null;
     const rows = await r.zrange(offersKey(q.searchId, q.vehicleKey, q.currency), 0, 9, "WITHSCORES");
+    const barred = new Set(q.excludeVendorIds ?? []);
     for (let i = 0; i < rows.length; i += 2) {
       if (rows[i] === q.excludeVendorId) continue;
+      if (barred.has(rows[i])) continue;
       const price = Number(rows[i + 1]);
       if (!Number.isFinite(price) || price <= 0) continue;
       if (price >= q.belowPrice) return null; // sorted ascending - no cheaper rival exists
@@ -359,8 +369,14 @@ export async function cheapestCachedRival(q: CachedRivalQuery): Promise<number |
  * NOTHING EVICTED FROM THIS CACHE BEFORE. A shop that declined, went out of
  * stock, was suppressed fleet-wide or whose thread died stayed a citable rival
  * for the whole TTL - so the agent could tell a shop to beat a price from a
- * shop that had already refused to rent. The Postgres path filters dead phases;
- * the hot path, which short-circuits it, had no way to know.
+ * shop that had already refused to rent.
+ *
+ * THE COMMENT HERE USED TO SAY "the Postgres path filters dead phases", and it
+ * did not: `pickRival` had no phase, declined or outOfStock concept at all, and
+ * nothing retires an `offers` row on a withdrawal (audit F136). So the
+ * fallback this eviction leans on was cheerfully citing the same dead shop.
+ * Both paths now take the bar from the caller (`excludeVendorIds`), and this
+ * eviction stays the cheap way to keep the hot set clean.
  */
 export async function dropSessionOffer(q: {
   searchId: string | number;
