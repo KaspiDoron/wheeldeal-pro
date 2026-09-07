@@ -216,7 +216,7 @@ describe("asking once, and answering once", () => {
   it("accepting retargets the thread; declining ends it", () => {
     const store = readCode("src/lib/vehicle/substitution-store.ts");
     expect(store).toMatch(/next\.acceptedVehicle = offer\.vehicle;/);
-    expect(store).toMatch(/vehicleConfirmation = \{ status: "confirmed"/);
+    expect(store).toMatch(/vehicleConfirmation = \{\s*status: "confirmed"/);
     expect(store).toMatch(/next\.declined = true;/);
     // Either way the pause clears.
     expect(store).toMatch(/alternativeOffer: null/);

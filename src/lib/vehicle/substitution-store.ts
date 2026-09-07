@@ -1,5 +1,6 @@
 import "server-only";
 import type { AlternativeOffer } from "./substitution";
+import { patchThreadFields, THREAD_PATCH_SELECT } from "../thread/patch-fields";
 
 // WHERE A PENDING SUBSTITUTION CHOICE LIVES.
 //
@@ -16,6 +17,10 @@ import type { AlternativeOffer } from "./substitution";
 interface ThreadRow {
   thread_key: string;
   fields: (Record<string, unknown> & { alternativeOffer?: AlternativeOffer | null }) | null;
+  /** Read alongside `fields` so the write can be guarded on it (audit M38) -
+   *  this route runs outside the per-thread turn claim, so a blind whole-blob
+   *  PATCH erased whatever the concurrent turn had just learned. */
+  version?: number | null;
 }
 
 // THE COLUMN THIS ASKED FOR HAS NEVER EXISTED.
@@ -43,15 +48,13 @@ async function loadThread(
   const { sbSelectStrict } = await import("../runtime-config");
   const read = await sbSelectStrict<ThreadRow>(
     "negotiation_threads",
-    `select=thread_key,fields&user_email=eq.${encodeURIComponent(
+    `${THREAD_PATCH_SELECT}&user_email=eq.${encodeURIComponent(
       email
     )}&vendor_id=eq.${encodeURIComponent(vendorId)}&order=updated_at.desc&limit=1`
   );
   if ("error" in read) return read;
   return { row: read.rows[0] ?? null };
 }
-
-const byKey = (threadKey: string) => `thread_key=eq.${encodeURIComponent(threadKey)}`;
 
 /** Park a choice for the traveller. Never overwrites one they have not seen. */
 export async function persistAlternativeOffer(args: {
@@ -71,13 +74,20 @@ export async function persistAlternativeOffer(args: {
     // replace a choice the traveller is already looking at - the price on the
     // card would change under their thumb.
     if (row.fields?.alternativeOffer) return false;
-    const { sbUpdate } = await import("../runtime-config");
-    // THE WRITE IS THE ANSWER (audit F016). sbUpdate never throws - it returns
-    // false on no connection, an 8s abort and every non-2xx - so "parked" is
-    // exactly its boolean, not the intention to park.
-    return sbUpdate("negotiation_threads", byKey(row.thread_key), {
-      fields: { ...(row.fields ?? {}), alternativeOffer: args.offer },
+    // THE WRITE IS THE ANSWER (audit F016). patchThreadFields never throws - it
+    // answers "failed" on no connection, an 8s abort and every non-2xx - so
+    // "parked" is exactly what the store did, not the intention to park.
+    //
+    // Versioned (audit M38): the read above already carries `version`, so the
+    // happy path is still ONE conditional PATCH, and only a real race pays for
+    // the re-read - which re-checks ask-once against the fresher row.
+    const outcome = await patchThreadFields({
+      threadKey: row.thread_key,
+      row,
+      mutate: (fields) =>
+        fields.alternativeOffer ? null : { ...fields, alternativeOffer: args.offer },
     });
+    return outcome === "persisted";
   } catch {
     return false;
   }
@@ -110,33 +120,43 @@ export async function resolveAlternativeOffer(args: {
     const row = found.row;
     const offer = row?.fields?.alternativeOffer ?? null;
     if (!row || !offer) return { ok: false, reason: "stale", offer: null };
-    const { sbUpdate } = await import("../runtime-config");
-    const next: Record<string, unknown> = { ...(row.fields ?? {}), alternativeOffer: null };
-    if (args.accept) {
-      // ACCEPTING RETARGETS THE THREAD, it does not disable the gate. The
-      // vehicle the traveller agreed to becomes the one this thread is about,
-      // so a THIRD substitution is caught exactly the same way.
-      if (typeof offer.engineSizeCc === "number" && offer.engineSizeCc > 0) {
-        next.acceptedVehicleCc = offer.engineSizeCc;
+    // Applied to whatever the row holds AT WRITE TIME, so a retry after a lost
+    // version race decides over the fresher blob rather than over a copy taken
+    // before the concurrent turn landed (audit M38).
+    const decide = (fields: Record<string, unknown>): Record<string, unknown> => {
+      const next: Record<string, unknown> = { ...fields, alternativeOffer: null };
+      if (args.accept) {
+        // ACCEPTING RETARGETS THE THREAD, it does not disable the gate. The
+        // vehicle the traveller agreed to becomes the one this thread is about,
+        // so a THIRD substitution is caught exactly the same way.
+        if (typeof offer.engineSizeCc === "number" && offer.engineSizeCc > 0) {
+          next.acceptedVehicleCc = offer.engineSizeCc;
+        }
+        next.acceptedVehicle = offer.vehicle;
+        // The identity gate reads this: the traveller settled the vehicle
+        // question themselves, which is stronger evidence than any message.
+        next.vehicleConfirmation = {
+          status: "confirmed",
+          evidence: `traveller accepted ${offer.vehicle}`,
+        };
+      } else {
+        // DECLINED IS A DECLINE. The thread returns to the state it would have
+        // been in without the choice - closed - rather than sitting open on a
+        // vehicle nobody wants.
+        next.declined = true;
       }
-      next.acceptedVehicle = offer.vehicle;
-      // The identity gate reads this: the traveller settled the vehicle
-      // question themselves, which is stronger evidence than any message.
-      next.vehicleConfirmation = { status: "confirmed", evidence: `traveller accepted ${offer.vehicle}` };
-    } else {
-      // DECLINED IS A DECLINE. The thread returns to the state it would have
-      // been in without the choice - closed - rather than sitting open on a
-      // vehicle nobody wants.
-      next.declined = true;
-    }
+      return next;
+    };
     // THE WRITE IS THE ANSWER (audit F016). A Decline whose PATCH failed used
     // to return ok:true: the card cleared the question while the offer stayed
     // parked and `declined` was never set, so the next turn kept negotiating
     // the vehicle the traveller had just refused and the next reload re-asked.
-    const persisted = await sbUpdate("negotiation_threads", byKey(row.thread_key), {
-      fields: next,
+    const outcome = await patchThreadFields({
+      threadKey: row.thread_key,
+      row,
+      mutate: decide,
     });
-    if (!persisted) return { ok: false, reason: "unavailable", offer: null };
+    if (outcome !== "persisted") return { ok: false, reason: "unavailable", offer: null };
     return { ok: true, offer };
   } catch {
     return { ok: false, reason: "unavailable", offer: null };

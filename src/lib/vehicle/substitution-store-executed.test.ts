@@ -22,6 +22,9 @@ interface ThreadRow {
   user_email: string;
   vendor_id: string;
   fields: Fields | null;
+  /** The store's write is guarded on this now (audit M38), so the fake table
+   *  carries it exactly as supabase/schema.sql declares it. */
+  version: number;
 }
 
 const db: {
@@ -31,6 +34,26 @@ const db: {
   patches: Array<{ filter: string; values: Record<string, unknown> }>;
 } = { threads: new Map(), writeOk: true, readFails: false, patches: [] };
 
+const project = (r: ThreadRow) => ({
+  thread_key: r.thread_key,
+  fields: r.fields ? { ...r.fields } : null,
+  version: r.version,
+});
+
+/** The write, version guard and all - shared by both write helpers. */
+function patch(filter: string, values: Record<string, unknown>): ThreadRow | null {
+  db.patches.push({ filter, values });
+  if (!db.writeOk) return null;
+  const key = decodeURIComponent(/thread_key=eq\.([^&]+)/.exec(filter)?.[1] ?? "");
+  const row = db.threads.get(key);
+  if (!row) return null;
+  const want = /version=eq\.(\d+)/.exec(filter);
+  if (want && row.version !== Number(want[1])) return null;
+  const next = { ...row, ...(values as Partial<ThreadRow>) };
+  db.threads.set(key, next);
+  return next;
+}
+
 vi.mock("../runtime-config", () => ({
   sbSelectStrict: async (_table: string, query: string) => {
     if (db.readFails) return { error: "unavailable" as const };
@@ -38,20 +61,22 @@ vi.mock("../runtime-config", () => ({
     const vendor = decodeURIComponent(/vendor_id=eq\.([^&]+)/.exec(query)?.[1] ?? "");
     const rows = [...db.threads.values()]
       .filter((r) => r.user_email === email && r.vendor_id === vendor)
-      .map((r) => ({ thread_key: r.thread_key, fields: r.fields ? { ...r.fields } : null }));
+      .map(project);
     return { rows };
   },
-  sbUpdate: async (_table: string, filter: string, values: Record<string, unknown>) => {
-    db.patches.push({ filter, values });
-    if (!db.writeOk) return false;
-    const key = decodeURIComponent(/thread_key=eq\.([^&]+)/.exec(filter)?.[1] ?? "");
-    const row = db.threads.get(key);
-    if (!row) return false;
-    db.threads.set(key, { ...row, ...(values as Partial<ThreadRow>) });
-    return true;
+  sbUpdate: async (_table: string, filter: string, values: Record<string, unknown>) =>
+    patch(filter, values) !== null,
+  sbUpdateReturning: async (_table: string, filter: string, values: Record<string, unknown>) => {
+    const row = patch(filter, values);
+    return row ? [project(row)] : [];
   },
   sbInsert: async () => true,
-  sbSelect: async () => [],
+  sbSelect: async (_table: string, query: string) => {
+    if (db.readFails) return [];
+    const key = decodeURIComponent(/thread_key=eq\.([^&]+)/.exec(query)?.[1] ?? "");
+    const row = db.threads.get(key);
+    return row ? [project(row)] : [];
+  },
 }));
 
 import { persistAlternativeOffer, resolveAlternativeOffer } from "./substitution-store";
@@ -71,7 +96,7 @@ const offer: AlternativeOffer = {
 };
 
 const seed = (fields: Fields) => {
-  db.threads.set(KEY, { thread_key: KEY, user_email: EMAIL, vendor_id: VENDOR, fields });
+  db.threads.set(KEY, { thread_key: KEY, user_email: EMAIL, vendor_id: VENDOR, fields, version: 4 });
 };
 
 const stored = () => db.threads.get(KEY)?.fields ?? {};
@@ -90,8 +115,9 @@ describe("F016: resolveAlternativeOffer reports the write, not the intention", (
     const res = await resolveAlternativeOffer({ email: EMAIL, vendorId: VENDOR, accept: false });
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.reason).toBe("unavailable");
-    // The write was attempted - this is not the stale path...
-    expect(db.patches).toHaveLength(1);
+    // The write was attempted - this is not the stale path. Twice: a lost
+    // version guard is re-read and re-applied exactly once (audit M38).
+    expect(db.patches).toHaveLength(2);
     // ...and the durable truth is unchanged: the question is still open and
     // the thread is NOT declined.
     expect(stored().alternativeOffer).toEqual(offer);

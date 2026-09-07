@@ -105,6 +105,11 @@ describe("per-search thread state dies with the session", () => {
     // hasClosed() greps digest facts for these words; the previous search's
     // decline answered the previous request, never the next one.
     expect(close).toMatch(/closed\|goodbye\|declined\|walked away/);
-    expect(close).toMatch(/patch\.phase = "opening"/);
+    expect(close).toMatch(/phase: "opening"/);
+    // AND THE RESET IS VERSIONED (audit F033): a bare thread_key PATCH left
+    // `version` untouched, so a turn holding the pre-close version still won
+    // its own cas afterwards and wrote every deleted key straight back.
+    expect(close).toMatch(/patchThreadFields\(/);
+    expect(close).not.toMatch(/sbUpdate\(\s*\n?\s*"negotiation_threads"/);
   });
 });

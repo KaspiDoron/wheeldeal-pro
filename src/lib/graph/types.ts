@@ -256,6 +256,17 @@ export interface ThreadFields {
    * checking with the shop" so a paused thread explains itself.
    */
   awaitingConfirmation?: { subject: string; question: string; at: string };
+  /**
+   * WHEN THE LAST SEARCH SESSION CLOSED OVER THIS THREAD (audit F033).
+   *
+   * `negotiation_threads` is keyed user:number with no search dimension, so
+   * closeSearchSession resets the per-hunt half of this blob when a hunt ends.
+   * That reset is versioned, and this stamp is how a turn that loaded BEFORE
+   * the close recognises the winner as a close rather than as a sibling turn:
+   * saveThreadState yields to it whole instead of merging pre-close reads back
+   * over the reset. Never per-hunt state itself - the close writes it.
+   */
+  searchClosedAt?: string;
 }
 
 export interface NegotiationThreadState {
@@ -579,6 +590,18 @@ export interface GraphIO {
      * pricing is most common.
      */
     durationDays?: number;
+    /**
+     * SHOPS THAT HAVE LEFT THE HUNT (audit F136).
+     *
+     * The lookup reads `offers`, and an offers row is never retired when the
+     * shop later declines or says it has nothing for those dates: that fact
+     * lands on `negotiation_threads.fields` and, when Redis is configured, as a
+     * cache eviction. So a withdrawn shop was still being cited as the cheapest
+     * rival. The engine passes the vendors it already knows have withdrawn -
+     * built from the session board it loads on the same turn - rather than this
+     * lookup paying a second read on the reply path.
+     */
+    excludeVendorIds?: Iterable<string>;
   }): Promise<number | undefined>;
   /**
    * `vehicleKey` scopes the session's other quotes to the SAME vehicle. Without

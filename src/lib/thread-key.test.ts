@@ -57,7 +57,26 @@ async function harness(handler: (url: string, method: string) => Response) {
       calls.push({ url, method, body: init?.body ? String(init.body) : undefined });
       const select = /[?&]select=([^&]*)/.exec(url)?.[1];
       const asked = select ? decodeURIComponent(select).split(",") : [];
-      const known = ["thread_key", "fields", "*"];
+      // The real column set (supabase/schema.sql negotiation_threads). The
+      // stores read `version` too now, because their write is guarded on it
+      // (audit M38) - a stub that refused it would be modelling a table that
+      // does not exist either.
+      const known = [
+        "thread_key",
+        "user_email",
+        "vendor_id",
+        "vendor_name",
+        "to_number",
+        "phase",
+        "stage",
+        "version",
+        "fields",
+        "node_runs",
+        "waiting_until",
+        "last_decision_id",
+        "updated_at",
+        "*",
+      ];
       const bad = asked.find((c) => c && !known.includes(c));
       if (url.includes("negotiation_threads") && bad) return unknownColumn(bad);
       // Likewise a filter on a column that is not there.

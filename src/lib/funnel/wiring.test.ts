@@ -89,7 +89,7 @@ describe("every funnel stage has its writer at the designed evidence point", () 
 
   it("dead: session close writes the death event and clears the row for reuse", () => {
     expect(sessionClose).toMatch(/to: "dead"/);
-    expect(sessionClose).toMatch(/patch\.stage = null/);
+    expect(sessionClose).toMatch(/stage: null, stage_at: null/);
     // A booked/completed thread did not die - no death event over a win.
     expect(sessionClose).toMatch(/t\.stage !== "booked" && t\.stage !== "completed"/);
   });

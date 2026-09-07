@@ -56,7 +56,15 @@ export async function currentSession(
  */
 export async function cheapestRivalFor(
   userEmail: string,
-  args: { vendorId: string; currency: string; vehicleKey: string; belowPrice: number; durationDays?: number }
+  args: {
+    vendorId: string;
+    currency: string;
+    vehicleKey: string;
+    belowPrice: number;
+    durationDays?: number;
+    /** Shops that have withdrawn - see RivalArgs.excludeVendorIds (F136). */
+    excludeVendorIds?: Iterable<string>;
+  }
 ): Promise<number | undefined> {
   return (await cheapestRivalQuoteFor(userEmail, args))?.pricePerDay;
 }
@@ -71,9 +79,18 @@ export async function cheapestRivalFor(
  */
 export async function cheapestRivalQuoteFor(
   userEmail: string,
-  args: { vendorId: string; currency: string; vehicleKey: string; belowPrice: number; durationDays?: number }
+  args: {
+    vendorId: string;
+    currency: string;
+    vehicleKey: string;
+    belowPrice: number;
+    durationDays?: number;
+    /** Shops that have withdrawn - see RivalArgs.excludeVendorIds (F136). */
+    excludeVendorIds?: Iterable<string>;
+  }
 ): Promise<RivalPick | null> {
   const session = await currentSession(userEmail);
+  const withdrawn = new Set(args.excludeVendorIds ?? []);
 
   // HOT PATH (Module 2): O(log n) Redis ZSET read, scoped to this exact
   // session + vehicle + currency. Only authoritative for sessions the worker
@@ -86,6 +103,7 @@ export async function cheapestRivalQuoteFor(
       vehicleKey: args.vehicleKey,
       currency: args.currency,
       excludeVendorId: args.vendorId,
+      excludeVendorIds: withdrawn,
       belowPrice: args.belowPrice,
     });
     // THAT COMMENT WAS FALSE, and it was load-bearing.
@@ -207,6 +225,19 @@ export interface RivalArgs {
    * Absent = unknown, and the conservative reading applies (see below).
    */
   durationDays?: number;
+  /**
+   * SHOPS THAT HAVE LEFT THE HUNT (audit F136).
+   *
+   * `offers` records what a shop SAID, and nothing retires the row when the
+   * shop later declines or runs out of stock - that fact lands on
+   * `negotiation_threads.fields` (declined / shopUnavailable) and, on the hot
+   * path, as a cache eviction. With no REDIS_URL the cache is not there at
+   * all, so this predicate was citing shops that had already refused to rent.
+   * The caller passes the bar (negotiation/session-rivals withdrawnVendorIds
+   * builds it from rows it already holds) rather than this module issuing a
+   * second read on the reply path.
+   */
+  excludeVendorIds?: Iterable<string>;
 }
 
 /**
@@ -225,8 +256,12 @@ export interface RivalArgs {
  */
 export function pickRival(offers: RivalOffer[], args: RivalArgs): RivalPick | null {
   let best: RivalPick | null = null;
+  const barred = new Set(args.excludeVendorIds ?? []);
   for (const o of offers) {
     if (o.vendorId === args.vendorId) continue;
+    // A SHOP THAT SAID NO IS NOT LEVERAGE. Its offers row survives the
+    // withdrawal, so the bar has to come from the caller - see RivalArgs.
+    if (barred.has(o.vendorId)) continue;
     if (o.currency !== args.currency) continue;
     // FAIL CLOSED on an unknown vehicle: a null vehicle_key must NEVER be
     // treated as "matches anything" - that let a wrong-vehicle offer qualify as

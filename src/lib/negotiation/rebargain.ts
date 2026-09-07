@@ -32,7 +32,9 @@
 //     is the F5 "bargaining against our own floor" failure);
 //   - never a shop that has said "last price" twice - the firm ladder is the
 //     app's promise not to badger, and the swarm does not get an exemption;
-//   - never a dead, closed or closing thread;
+//   - never a dead, closed or closing thread, and never a shop that has
+//     WITHDRAWN (declined, or out of stock for these dates) - a decline
+//     leaves the phase where it was, so the two facts are read directly;
 //   - at most `MAX_FANOUT` shops per drop, dearest first - the shops with the
 //     most to gain, and a hard ceiling on messages per event;
 //   - one re-entry per drop, staggered, so wa-guard's per-recipient pacing is
@@ -95,6 +97,18 @@ export function planSiblingRebargain(input: RebargainInput): RebargainTarget[] {
       if (r.isThisShop) return false;
       if (!r.toNumber) return false; // no live thread to re-enter
       if (r.phase && DEAD_PHASES.has(r.phase)) return false;
+      // A SHOP THAT SAID NO IS NOT RE-ENTERED - and `phase` is not how it says
+      // so. The bar above catches a thread the engine has WOUND UP; it does not
+      // catch the shop that answers "sorry, we have stopped renting" or "no
+      // bikes for those dates" and then goes quiet. Those write
+      // `fields.declined` / `fields.shopUnavailable` - which sessionTable
+      // carries onto every row - while the phase stays wherever the
+      // negotiation had got to, because `derivePhase` never returns
+      // dead/closed/closing for a decline. So the swarm scheduled a
+      // rival-leverage re-entry into the thread of a shop that had explicitly
+      // refused to rent. session-rivals applies exactly this rule, and the two
+      // paths must not disagree about which shops are still in the hunt.
+      if (r.declined === true || r.outOfStock === true) return false;
       // THE FIRM LADDER IS NOT WAIVED FOR THE SWARM. A shop that has said
       // "last price" twice has answered, and this app's whole promise is that
       // it stops asking. A cheaper rival is new information, but it is not a

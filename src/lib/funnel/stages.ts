@@ -28,7 +28,7 @@
 
 import { sbInsert, sbSelect, sbUpdateReturning } from "../runtime-config";
 import { digitsOnly } from "../phone";
-import { identityKey, numberFilter } from "../wa/phone-key";
+import { canonicalThreadKey, numberFilter } from "../wa/phone-key";
 
 /**
  * The progression vocabulary, in funnel order. Mapping to the owner's 9 steps:
@@ -206,9 +206,15 @@ export async function advanceThreadStage(
   // traveller saw a shop that had plainly answered still listed under
   // "Awaiting reply".
   //
-  // identityKey (the national tail) survives country-code and leading-zero
-  // variation, so both spellings now land on the same row.
-  let threadKey = `${email}:${identityKey(args.toNumber) || digits}`;
+  // THE ADOPTION READ BELOW is what closes that gap: it matches EVERY spelling
+  // of the number against `to_number` and writes to the row it finds. The key
+  // itself is the canonical dialable spelling, shared with the engine
+  // (wa/phone-key canonicalThreadKey, audit F133) - keying the ledger on the
+  // national tail while the engine keyed on the full digits gave one shop two
+  // rows in a primary-keyed table, one holding `stage` and one holding
+  // `phase`/`fields`, and the tail cannot be the key anyway because the wakeup
+  // path rebuilds the SEND TARGET by slicing this string at its last colon.
+  let threadKey = canonicalThreadKey(email, args.toNumber) || `${email}:${digits}`;
 
   // Cheap pre-read: telemetry's `from`, plus the steady-state short-circuit
   // (an inbound-per-second thread must not PATCH-per-second). Enforcement does
@@ -278,6 +284,8 @@ export async function advanceThreadStage(
         vendor_name: args.vendorName ?? null,
         stage: to,
         stage_at: nowIso,
+        // A LEDGER TOUCH IS ACTIVITY (audit F134) - see the PATCH below.
+        updated_at: nowIso,
       },
     ]).catch(() => false);
   }
@@ -286,7 +294,15 @@ export async function advanceThreadStage(
     const rows = await sbUpdateReturning<{ thread_key: string }>(
       "negotiation_threads",
       stageFilter(threadKey, to, opts),
-      { stage: to, stage_at: nowIso }
+      // `updated_at` MOVES ON A STAGE TRANSITION (audit F134). Neither ledger
+      // write touched it, so a row whose only activity since creation was
+      // stage transitions kept its creation timestamp - and session-close
+      // reads the per-hunt reset window as `updated_at=gte.<session start>`,
+      // so from the close of the SECOND hunt onward that row was never
+      // returned and never reset. A terminal lateral stamped in hunt 2
+      // (`out_of_stock`) then survived into hunt 3 and the brand new card for
+      // that shop read "Out of stock" before a message had been sent.
+      { stage: to, stage_at: nowIso, updated_at: nowIso }
     ).catch(() => [] as { thread_key: string }[]);
     landed = rows.length > 0;
     if (!landed) {

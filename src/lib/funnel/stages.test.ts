@@ -219,13 +219,15 @@ describe("advanceThreadStage - write discipline", () => {
     expect(threadInserts).toHaveLength(1);
     const row = threadInserts[0].rows![0] as Record<string, unknown>;
     expect(row).toMatchObject({
-      // The IDENTITY key (national tail), not the raw digits. `contacted` is
-      // stamped with Google's spelling and `replied` with the JID's, and raw
-      // digits made those two different primary keys - so the ledger split
-      // into a vendor-less `replied` row beside a stuck `contacted` one, and
-      // the traveller's card stayed on "Awaiting reply" for a shop that had
-      // plainly answered.
-      thread_key: "t@x.com:812345678",
+      // THE CANONICAL, DIALABLE KEY - the one the engine builds too
+      // (wa/phone-key canonicalThreadKey, audit F133). The ledger used to key
+      // on the national tail while the engine keyed on the full digits, which
+      // gave one shop two rows: a vendor-less `replied` row beside a stuck
+      // `contacted` one, with the traveller's card still on "Awaiting reply"
+      // for a shop that had plainly answered. The tail cannot be the key,
+      // because the wakeup path rebuilds the SEND TARGET by slicing this
+      // string; the cross-spelling case is closed by the adoption read below.
+      thread_key: "t@x.com:66812345678",
       user_email: "t@x.com",
       to_number: "66812345678",
       stage: "selected",
@@ -331,7 +333,7 @@ describe("one shop is one thread row, whatever spelling the caller holds", () =>
   const GOOGLE_FORM = "081236954642"; // how we stored it when we messaged
   const JID_FORM = "6281236954642"; // how the reply arrives
 
-  it("both spellings produce the SAME thread_key", async () => {
+  it("both spellings land on ONE row - the second caller adopts the first's", async () => {
     const { advanceThreadStage } = await import("./stages");
 
     selectResult = [];
@@ -346,20 +348,23 @@ describe("one shop is one thread row, whatever spelling the caller holds", () =>
       }
     ).thread_key;
 
+    // That row now exists under the spelling we messaged; the reply arrives in
+    // the JID spelling, whose canonical key is a different string.
     calls.inserts.length = 0;
+    calls.updates.length = 0;
     selectResult = [];
+    legacyRow = { thread_key: first, stage: "contacted" };
+    updateResult = [{ thread_key: first }];
     await advanceThreadStage(
       { userEmail: EMAIL, toNumber: JID_FORM },
       "replied",
       "inbound stored"
     );
-    const second = (
-      calls.inserts.find((c) => c.table === "negotiation_threads")!.rows![0] as {
-        thread_key: string;
-      }
-    ).thread_key;
 
-    expect(first).toBe(second);
+    // No second row, and the PATCH landed on the row that already exists -
+    // which is the guarantee, not the key string (audit F133).
+    expect(calls.inserts.filter((c) => c.table === "negotiation_threads")).toHaveLength(0);
+    expect(calls.updates[0].filter).toContain(encodeURIComponent(first));
   });
 
   it("a row written under the OLD exact-digits key is adopted, not duplicated", async () => {
@@ -391,6 +396,8 @@ describe("one shop is one thread row, whatever spelling the caller holds", () =>
     const row = calls.inserts.find((c) => c.table === "negotiation_threads")!.rows![0] as {
       thread_key: string;
     };
-    expect(row.thread_key).toBe(`${EMAIL}:236954642`);
+    // The canonical DIALABLE spelling - what buildTurnFromThread slices back
+    // out of this key is the number the next wakeup sends to (audit F133).
+    expect(row.thread_key).toBe(`${EMAIL}:${JID_FORM}`);
   });
 });
