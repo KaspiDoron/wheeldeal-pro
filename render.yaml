@@ -90,6 +90,10 @@ services:
   # sync (both are marked sync:false so they are never committed):
   #   WD_APP_URL    = https://<your-app>.run.app   (no trailing slash)
   #   WD_PING_TOKEN = the webhook token shown in the app at Owner -> Keys
+  # RE-PASTE IT AFTER A TOKEN ROTATION (audit F179/M10). Setting or changing
+  # WEBHOOK_TOKEN_SALT changes that token; the GCP schedulers now derive the
+  # new one themselves, but this value is hand-pasted, so a stale copy 403s
+  # this cron until the owner copies the current token from Owner -> Keys.
   # Every-minute cadence keeps agent replies landing within ~1-2 min; relax the
   # schedule to "*/2 * * * *" or "*/5 * * * *" if you want to trim cron cost.
   - type: cron

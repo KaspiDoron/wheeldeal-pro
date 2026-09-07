@@ -1070,7 +1070,7 @@ create table if not exists public.wa_cancellations (
   id         bigint generated always as identity primary key,
   sender_key text not null,
   to_number  text not null,
-  reason     text,                     -- 'user-removed' | 'session-closed' | 'deal-closed'
+  reason     text,  -- 'user-removed' | 'session-closed' | 'deal-closed' | 'account-blocked'
   created_at timestamptz not null default now(),
   unique (sender_key, to_number)
 );

@@ -48,9 +48,14 @@ line unless you write down why.
       (Supabase grants anon on every table created from the SQL editor, so
       the app's own tables being listed is expected - a foreign name or a
       row read with the anon key is the alarm).
-- [ ] Evolution on its own database, `SAVE_DATA_NEW_MESSAGE/CONTACTS/CHATS`
-      false on every host; `AUTHENTICATION_API_KEY` rotated if it ever
-      appeared in a chat or screenshot.
+- [ ] Evolution on its own database, with the save-data posture the recovery
+      sweep needs on EVERY host: `SAVE_DATA_NEW_MESSAGE` and `SAVE_DATA_CHATS`
+      **true** (`/chat/findMessages` serves the missed-reply rescue FROM that
+      store - false there means the sweep silently recovers nothing),
+      `SAVE_DATA_CONTACTS` and `SAVE_DATA_MESSAGE_UPDATE` false. Its price is a
+      transient copy of every message on the linked number, so the 7-day prune
+      must be RUNNING, not just installed. `AUTHENTICATION_API_KEY` rotated if
+      it ever appeared in a chat or screenshot.
 - [ ] `REDIS_URL` set on Cloud Run (fleet-wide caps); exactly ONE primary
       drain scheduler enabled + the hourly backstop.
 - [ ] `SESSION_SECRET` escrowed (Secret Manager + offline); `WEBHOOK_TOKEN_SALT`

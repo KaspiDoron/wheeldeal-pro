@@ -78,10 +78,19 @@ describe("a plan switch cancels the subscription it replaces", () => {
     const pp = readCode("src/lib/paypal.ts");
     expect(pp).toMatch(/const PAYPAL_TIMEOUT_MS = /);
     expect(pp).toMatch(/ctrl\.abort\(\), PAYPAL_TIMEOUT_MS/);
-    // No bare fetch is left on any PayPal path.
-    expect(pp.replace(/return await fetch\(url, \{ \.\.\.init[^\n]*\n/, "")).not.toMatch(
+    // No bare fetch is left on any PayPal path. (The one guarded call inside
+    // paypalFetch binds its result now - audit M21b reads the BODY inside the
+    // armed deadline instead of handing back a Response at the header boundary.)
+    expect(pp.replace(/const res = await fetch\(url, \{ \.\.\.init[^\n]*\n/, "")).not.toMatch(
       /await fetch\(/
     );
+    // And the timer is cleared only AFTER the body read, never at the header
+    // boundary - the rule timedFetch states in runtime-config.ts.
+    const helper = pp.slice(pp.indexOf("async function paypalFetch"));
+    const helperBody = helper.slice(0, helper.indexOf("\n}\n"));
+    const readAt = helperBody.indexOf("await res.json()");
+    expect(readAt).toBeGreaterThan(-1);
+    expect(helperBody.indexOf("clearTimeout(timer)")).toBeGreaterThan(readAt);
   });
 
   it("the outcome is recorded either way - a failed cancel is a double charge", () => {

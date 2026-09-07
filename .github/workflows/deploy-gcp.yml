@@ -342,6 +342,15 @@ jobs:
           # src/lib/deploy-env.test.ts now fails if the two lists disagree.
           REDIS_URL: ${{ secrets.REDIS_URL }}
           SESSION_SECRET_PREVIOUS: ${{ secrets.SESSION_SECRET_PREVIOUS }}
+          # WEBHOOK_TOKEN_SALT (audit F179/M10). The app folds this into the
+          # webhook/cron token (wa/webhook-token.ts); the two schedulers below
+          # now do the same. It MUST be carried here as well: --set-env-vars
+          # REPLACES the whole service environment, so a salt set by hand in
+          # the Cloud Run console would be wiped on the next deploy and the
+          # schedulers would then present a token the app no longer expects -
+          # the same lockout, inverted. Unset = absent = the historical
+          # unsalted token, which is the safe default.
+          WEBHOOK_TOKEN_SALT: ${{ secrets.WEBHOOK_TOKEN_SALT }}
           # BETA_LOCK is an owner TOGGLE, not a secret (OR11 D2.1). Sourced from a
           # repo VARIABLE so a deploy PRESERVES it: --set-env-vars replaces the
           # whole service env, so an owner who set BETA_LOCK=off in the Cloud Run
@@ -399,7 +408,7 @@ jobs:
           # (optional - absent just keeps the documented in-memory caveat) so
           # the moment a Redis endpoint is reachable from Cloud Run the caps
           # become fleet-wide with no code change.
-          for OPTIONAL in EVOLUTION_API_URL EVOLUTION_API_KEY EVOLUTION_HOSTS APP_DOMAIN REDIS_URL SESSION_SECRET_PREVIOUS BETA_LOCK; do
+          for OPTIONAL in EVOLUTION_API_URL EVOLUTION_API_KEY EVOLUTION_HOSTS APP_DOMAIN REDIS_URL SESSION_SECRET_PREVIOUS WEBHOOK_TOKEN_SALT BETA_LOCK; do
             VALUE="${!OPTIONAL:-}"
             if [ -n "$VALUE" ]; then
               ENV_VARS="$ENV_VARS##$OPTIONAL=$VALUE"
@@ -508,6 +517,7 @@ jobs:
         env:
           PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
           SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+          WEBHOOK_TOKEN_SALT: ${{ secrets.WEBHOOK_TOKEN_SALT }}
         run: |
           set -euo pipefail
           URL="$(gcloud run services describe "$SERVICE" --region "$REGION" \
@@ -518,7 +528,14 @@ jobs:
           fi
           # Same derivation as src/lib/wa/webhook-token.ts: the ping route
           # accepts the webhook token, so the schedule needs no new secret.
-          TOKEN="$(printf 'wd-webhook:%s' "$SESSION_SECRET" | sha256sum | cut -c1-32)"
+          # THE SALT IS PART OF IT (audit F179/M10). It used to be dropped
+          # here, so setting WEBHOOK_TOKEN_SALT - the rotation knob README,
+          # RUNBOOK and .env.example all point at - made every minute-tick 403
+          # and took rearmOpenWebhooks, the only automatic re-arm, down with
+          # it. Unset salt derives the historical token unchanged.
+          SALTED="wd-webhook:$SESSION_SECRET"
+          if [ -n "${WEBHOOK_TOKEN_SALT:-}" ]; then SALTED="$SALTED:$WEBHOOK_TOKEN_SALT"; fi
+          TOKEN="$(printf '%s' "$SALTED" | sha256sum | cut -c1-32)"
           TARGET="$URL/api/wa/ping?token=$TOKEN"
           JOB="wheeldeal-drain"
 
