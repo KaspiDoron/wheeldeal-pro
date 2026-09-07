@@ -95,11 +95,21 @@ describe("REPRODUCTION: 'Push harder' posts the leverage it is named for", () =>
     expect(page).toMatch(/round: vendor\.offer\?\.round \?\? 0/);
   });
 
-  it("the route still refuses to compose in a currency it was not given", () => {
-    // The USD default is the honest fallback for a genuinely unknown region;
-    // the bug was never sending one.
-    expect(read("src/app/api/bargain-draft/route.ts")).toMatch(
-      /const cur = currencyForRegion\(region\) \|\| "USD"/
+  it("the route resolves the currency through the SHARED server chain", () => {
+    // REWRITTEN for audit F094. This used to pin `currencyForRegion(region) ||
+    // "USD"` and call the dollar default "honest" - it is not: the labels the
+    // geocoder actually produces ("My current location", a raw pin) carry no
+    // country token, so a +66 shop was asked for dollars and every THB-stamped
+    // rival was filtered out by `currency=eq.USD`. The shared chain consults
+    // the SHOP'S PHONE PREFIX and leaves the currency undefined rather than
+    // inventing one.
+    const route = read("src/app/api/bargain-draft/route.ts");
+    expect(route).toMatch(/const cur = await resolveLocalCurrency\(\{/);
+    expect(route).toMatch(/shopDigits: digitsOnly\(String\(vendor\.whatsapp \?\? ""\)\),/);
+    // ...and the unguarded default is gone, here and in the composer it feeds.
+    expect(route).not.toMatch(/currencyForRegion\(region\) \|\| "USD"/);
+    expect(read("src/lib/agents.ts")).not.toMatch(
+      /const cur = opts\.currency \|\| currencyForRegion\(opts\.region\) \|\| "USD"/
     );
   });
 });

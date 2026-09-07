@@ -46,6 +46,11 @@ export const AGENT_EVENT_KINDS = [
   "price-reconciled", // divided-total corrected to a per-day rate
   "price-arbiter-odd", // the two extraction passes disagreed oddly
   "suspect-floor", // a floor price that looks like a parsing artifact
+  // An offers row for a DIVIDED per-day landed without quote_basis_days, so
+  // no reader can tell package arithmetic from a quoted daily rate
+  // (agent-loop publishOfferRow). Only reachable on a database whose offers
+  // table predates the provenance columns.
+  "offer-provenance-dropped",
   "rival-hint-ignored", // leverage existed but the pass declined it
   "alternative-decision", // traveller answered a substitution choice
   "vision-check", // typed price vs price-sheet photo reconciliation

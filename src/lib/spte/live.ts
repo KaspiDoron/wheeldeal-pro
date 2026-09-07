@@ -384,13 +384,43 @@ async function buildSession(
     // THIS thread is the odd one out (a single mis-stamped currency, exactly
     // what the "RM 300 in Krabi" bug produced), strict equality silently threw
     // away every rival and the shop quoting 300 never heard about the 250.
-    // Trust the session's own majority over one thread's stamp.
+    // Trust the session's own majority over a stamp the shop's own number
+    // contradicts.
     const priced = rows.filter((r) => typeof r.pricePerDay === "number" && r.currency);
+    //
+    // THE TALLY IS THE OTHER SHOPS (audit F096). It used to be built from
+    // `rows`, and `rows` ALWAYS carries this shop's own row - session-table.ts
+    // keeps it deliberately, because it is what `quoteOnTable` argues against.
+    // So `!tally.has(input.currency)` was false the moment this thread had a
+    // price of its own, and the rescue was dead in exactly the durable
+    // mis-stamp case it was written for.
+    const others = priced.filter((r) => !r.isThisShop);
     const tally = new Map<string, number>();
-    for (const r of priced) tally.set(r.currency!, (tally.get(r.currency!) ?? 0) + 1);
+    for (const r of others) tally.set(r.currency!, (tally.get(r.currency!) ?? 0) + 1);
     const dominant = [...tally.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+    // ...AND BEING THE MINORITY IS NOT ENOUGH TO BE WRONG. A genuinely
+    // Malaysian shop inside a Thai hunt is also the odd one out, and comparing
+    // its ringgit against baht would invent leverage out of an exchange rate
+    // nobody applied - which is what the strict equality exists to forbid. So
+    // the rescue needs EVIDENCE that this thread's stamp is a mis-read: the
+    // shop's OWN phone prefix (then the hunt's region label) says which money
+    // this shop trades in, and only when that disagrees with the stamp and
+    // agrees with the session's majority is the stamp the outlier. Pure regex
+    // work on values already in hand - no query, no network.
+    let stampSuspect = false;
+    try {
+      const { resolveLocalCurrency } = await import("../local-currency");
+      const expected =
+        (await resolveLocalCurrency({ shopDigits: input.event.toDigits })) ??
+        (await resolveLocalCurrency({ region: input.ctx.region }));
+      stampSuspect = Boolean(expected && expected !== input.currency && expected === dominant);
+    } catch {
+      /* no evidence either way - the strict filter stands */
+    }
     const compareCur =
-      dominant && !tally.has(input.currency) && tally.get(dominant)! >= 2 ? dominant : input.currency;
+      dominant && dominant !== input.currency && (tally.get(dominant) ?? 0) >= 2 && stampSuspect
+        ? dominant
+        : input.currency;
     // ONE AGGREGATOR, AND IT KNOWS WHAT A RIVAL IS.
     //
     // This loop used to accept every priced row the session read returned, with

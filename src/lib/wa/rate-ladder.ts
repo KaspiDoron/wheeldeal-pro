@@ -34,6 +34,7 @@
 // dictionary of phrasings at all.
 
 import { mentionedCurrencies } from "./price-extract";
+import { MAGNITUDE_TAIL, applyMagnitude } from "./rate-expr";
 import { normalizeDigits } from "../integrity/translation";
 
 export interface RateTier {
@@ -56,7 +57,12 @@ export interface RateTier {
 
 // A number with optional thousands separators. Deliberately narrow: a board row
 // has one price, and a greedy pattern would swallow the day range.
-const AMOUNT = "(\\d{1,3}(?:[.,\\s]\\d{3})+|\\d{2,7})(?:\\.\\d{1,2})?";
+//
+// A ONE-DIGIT MANTISSA IS ALLOWED ONLY BECAUSE OF THE SUFFIX: "1.5jt" is a real
+// board row and needed two digits before, so an Indonesian million board parsed
+// as no ladder at all. A bare single digit is still harmless - the 10..5,000,000
+// band in `amountOf` refuses it.
+const AMOUNT = "((?:\\d{1,3}(?:[.,\\s]\\d{3})+|\\d{2,7}|\\d)(?:\\.\\d{1,2})?)";
 
 // "1-2 days", "3 to 7 days", "8 – 14 day", "15-29days"
 const RANGE_RX = new RegExp(
@@ -71,7 +77,14 @@ const OPEN_RX = /\b(\d{1,3})\s*(?:\+|days?\s*(?:or\s+(?:more|above|longer|up)|an
 const WEEKLY_RX = /\b(?:weekly|per\s+week|a\s+week|1\s*week|one\s+week)\b/i;
 const MONTHLY_RX = /\b(?:monthly|per\s+month|a\s+month|1\s*month|one\s+month)\b/i;
 
-const AMOUNT_RX = new RegExp(AMOUNT, "g");
+// Group 1 is the digits, group 2 the magnitude suffix glued to them ("250rb",
+// "1.5jt", "700 ribu"). The suffix is part of the number: reading a board row
+// "3-7 days 250rb" as 250 put a rate 1000x too cheap on the traveller's card,
+// and a ladder both short-circuits the other readers AND overrides the model's
+// own read, so that number became the price of record for the whole thread.
+// The lookahead sits on the SUFFIX only - guarding the digits would let "550php"
+// backtrack to 55.
+const AMOUNT_RX = new RegExp(`${AMOUNT}\\s*(${MAGNITUDE_TAIL}(?![a-z]))?`, "gi");
 
 /** Rows that are conditions or headings, never a priced tier. */
 const NOT_A_TIER =
@@ -119,7 +132,9 @@ function amountOf(line: string, label: string): number | undefined {
   const masked = label ? line.replace(label, " ".repeat(label.length)) : line;
   let best: number | undefined;
   for (const m of masked.matchAll(AMOUNT_RX)) {
-    const n = parseAmount(m[0]);
+    // The suffix scales the number BEFORE the band is applied, so "250rb" is
+    // judged as 250,000 rather than read as 250 and waved through.
+    const n = applyMagnitude(parseAmount(m[1]), m[2]);
     // A rental rate is never under 10 in any currency a shop quotes in, and a
     // board never runs into the millions.
     if (Number.isFinite(n) && n >= 10 && n <= 5_000_000) best = n;

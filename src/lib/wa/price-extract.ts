@@ -22,6 +22,7 @@
 // as a backstop that rescues a price the LLM missed.
 
 import { parseRateLadder, tierForDays } from "./rate-ladder";
+import type { RateExpr } from "./rate-expr";
 import {
   scanRates,
   CUR_SYM as RATE_CUR_SYM,
@@ -227,10 +228,23 @@ const PRICE_WEEK = new RegExp(
 // A BARE price answer: the whole (short) message is just an amount + optional
 // currency ("400", "400 baht", "PHP 350 only") - the natural reply to "what's
 // your best price per day?". Strict shape so times/phone numbers never match.
+//
+// THE MAGNITUDE SUFFIX COMES BEFORE THE CURRENCY TRAIL, and that order is the
+// whole fix: "rb", "jt" and "ribu" are ALSO in the currency vocabulary, so a
+// trailing-currency group placed first swallows them and "350rb" - the single
+// most common Indonesian price reply - reads as 350 rupiah, a phantom bargain
+// that beats every real quote in the hunt. Group 1 is the number, group 2 the
+// magnitude; `applyMagnitude` runs before the plausibility band below, so "2jt"
+// is judged as 2,000,000 rather than dropped as a 2.
 const BARE_PRICE = new RegExp(
-  `^\\s*(?:${CUR_LEAD})?\\s*${NUM}\\s*(?:${CUR_TRAIL})?\\s*(?:only|net|\\.|!)?\\s*$`,
+  `^\\s*(?:${CUR_LEAD})?\\s*${NUM}\\s*(${MAGNITUDE_TAIL}(?![a-z]))?\\s*(?:${CUR_TRAIL})?\\s*(?:only|net|\\.|!)?\\s*$`,
   "i"
 );
+
+/** The amount a BARE_PRICE match states, with its magnitude suffix applied. */
+function bareAmount(m: RegExpMatchArray): number {
+  return applyMagnitude(parseAmount(m[1]), m[2]);
+}
 
 /** Normalize k-notation ("150k", "1.5k") into full numbers before matching. */
 function expandK(line: string): string {
@@ -838,10 +852,22 @@ export function extractQuotedPrices(
     // THE RATE READER (see wa/rate-expr). A rate is amount / (quantity x unit),
     // and reading only `amount ... "day"` is how "250/1day" became a 1-baht
     // offer: the ONE is the denominator, not the money. Week/month expressions
-    // are left to the dedicated patterns below, whose per-day divisor follows
-    // the traveller's real stay.
+    // go to the dedicated patterns below first, whose per-day divisor follows
+    // the traveller's real stay; they are only spent from here when those
+    // patterns decline.
+    // WEEK AND MONTH EXPRESSIONS THIS LINE HOLDS, in whatever language the shop
+    // writes in. They used to be discarded outright ("if unit is not day,
+    // continue"), and the only week/month readers below match the literal
+    // English words - so a Thai "4000 บาท/เดือน", an Indonesian "3jt/bulan" or a
+    // Vietnamese "700k/tuần" extracted NO price at all, on exactly the long-stay
+    // searches where shops answer in months. Held here and spent only after the
+    // English patterns have declined for this line, so nothing double counts.
+    const periodRates: RateExpr[] = [];
     for (const rate of scanRates(line)) {
-      if (rate.unit !== "day") continue;
+      if (rate.unit !== "day") {
+        periodRates.push(rate);
+        continue;
+      }
       const amt = rate.perDay;
       if (!(amt > 0) || amt === days) continue;
       const at = rate.index;
@@ -1062,10 +1088,12 @@ export function extractQuotedPrices(
     // A MONTHLY quote -> per-day over the real rental length when it is a
     // month-scale request (a 30-day search is exactly where shops answer in
     // months), else a calendar month.
+    const hitsBeforePeriod = hits.length;
+    const monthDiv = days >= 28 && days <= 31 ? days : 30;
     const month = line.match(PRICE_MONTH);
     if (month) {
       const whole = parseAmount(month[1] ?? month[2]);
-      const div = days >= 28 && days <= 31 ? days : 30;
+      const div = monthDiv;
       if (whole > 0 && whole > div) {
         hits.push({
           pricePerDay: Math.round(whole / div),
@@ -1106,6 +1134,37 @@ export function extractQuotedPrices(
         });
       }
     }
+    // THE SAME QUOTE, WRITTEN IN THE SHOP'S OWN LANGUAGE.
+    //
+    // Only reached when both English readers declined for this line, so the
+    // English wording keeps its existing behaviour exactly and no amount is
+    // counted twice. The divisor rules are the ones above, recomputed from the
+    // stated amount rather than taken from rate.perDay - scanRates divides a
+    // month by a flat 30, while a 28-day search must divide by the traveller's
+    // own stay, and the two would otherwise drift (133 vs 143). The `> div` and
+    // `> 7` sanity floors ride along, so a duration can never become a package
+    // price here either.
+    if (hits.length === hitsBeforePeriod) {
+      for (const rate of periodRates) {
+        const div = rate.unit === "month" ? monthDiv : 7;
+        const whole = rate.amount / rate.quantity;
+        if (!(whole > div)) continue;
+        if (isDurationConditionAt(line, rate.index, rate.matched)) continue;
+        const perDayFromPeriod = Math.round(whole / div);
+        if (!(perDayFromPeriod > 0) || contradictsExplicitDaily(perDayFromPeriod)) continue;
+        hits.push({
+          pricePerDay: perDayFromPeriod,
+          currency: currencyIn(line) ?? opts.localCurrency,
+          line: rawLine,
+          classMatch: cls ? cls === wantClass : undefined,
+          listPrice: isListPriceAt(line, rate.index),
+          // A package rate spread over its own period. Derived, and it says so,
+          // so the like-for-like rival guard can still refuse to repeat it to
+          // another shop as a daily rate.
+          derivedFromDays: div,
+        });
+      }
+    }
   }
 
   if (!hits.length) {
@@ -1131,7 +1190,7 @@ export function extractQuotedPrices(
       // sanity band so a time ("9"), a year, or a phone number never passes.
       const bare = hits.length === 0 && whole.length <= 40 ? whole.match(BARE_PRICE) : null;
       if (bare) {
-        const amt = parseAmount(bare[1]);
+        const amt = bareAmount(bare);
         if (amt >= 20 && amt <= 5_000_000 && amt !== days) {
           hits.push({
             pricePerDay: amt,
@@ -1160,7 +1219,7 @@ export function extractQuotedPrices(
         if (l.length > 40) continue;
         const m = l.match(BARE_PRICE);
         if (!m) continue;
-        const amt = parseAmount(m[1]);
+        const amt = bareAmount(m);
         if (amt >= 20 && amt <= 5_000_000 && amt !== days) {
           hits.push({
             pricePerDay: amt,

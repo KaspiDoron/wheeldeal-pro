@@ -486,7 +486,10 @@ export async function GET(req: Request) {
       const effectivePrice = effectivePriceFor({
         found: Boolean(r.found),
         rowPrice: r.price_per_day,
-        rowCurrency: r.currency ?? null,
+        // The THREAD's currency of record backs the row's own (F097): a
+        // board or menu row that carries no code must borrow the one the
+        // engine already reconciled, never fall through to the card's "USD".
+        rowCurrency: r.currency ?? threadCurrencyByVendor.get(r.vendor_id) ?? null,
         threadPrice: st?.pricePerDay ?? null,
         boardPrices: readingPricesByVendor.get(r.vendor_id) ?? null,
         options: optionsByVendor.get(r.vendor_id) ?? null,

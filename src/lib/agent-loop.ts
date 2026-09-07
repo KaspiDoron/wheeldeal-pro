@@ -280,6 +280,112 @@ function stampTurnLatency(
   ]).catch(() => {});
 }
 
+/**
+ * Publish the traveller's offer row for this shop, degrading one column set at
+ * a time when the database has not caught up with the schema.
+ *
+ * Extracted from the turn so it can be EXECUTED against a store that 400s on
+ * unknown columns - which is the only way to see whether a row that fell back
+ * still carries the provenance the rival guard depends on.
+ *
+ * Returns whether the landed row carries `quote_basis_days` /
+ * `effective_daily_rate`, so the caller can record the degrade rather than
+ * swallow it.
+ */
+export async function publishOfferRow(args: {
+  base: Record<string, unknown>;
+  offerBase: Record<string, unknown>;
+  provenance: { effective_daily_rate: number | null; quote_basis_days: number | null };
+  deposits: Record<string, unknown>;
+  /** Whose row this is, for the breadcrumb when the provenance cannot land. */
+  context: {
+    userEmail: string | null;
+    toNumber: string;
+    vendorId: string;
+    vendorName: string;
+    price: number;
+    currency: string;
+    /** The span this per-day was divided out of, when it was derived. */
+    basisDays?: number;
+  };
+}): Promise<{ provenanceStamped: boolean }> {
+  const { base, offerBase, provenance, deposits, context } = args;
+  // PROVENANCE IS THE RIVAL GUARD, NOT A NICE-TO-HAVE COLUMN (audit F011).
+  //
+  // The step-down used to drop `provenance` on its FIRST retry, so a row that
+  // fell back carried price_per_day 167 with quote_basis_days NULL - and
+  // `pickRival`'s "a package basis longer than the rental is not leverage" drop
+  // can only fire on a row that HAS the basis. A 500-for-3-days package was
+  // then citable at the next shop as a like-for-like 167 a day: the exact
+  // defect the guard exists to prevent. Two changes.
+  //
+  // (1) THE SCHEMA IS ASKED, NOT INFERRED FROM A FAILURE. `sbInsert` returns a
+  // bare boolean and cannot tell "column does not exist" from any other 4xx
+  // (which is why this ladder exists at all - see supabase/schema.sql), so a
+  // Supabase blip read as a missing migration silently published a
+  // provenance-free row. The probe is cached, positives permanently, so this
+  // costs one read per process - and on a database that genuinely lacks the
+  // columns it also saves the two doomed inserts the ladder used to spend.
+  //
+  // (2) THE PROVENANCE IS DROPPED LAST. An un-migrated deposit column can no
+  // longer take the basis down with it: there is now a rung that carries the
+  // session stamp and the provenance and nothing else.
+  //
+  // "unavailable" is UNKNOWN, not "no": keep stamping and let the insert answer.
+  const { tableReady } = await import("./schema-probe");
+  const provenanceReady =
+    (await tableReady("offers", "quote_basis_days,effective_daily_rate").catch(
+      () => "unavailable" as const
+    )) !== "missing";
+  const prov = provenanceReady ? provenance : {};
+  // Retry without the newest columns if the migration has not run yet.
+  const offerOk = await sbInsert("offers", [{ ...base, ...prov, ...deposits }]);
+  let provenanceStamped = provenanceReady;
+  if (!offerOk) {
+    // Step down one column set at a time, keeping the session stamp and the
+    // provenance for as long as the schema allows.
+    const okDep = await sbInsert("offers", [
+      { ...base, ...prov, deposit_note: deposits.deposit_note ?? null },
+    ]);
+    if (!okDep) {
+      const okProv = provenanceReady
+        ? await sbInsert("offers", [{ ...base, ...provenance }])
+        : false;
+      if (!okProv) {
+        provenanceStamped = false;
+        const okBase = await sbInsert("offers", [base]);
+        if (!okBase) await sbInsert("offers", [offerBase]);
+      }
+    }
+  }
+  // A DIVIDED PER-DAY THAT LANDED WITHOUT ITS BASIS IS A VISIBLE DEGRADE.
+  //
+  // The row is still written - it is the traveller's own price for this shop,
+  // and the card band, the deal surfaces and the session aggregates all read
+  // it - but nothing downstream can then tell package arithmetic from a quoted
+  // daily rate, so the loss is recorded rather than swallowed. The thread's own
+  // `fields.priceBasisDays` (written by the turn engine, read by graph/engine's
+  // session table) stays the second provenance source on such a host.
+  if (!provenanceStamped && context.basisDays !== undefined && context.basisDays > 1) {
+    void sbInsert("agent_events", [
+      {
+        kind: "offer-provenance-dropped",
+        user_email: context.userEmail,
+        to_number: context.toNumber,
+        vendor_id: context.vendorId,
+        vendor_name: context.vendorName,
+        detail: JSON.stringify({
+          price: context.price,
+          currency: context.currency,
+          basisDays: context.basisDays,
+          note: "offers row landed without quote_basis_days - a divided per-day cannot be told from a quoted one",
+        }).slice(0, 400),
+      },
+    ]).catch(() => {});
+  }
+  return { provenanceStamped };
+}
+
 export async function processVendorReply(opts: {
   fromDigits: string;
   text: string;
@@ -1394,7 +1500,20 @@ export async function processVendorReply(opts: {
   // is only the ABSOLUTE last resort - when the region, the shop's prefix and
   // the reply all fail to name a currency - so a Thai shop's bare number is
   // stored as THB, not dollars.
-  const cur = reconcileCurrency(extraction.currency, localCur, extractText || "") || localCur || "USD";
+  const reconciledCur = reconcileCurrency(extraction.currency, localCur, extractText || "");
+  const cur = reconciledCur || localCur || "USD";
+  // THE READING MUST SPEAK THE SAME MONEY AS THE OFFER (F097).
+  //
+  // `cur` used to stay a local const, so `readingFrom(extraction)` further
+  // down stamped the model's OWN unreconciled code onto
+  // whatsapp_messages.raw.reading.prices[] - "250 USD" under a baht board in
+  // the traveller's understanding panel - and effective-price's board tier
+  // then handed that USD to the card and the booking on every later reply
+  // that carried no price of its own. Only the RECONCILED value is written
+  // back: the bare "USD" last resort above belongs to the offers row alone,
+  // so a reply nobody could price at all stays currency-less in the panel
+  // rather than confidently wrong.
+  if (reconciledCur) extraction.currency = reconciledCur;
 
   // THE SHOP'S MENU. A reply naming more than one price is a CHOICE, not a
   // quote: "some models 200 and some new 250/day". Collapsing that to one number
@@ -1459,7 +1578,19 @@ export async function processVendorReply(opts: {
   // clamp, and sent floorPrice: undefined into the engine. Every safety net on
   // this path was dark for the precise regions that motivated it.
   const floorRegion = ctx.region || _countryForShop(from) || undefined;
-  const floor = await floorPriceFor(floorRegion, rfq);
+  // ...AND THE CURRENCY IS HANDED OVER, NOT RE-DERIVED (audit F095).
+  //
+  // `floorRegion` prefers a non-empty label, so the phone-prefix fallback above
+  // never ran for "My current location" or a raw "8.0000, 98.0000" pin - and
+  // `defaultFloor` then resolved its OWN currency from that same label and got
+  // USD while the price of record was THB. The two chains now share one answer:
+  // `cur` is what this thread already resolved (stored stamp, region, then the
+  // shop's prefix), and the shop's country rides along as an EXTRA lookup key
+  // so a stored area row is still preferred over the country row.
+  const floor = await floorPriceFor(floorRegion, rfq, {
+    currency: cur,
+    countryRegion: _countryForShop(from) || undefined,
+  });
   let floorSameCur = floor && floor.currency === cur ? floor : null;
   if (floor && !floorSameCur) {
     // Still mismatched: say so rather than going quiet. A dark net that nobody
@@ -1961,11 +2092,11 @@ export async function processVendorReply(opts: {
     // row: `search_id` has shipped since the intel migration, and it is the key
     // the whole cross-shop leverage mechanism is scoped by.
     const base = { ...offerBase, search_id: searchId };
-    // Retry without the newest columns if the migration has not run yet.
-    const offerOk = await sbInsert("offers", [
-      {
-        ...base,
-        ...provenance,
+    await publishOfferRow({
+      base,
+      offerBase,
+      provenance,
+      deposits: {
         deposit_note: extraction.deposit ?? null,
         deposit_type: extraction.depositType ?? null,
         deposit_amount: extraction.depositAmount ?? null,
@@ -1975,18 +2106,16 @@ export async function processVendorReply(opts: {
         km_limit_per_day: extraction.kmLimitPerDay != null ? String(extraction.kmLimitPerDay) : null,
         fuel_policy: extraction.fuelPolicy ?? null,
       },
-    ]);
-    if (!offerOk) {
-      // Step down one column set at a time, keeping the session stamp and the
-      // provenance for as long as the schema allows.
-      const okDep = await sbInsert("offers", [
-        { ...base, ...provenance, deposit_note: extraction.deposit ?? null },
-      ]);
-      if (!okDep) {
-        const okBase = await sbInsert("offers", [base]);
-        if (!okBase) await sbInsert("offers", [offerBase]);
-      }
-    }
+      context: {
+        userEmail: ctx.sender ?? null,
+        toNumber: from,
+        vendorId: ctx.vendorId ?? "",
+        vendorName: ctx.vendorName ?? "",
+        price: usablePrice,
+        currency: cur,
+        basisDays: priceBasisDays,
+      },
+    });
     // HOT-STATE WRITE-THROUGH (Module 2): mirror the offer into the Redis
     // session aggregates (lowest-rival ZSET + OFFERS IN / BARGAINED HSET) and
     // publish the delta for the SSE stream. REDIS_URL-gated no-op when unset;
