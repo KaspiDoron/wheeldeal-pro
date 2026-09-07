@@ -113,7 +113,7 @@ describe("F3: a partner shop can be opted in from the console", () => {
 });
 
 describe("F4: the emergency stop covers every company-number lane", () => {
-  it("the window flush honours the kill switch, and only the kill switch", () => {
+  it("the window flush honours BOTH kill switches, and only the kill switches", () => {
     const dispatch = readCode("src/lib/waba/dispatch.ts");
     const flush = dispatch.slice(dispatch.indexOf("export async function sendForLead"));
     // sendForLead is the SECOND entry point - reached from the webhook when an
@@ -121,6 +121,12 @@ describe("F4: the emergency stop covers every company-number lane", () => {
     // in during an incident still put free-form messages on the rented number.
     expect(flush).toMatch(/gov\.binding === "kill-switch"/);
     expect(flush).toMatch(/reason: "kill-switch"/);
+    // AUDIT F200: this case asserted the LANE stop (WABA_KILL, the governor's)
+    // and called the lane covered - while the owner's GLOBAL stop, the Money
+    // tab handle that pauses the Evolution wire for every user, never reached
+    // here at all. Both, now, and the executed proof is in
+    // kill-switch-global.test.ts.
+    expect(flush).toMatch(/killSwitchOn/);
     // Deliberately NOT the spend/tier bindings: those meter the paid template
     // lane, and a flush inside an already-open service window costs neither.
     const killBlock = flush.slice(0, flush.indexOf("THE TEMPLATE-LANE CLAIM"));

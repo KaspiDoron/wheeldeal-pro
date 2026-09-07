@@ -40,6 +40,14 @@ function verifyHmac(raw: string, header: string | null, secret: string): boolean
   }
 }
 
+/** The reseller shared secret, compared in constant time like the HMAC is. */
+function secretMatches(got: string | null, secret: string): boolean {
+  const a = Buffer.from(got ?? "", "utf8");
+  const b = Buffer.from(secret, "utf8");
+  if (a.length === 0 || a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
 /** Meta's verification handshake, harmless for resellers that never call it. */
 export async function GET(req: Request) {
   const url = new URL(req.url);
@@ -93,9 +101,16 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "unconfigured" }, { status: 403 });
   }
   const signed = verifyHmac(raw, req.headers.get("x-hub-signature-256"), secret);
-  const shared =
-    req.headers.get("x-waba-secret") === secret ||
-    new URL(req.url).searchParams.get("secret") === secret;
+  // THE SECRET COMES FROM A HEADER, NEVER FROM THE URL.
+  //
+  // This also accepted `?secret=<WABA_WEBHOOK_SECRET>`, which is the same leak
+  // the GET comment above records: a query parameter is written into every
+  // access log in the path - Cloud Run's, the load balancer's, any sink - and
+  // for a Meta-direct WABA this value IS the X-Hub-Signature-256 signing key,
+  // so a log reader could forge signed deliveries that advance leads and open
+  // service windows. Nothing in this repo ever emitted `?secret=`; a reseller
+  // subscription that carries one must move it to `x-waba-secret` (RUNBOOK.md).
+  const shared = secretMatches(req.headers.get("x-waba-secret"), secret);
   if (!signed && !shared) {
     return NextResponse.json({ error: "bad signature" }, { status: 403 });
   }
@@ -186,6 +201,22 @@ async function handleStatus(s: StatusEvt) {
  */
 async function handleInbound(m: MsgEvt) {
   if (!m.from) return;
+  // ONE DELIVERY, ONE FLUSH.
+  //
+  // Meta redelivers whenever the 200 is slow, and the work below IS slow: the
+  // held-lead flush is one 12s-bounded send per waiting traveller. A redelivery
+  // that overlaps the first handler used to re-run the whole flush, and the
+  // agency got two identical handoffs per traveller on a rented, quality-rated
+  // number. `wa_inbound_seen` is already this repo's message-id dedupe table,
+  // and it fails OPEN - an unreachable claims store never drops a real inbound.
+  //
+  // Deliberately on the MESSAGE path only: statuses (delivered / read / 131049)
+  // are far more frequent, are already write-once on their own columns, and
+  // must not pay a claims round trip.
+  if (m.id) {
+    const { claimInboundStore } = await import("@/lib/wa/inbound-claim");
+    if (!(await claimInboundStore(m.id, null))) return;
+  }
   // STOP-INTENT FIRST (owner decision: fleet-wide). A shop telling the
   // business number to stop is telling all of WheelDeal - record it before
   // anything treats this inbound as a window-opening opportunity.

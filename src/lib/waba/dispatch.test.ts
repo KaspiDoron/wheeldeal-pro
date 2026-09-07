@@ -20,6 +20,10 @@ let nextLeadId = 1;
 
 vi.mock("../runtime-config", () => ({
   getConfig: async (k: string) => config[k] ?? null,
+  // The GLOBAL emergency stop (audit F200): sendForLead reads KILL_SWITCH
+  // through usage.killSwitchOn, which is a getConfigFresh read - so this
+  // mock has to answer it, or the lane holds on a missing export.
+  getConfigFresh: async (k: string) => ({ value: config[k] ?? undefined }),
   sbSelectStrict: async (table: string) => (table === "waba_agencies" ? agencyRows : { rows: [] }),
   sbSelect: async (table: string, q: string) => {
     if (table === "waba_agencies" && q.includes("opted_in_at")) {
