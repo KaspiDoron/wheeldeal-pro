@@ -6,6 +6,7 @@
 
 import "server-only";
 import { sbSelect, sbSelectDark, sbInsert } from "../runtime-config";
+import { identityKey } from "../wa/phone-key";
 
 interface ThreadRow {
   thread_key: string;
@@ -28,7 +29,7 @@ interface Finding {
 const FLAG_THRESHOLD = 3;
 
 export async function detectWeakConversations(): Promise<{ scanned: number; flagged: number }> {
-  const [threads, chiefs, moves, offers, msgs, replies, existing] = await Promise.all([
+  const [threads, chiefs, moves, offers, msgs, replies, existing, citedRead] = await Promise.all([
     sbSelect<ThreadRow>(
       "negotiation_threads",
       "select=thread_key,user_email,vendor_id,vendor_name,to_number,phase,fields,waiting_until,updated_at&order=updated_at.desc&limit=120"
@@ -70,7 +71,25 @@ export async function detectWeakConversations(): Promise<{ scanned: number; flag
       "agent_reviews",
       "select=thread_key,auto_reason,status&source=eq.auto&order=created_at.desc&limit=300"
     ).catch(() => []),
+    // THE POSITIVE LEVERAGE SIGNAL (audit F069): turns whose outbound text
+    // cited a rival, measured on the wire - spte/live.ts stamps `citedRival`
+    // on every engine-v3-turn. `fields.lastLeverage` is written by the
+    // failover engine's bargain node only, so on a thread the live engine
+    // served its absence proved nothing and R3 fired against threads whose
+    // own outbound had named the cheaper shop. Filtered server-side to the
+    // citing turns, join columns only. sbSelectDark: unreadable means R3
+    // abstains, never flags blind.
+    sbSelectDark<{ user_email: string | null; to_number: string | null }>(
+      "agent_events",
+      `select=user_email,to_number&kind=eq.engine-v3-turn&detail=like.${encodeURIComponent(
+        '*"citedRival":true*'
+      )}&order=created_at.desc&limit=500`
+    ),
   ]);
+  const cited =
+    citedRead === null
+      ? null
+      : new Set(citedRead.map((r) => `${r.user_email ?? ""}:${identityKey(r.to_number)}`));
 
   const chiefBy = new Map(chiefs.map((c) => [c.thread_key, c] as const));
   // Keyed by thread (owner:digits) - a bare-digits key would cross-match two
@@ -96,7 +115,17 @@ export async function detectWeakConversations(): Promise<{ scanned: number; flag
       lastLeverage?: string;
       declined?: boolean;
       presented?: boolean;
+      digest?: { lastAskPerDay?: number };
     };
+    // THE ASK WE LAST MADE, where the engine that answers shops keeps it:
+    // `digest.lastAskPerDay` is measured off the sent text and persisted by
+    // spte/live.ts (spte/pass.ts reads it as lastTarget); `fields.lastTarget`
+    // is the failover engine's copy. Before, R5 read only the second and so
+    // never fired on a live thread (audit F069).
+    const lastTarget =
+      typeof f.digest?.lastAskPerDay === "number" && f.digest.lastAskPerDay > 0
+        ? f.digest.lastAskPerDay
+        : f.lastTarget;
     const chief = chiefBy.get(t.thread_key);
     const findings: Finding[] = [];
 
@@ -111,16 +140,22 @@ export async function detectWeakConversations(): Promise<{ scanned: number; flag
     }
 
     // R3 missed rival leverage: a clearly cheaper same-user offer existed but
-    // this thread's price stayed high and no leverage was recorded.
-    if (f.pricePerDay && !f.declined) {
+    // this thread's price stayed high and no turn of this thread cited it on
+    // the wire (nor did the failover engine record leverage). Abstains when
+    // the turn record could not be read.
+    if (f.pricePerDay && !f.declined && cited !== null) {
       const rival = offers.find(
         (o) =>
           o.user_email === t.user_email &&
-          o.vendor_id !== t.to_number &&
+          // An offer is keyed by vendor id; the old `!== t.to_number` compared
+          // an id to a phone number and never excluded the thread's own shop.
+          o.vendor_id !== (t.vendor_id ?? t.to_number) &&
           o.price_per_day > 0 &&
           o.price_per_day < f.pricePerDay! * 0.9
       );
-      if (rival && !f.lastLeverage) {
+      const leveragePlayed =
+        Boolean(f.lastLeverage) || cited.has(`${t.user_email}:${identityKey(t.to_number)}`);
+      if (rival && !leveragePlayed) {
         findings.push({
           rule: "R3",
           weight: 2,
@@ -152,15 +187,15 @@ export async function detectWeakConversations(): Promise<{ scanned: number; flag
       (f.firmCount ?? 0) === 1 &&
       !f.declined &&
       f.pricePerDay &&
-      f.lastTarget &&
-      f.pricePerDay > f.lastTarget * 1.25 &&
+      lastTarget &&
+      f.pricePerDay > lastTarget * 1.25 &&
       (f.rounds ?? 0) < 4 &&
       now - Date.parse(t.updated_at) > 12 * 3600_000
     ) {
       findings.push({
         rule: "R5",
         weight: 2,
-        detail: `one "last price" stopped the push at ${f.pricePerDay} while our target was ${f.lastTarget}`,
+        detail: `one "last price" stopped the push at ${f.pricePerDay} while our target was ${lastTarget}`,
       });
     }
 

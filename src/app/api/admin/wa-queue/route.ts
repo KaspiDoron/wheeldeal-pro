@@ -7,6 +7,20 @@ import { sendFromUser } from "@/lib/evolution";
 // Queued WhatsApp messages viewer + control (#10/#11). Shows exactly which
 // messages are waiting, to whom, when they will send, and WHY they are paced
 // (the anti-ban reason). The owner can flush all due messages now, or drop one.
+//
+// THE WORDS ARE THE OWNER'S (audit F163). wa_outbox is one of the tables
+// admin/data marks owner-only ("tables carrying message TEXT"), and this
+// route shipped the first 90 characters of every queued body plus the shop's
+// number to any management session - the same admin refused on one route and
+// served on another. The queue view stays management-visible because the
+// parking reason, due state and lapsed claim are genuine ops signal; the
+// preview and the recipient number are built for the owner only.
+
+/** The recipient identifier a non-owner sees: the national tail, never the number. */
+function redactedNumber(digits: string): string {
+  const d = String(digits ?? "").replace(/\D/g, "");
+  return d.length > 4 ? `***${d.slice(-4)}` : "***";
+}
 
 interface OutboxRow {
   id: number;
@@ -27,13 +41,16 @@ export async function GET() {
   ).catch(() => []);
 
   const now = Date.now();
+  const owner = session.role === "owner";
   const items = rows.map((r) => {
     const due = Date.parse(r.not_before) <= now;
     const overdue = Date.parse(r.not_before) < now - 30 * 60_000;
     return {
       id: r.id,
-      to: r.to_number,
-      preview: (r.body || "").slice(0, 90),
+      to: owner ? r.to_number : redactedNumber(r.to_number),
+      // Conversation content crosses the owner line only (F163).
+      preview: owner ? (r.body || "").slice(0, 90) : null,
+      locked: !owner,
       notBefore: r.not_before,
       due,
       overdue,
@@ -63,7 +80,24 @@ export async function POST(req: Request) {
   const body = await req.json().catch(() => ({}));
 
   if (body.action === "delete" && body.id) {
-    await sbDelete("wa_outbox", `id=eq.${Number(body.id)}`);
+    // HONEST WRITE (audit M45): this answered ok:true without reading the
+    // boolean, so a cancel that Supabase refused was reported done while the
+    // row stayed queued and the next drain put the message on the shop's
+    // phone. sbDelete's false is a transport/permission failure (PostgREST
+    // answers a zero-row DELETE with 204), so it is never read as "already
+    // gone" - and no representation round trip is added to a path the owner
+    // taps during a live drain.
+    const removed = await sbDelete("wa_outbox", `id=eq.${Number(body.id)}`);
+    if (!removed) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error:
+            "The drop did not go through - the row is still queued and the next drain will send it. Check Supabase and retry.",
+        },
+        { status: 502 }
+      );
+    }
     return NextResponse.json({ ok: true });
   }
 

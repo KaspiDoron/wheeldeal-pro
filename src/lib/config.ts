@@ -14,6 +14,7 @@
 
 import "server-only";
 import { getConfig, getConfigMany, setConfig, supabaseConfigured } from "./runtime-config";
+import type { Role } from "./types";
 
 export interface KeyInfo {
   name: string;
@@ -43,6 +44,14 @@ export interface KeyInfo {
    *  readable input for those instead of a password field, because a value
    *  typed blind into a masked box cannot be read back or corrected. */
   secret?: boolean;
+  /**
+   * OWNER tier (audit F164). The architecture switches start and stop live
+   * senders, which /api/admin/waba refuses to a non-owner - and the vault door
+   * used to accept the byte-identical write from any management session. The
+   * tier is a property of the key now: setKey refuses these for a non-owner,
+   * and the Keys tab withholds the control instead of offering one that 403s.
+   */
+  ownerOnly?: boolean;
 }
 
 /**
@@ -121,6 +130,12 @@ const KEYS: {
    * secret unless someone says otherwise.
    */
   secret?: boolean;
+  /**
+   * Writable by the OWNER only (audit F164) - the five architecture switches
+   * that start and stop live senders. Any management session may still READ
+   * the masked row; only the write is above the management tier.
+   */
+  owner?: boolean;
 }[] = [
   { name: "GROQ_TOKEN", label: "Groq Gateway", scope: "ai", editable: true },
   { name: "GEMINI_TOKEN", label: "Gemini Gateway", scope: "ai", editable: true },
@@ -200,7 +215,7 @@ const KEYS: {
   // WHICH WIRE CARRIES FIRST CONTACT (src/lib/wa/transports). Per-thread
   // stamps always outrank this; a WABA mode with no ready WABA config
   // degrades to evolution, never to dead air.
-  { name: "TRANSPORT_MODE", label: "Transport mode ('evolution' default; 'waba-first' / 'waba-fallback' = company-number lead handoff for first contact)", scope: "messaging", editable: true, secret: false },
+  { name: "TRANSPORT_MODE", label: "Transport mode ('evolution' default; 'waba-first' / 'waba-fallback' = company-number lead handoff for first contact)", scope: "messaging", editable: true, secret: false, owner: true },
   { name: "FAST_DISPATCH", label: "Fast dispatch ('off' = cold intros wait for shop opening hours; default on - batches fire within their 15-min window)", scope: "messaging", editable: true, secret: false },
   { name: "CANCEL_GUARD", label: "Cancellation enforcement ('off' = removed shops may be messaged again; default on)", scope: "messaging", editable: true, secret: false },
   { name: "EVOLUTION_HOSTS", label: "Evolution host pool (url|key per line)", scope: "messaging", editable: true },
@@ -222,8 +237,8 @@ const KEYS: {
   // WABA_DRY_RUN ships ON: the whole pipeline renders the exact wire text and
   // sends nothing, so the template and its button can be verified without
   // spending quality rating on a rented account.
-  { name: "WABA_ENABLED", label: "Business-number handoff ('on' = our official number makes first contact; default OFF)", scope: "messaging", editable: true, secret: false },
-  { name: "WABA_DRY_RUN", label: "Business-number DRY RUN ('off' = really send; default ON - renders text, sends nothing)", scope: "messaging", editable: true, secret: false },
+  { name: "WABA_ENABLED", label: "Business-number handoff ('on' = our official number makes first contact; default OFF)", scope: "messaging", editable: true, secret: false, owner: true },
+  { name: "WABA_DRY_RUN", label: "Business-number DRY RUN ('off' = really send; default ON - renders text, sends nothing)", scope: "messaging", editable: true, secret: false, owner: true },
   { name: "WABA_PROVIDER", label: "Business API provider ('meta' direct or 'reseller')", scope: "messaging", editable: true, secret: false },
   { name: "WABA_BASE_URL", label: "Business API base URL (provider host, no trailing slash)", scope: "messaging", editable: true, secret: false },
   { name: "WABA_API_KEY", label: "Business API key", scope: "messaging", editable: true },
@@ -239,14 +254,14 @@ const KEYS: {
   { name: "WABA_HOLD_TIMEOUT_MINUTES", label: "How long a lead waits for the agency to open the window (default 25)", scope: "messaging", editable: true, secret: false },
   { name: "WABA_EXPECTATION_TTL_HOURS", label: "How long a dispatched handoff authorises inbound from that agency (default 72)", scope: "messaging", editable: true, secret: false },
   { name: "WABA_DAILY_SPEND_CEILING_USD", label: "Daily spend ceiling on the official number", scope: "messaging", editable: true, secret: false },
-  { name: "WABA_KILL", label: "Business-number EMERGENCY STOP ('on' = halt all first contact immediately)", scope: "messaging", editable: true, secret: false },
+  { name: "WABA_KILL", label: "Business-number EMERGENCY STOP ('on' = halt all first contact immediately)", scope: "messaging", editable: true, secret: false, owner: true },
   { name: "WABA_QUALITY_RATING", label: "Quality rating as last reported (GREEN/YELLOW/RED) - RED pauses first contact", scope: "messaging", editable: true, secret: false },
   { name: "WABA_TIER_UNIQUE_PER_DAY", label: "Messaging tier: unique recipients per 24h (250 unverified, 1000 after verification)", scope: "messaging", editable: true, secret: false },
   { name: "WABA_TEMPLATE_COST_USD", label: "Cost per template, for the spend estimate (default 0.05)", scope: "messaging", editable: true, secret: false },
   // The LEGACY Cloud sender's own switch (lib/whatsapp.ts). Deliberately NOT
   // WABA_ENABLED: rehearsing the governed handoff lane (WABA_ENABLED on,
   // WABA_DRY_RUN on) must never arm this ungoverned sender as a side effect.
-  { name: "CLOUD_API_ENABLED", label: "Legacy Cloud API sender ('on' = owner-number Graph API sends; default OFF - separate from the handoff lane)", scope: "messaging", editable: true, secret: false },
+  { name: "CLOUD_API_ENABLED", label: "Legacy Cloud API sender ('on' = owner-number Graph API sends; default OFF - separate from the handoff lane)", scope: "messaging", editable: true, secret: false, owner: true },
   { name: "WHATSAPP_ACCESS_TOKEN", label: "WhatsApp Cloud API Token (optional)", scope: "messaging", editable: true },
   { name: "WHATSAPP_PHONE_NUMBER_ID", label: "WhatsApp Phone Number ID (optional)", scope: "messaging", editable: true },
   { name: "WHATSAPP_VERIFY_TOKEN", label: "WhatsApp Webhook Verify Token (optional)", scope: "messaging", editable: true },
@@ -395,18 +410,32 @@ export async function listKeys(): Promise<KeyInfo[]> {
         masked: displayValue(v, k.secret),
         docUrl: DOC_URLS[k.name],
         secret: k.secret !== false,
+        ownerOnly: k.owner === true,
       };
     })
   );
 }
 
-/** Apply a runtime override. Returns the masked view (never the raw secret). */
+/**
+ * Apply a runtime override. Returns the masked view (never the raw secret).
+ *
+ *   null         - unknown or read-only key (the caller answers 400)
+ *   "owner-only" - an owner-tier key and the caller is not the owner (403)
+ *
+ * The role travels with the write (audit F164): /api/admin/waba refused these
+ * switches to a non-owner while this path, the Key Vault door, authorised on
+ * `editable` alone. The gate lives HERE and not in setConfig on purpose -
+ * setConfig is called by background writers with no session at all (VAPID
+ * auto-generation, the translate route, the graph engine, the session slide).
+ */
 export async function setKey(
   name: string,
-  value: string
-): Promise<{ key: KeyInfo; warning?: string } | null> {
+  value: string,
+  role: Role
+): Promise<{ key: KeyInfo; warning?: string } | null | "owner-only"> {
   const meta = KEYS.find((k) => k.name === name);
   if (!meta || !meta.editable) return null;
+  if (meta.owner === true && role !== "owner") return "owner-only";
   const result = await setConfig(name, value);
   const v = await getConfig(name);
   return {
@@ -423,6 +452,7 @@ export async function setKey(
       // this key" link and flipped a setting's input back to a password box.
       docUrl: DOC_URLS[name],
       secret: meta.secret !== false,
+      ownerOnly: meta.owner === true,
     },
     warning: result.error,
   };

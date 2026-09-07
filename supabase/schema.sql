@@ -119,6 +119,11 @@ create table if not exists public.agent_training (
 );
 -- If you already ran an older schema, run this once:
 alter table public.agent_training add column if not exists source text default 'text';
+-- The traveller an Ops Center exemplar / correction / lesson was copied FROM
+-- (audit F171). Those rows embed that person's WhatsApp exchange verbatim, so
+-- they are keyed to the person for the erasure registry and the DSAR export;
+-- genuinely owner-authored rows (pasted, photo, distilled) carry NULL.
+alter table public.agent_training add column if not exists user_email text;
 
 -- ---- Vendor replies (raw) + composed bargain drafts ----------------------------
 create table if not exists public.vendor_replies (

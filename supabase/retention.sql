@@ -198,6 +198,20 @@ begin
   delete from public.search_sessions where created_at < cutoff_mid;
   get diagnostics n = row_count; others := others || jsonb_build_object('search_sessions', n);
 
+  -- THE OPS CENTER'S COPIES OF A TRAVELLER'S EXCHANGE (audit F171). A bookmark,
+  -- a correction or a misread lesson writes an agent_training row that quotes
+  -- the person's WhatsApp messages verbatim, and this table was never named
+  -- here - so those copies outlived every window of the transcripts they
+  -- copied. Same rule as the corpus sidecar: a copy must never EXTEND the
+  -- retention horizon of its source. Two predicates on purpose: rows written
+  -- since the migration carry user_email, but every row written BEFORE it has
+  -- a NULL key and those are exactly the transcript-bearing rows - the source
+  -- prefix reaches them. Owner-authored rows (null key, non-ops source) stay.
+  delete from public.agent_training
+   where created_at < cutoff_mid
+     and (user_email is not null or source like 'ops-%');
+  get diagnostics n = row_count; others := others || jsonb_build_object('agent_training', n);
+
   -- THE SEMANTIC SIDECAR, AND THE ONE GUARDED DELETE IN THIS FUNCTION.
   --
   -- corpus_embeddings is created ONLY inside schema.sql's pg_extension branch,

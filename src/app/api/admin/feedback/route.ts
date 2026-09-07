@@ -199,7 +199,16 @@ export async function PATCH(req: Request) {
   if (!Object.keys(patch).length) {
     return NextResponse.json({ error: "nothing to update" }, { status: 400 });
   }
-  await sbUpdate("feedback", `id=eq.${id}`, patch);
+  // HONEST WRITE (audit M45): the panel paints only on res.ok, which meant
+  // nothing while this answered ok:true over an sbUpdate whose boolean was
+  // thrown away.
+  const landed = await sbUpdate("feedback", `id=eq.${id}`, patch);
+  if (!landed) {
+    return NextResponse.json(
+      { ok: false, error: "The change did not persist - nothing was updated. Check Supabase and retry." },
+      { status: 502 }
+    );
+  }
   return NextResponse.json({ ok: true });
 }
 
@@ -214,6 +223,13 @@ export async function DELETE(req: Request) {
   }
   // Remove any attached screenshots first (best-effort), then the row itself.
   await sbDelete("feedback_images", `feedback_id=eq.${id}`).catch(() => {});
-  await sbDelete("feedback", `id=eq.${id}`);
+  // HONEST WRITE (audit M45): a delete that did not land is a 502, not ok.
+  const removed = await sbDelete("feedback", `id=eq.${id}`);
+  if (!removed) {
+    return NextResponse.json(
+      { ok: false, error: "The report was not deleted - it is still in the inbox. Check Supabase and retry." },
+      { status: 502 }
+    );
+  }
   return NextResponse.json({ ok: true });
 }

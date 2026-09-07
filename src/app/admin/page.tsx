@@ -127,6 +127,9 @@ interface KeyInfo {
    *  readable input, and as an on/off toggle when the label says it is one.
    *  Optional so an older cached payload just keeps the password box. */
   secret?: boolean;
+  /** Writable by the owner only (the architecture switches). A non-owner
+   *  admin sees the masked row without a control - the route would 403. */
+  ownerOnly?: boolean;
 }
 interface UserRecord {
   email: string;
@@ -598,23 +601,30 @@ export default function AdminPage() {
   async function saveMemoryEdit(id: number) {
     setMemBusy(true);
     try {
-      const r = await (await fetch("/api/admin/training", {
+      const res = await fetch("/api/admin/training", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id, text: memEditText }),
-      })).json();
+      });
+      const r = await res.json().catch(() => ({}));
       if (r.examples) setMemory(r.examples);
-      setMemEditId(null);
+      // The route now answers 502 when the durable write was refused (audit
+      // M45); the list it returns is the unchanged one, and the owner must
+      // hear why the edit is not in it.
+      if (!res.ok || r.ok === false) setTrainMsg(r.error ?? "The edit did not save.");
+      else setMemEditId(null);
     } finally {
       setMemBusy(false);
     }
   }
   async function deleteMemory(id: number) {
-    const r = await (await fetch(`/api/admin/training?id=${id}`, { method: "DELETE" })).json();
+    const res = await fetch(`/api/admin/training?id=${id}`, { method: "DELETE" });
+    const r = await res.json().catch(() => ({}));
     if (r.examples) {
       setMemory(r.examples);
       setTrainingCount(r.examples.length);
     }
+    if (!res.ok || r.ok === false) setTrainMsg(r.error ?? "The memory was not deleted.");
   }
   const [savingKey, setSavingKey] = useState<string | null>(null);
   const [userSearch, setUserSearch] = useState("");
@@ -2523,7 +2533,7 @@ export default function AdminPage() {
                   )}
                 </>
               )}
-              {k.editable ? (
+              {k.editable && (!k.ownerOnly || isOwner) ? (
                 k.name === "EVOLUTION_HOSTS" ? (
                   <div className="mt-2">
                     <textarea
@@ -2593,6 +2603,10 @@ export default function AdminPage() {
                     )}
                   </div>
                 )
+                    ) : k.ownerOnly ? (
+                      <div className="mt-2 text-[11px] text-faint">
+                        Owner-only switch - it starts or stops a live sender.
+                      </div>
                     ) : (
                       <div className="mt-2 text-[11px] text-faint">
                         Bootstrap secret - set via host environment variables only.
@@ -3441,14 +3455,16 @@ function BetaManager() {
       })
       .filter((e) => e.email.includes("@"));
     try {
-      const d = await (
-        await fetch("/api/admin/beta", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ entries }),
-        })
-      ).json();
-      if (d.entries) {
+      const res = await fetch("/api/admin/beta", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ entries }),
+      });
+      const d = await res.json().catch(() => ({}));
+      // Paint "Saved" only on the server's persisted verdict (audit F197):
+      // the 502 body used to carry `entries` from the failed write's own
+      // in-memory pin, and this branch keyed off that field alone.
+      if (res.ok && d.ok === true && d.entries) {
         setMsg(
           d.note
             ? d.note
@@ -3547,7 +3563,8 @@ function WaQueuePanel() {
     items: {
       id: number;
       to: string;
-      preview: string;
+      /** null for a non-owner admin - the words are the owner's (F163). */
+      preview: string | null;
       notBefore: string;
       due: boolean;
       overdue: boolean;
@@ -3689,7 +3706,9 @@ function WaQueuePanel() {
                         drop
                       </button>
                     </div>
-                    <p className="mt-0.5 truncate text-[11px] text-soft">{it.preview}</p>
+                    <p className="mt-0.5 truncate text-[11px] text-soft">
+                      {it.preview ?? "Message text is owner-only - the queue, not the words."}
+                    </p>
                     <p className="text-[10px] text-faint">{it.reason}</p>
                   </div>
                 ))}

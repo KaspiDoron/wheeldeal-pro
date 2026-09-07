@@ -81,6 +81,12 @@ export const USER_TABLES: UserTableKey[] = [
   { table: "agent_reviews", column: "user_email", match: "exact" },
   { table: "agent_traces", column: "user_email", match: "exact" },
   { table: "agent_events", column: "user_email", match: "exact" },
+  // The Ops Center's exemplars, corrections and lessons quote the traveller's
+  // WhatsApp exchange verbatim (audit F171). Excused for months as
+  // "owner-authored training snippets" - true before those writers existed.
+  // The ops writers stamp the person the text was copied from; the hand-
+  // taught, photo and distilled rows carry NULL and are left alone.
+  { table: "agent_training", column: "user_email", match: "exact" },
   { table: "api_usage", column: "user_email", match: "exact" },
   { table: "graph_wakeups", column: "user_email", match: "exact" },
   { table: "product_events", column: "user_email", match: "exact" },
@@ -249,7 +255,6 @@ export const EXCLUDED_TABLES: Record<string, string> = {
   waba_agencies: "shop-side WABA partners",
   wa_suppressions: "shop-side opt-outs - deleting them on user erasure would RE-CONTACT the shop",
   agent_tactics: "owner-authored playbook content",
-  agent_training: "owner-authored training snippets",
   policy_versions: "system config history",
   wa_policy_versions: "system config history",
   whatsapp_security_policies: "system config",

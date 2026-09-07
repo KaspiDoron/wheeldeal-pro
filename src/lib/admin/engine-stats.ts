@@ -9,6 +9,10 @@ export interface StatTurn {
   move?: string;
   provider?: string | null;
   latencyMs?: number | null;
+  /** Rivals on the table when the turn was composed (the live engine stamps it). */
+  rivals?: number;
+  /** Whether the outbound text cited one of them - measured on the wire. */
+  citedRival?: boolean;
 }
 
 /** Nearest-rank p-th percentile of a numeric array (mirrors kpis.percentile). */
@@ -73,9 +77,7 @@ export function latencyStats(turns: StatTurn[]): { p50: number | null; p95: numb
  * and the 300 shop was never told" - was invisible because `leverageUsed` was
  * written every turn and read by nobody.
  */
-export function leverageUsePct(
-  turns: Array<{ move?: string; rivals?: number; citedRival?: boolean }>
-): { pct: number | null; opportunities: number } {
+export function leverageUsePct(turns: StatTurn[]): { pct: number | null; opportunities: number } {
   const chances = turns.filter((t) => t.move === "bargain" && (t.rivals ?? 0) > 0);
   if (!chances.length) return { pct: null, opportunities: 0 };
   const used = chances.filter((t) => t.citedRival).length;

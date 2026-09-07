@@ -157,3 +157,23 @@ describe("the architecture switchboard writes honestly", () => {
     expect(route).toMatch(/parseTransportMode\(v\) === v/);
   });
 });
+
+describe("the owner tier holds at BOTH doors (audit F164)", () => {
+  // admin/waba was the documented door and refused a non-owner; the Key Vault
+  // POST accepted the byte-identical write from any management session. The
+  // tier is a property of the key now, so the vault door refuses too.
+  const vault = readCode("src/app/api/admin/config/route.ts");
+  const config = readCode("src/lib/config.ts");
+
+  it("every architecture switch is marked owner-tier in the vault's key list", () => {
+    for (const k of ["TRANSPORT_MODE", "WABA_ENABLED", "WABA_DRY_RUN", "WABA_KILL", "CLOUD_API_ENABLED"]) {
+      expect(config).toMatch(new RegExp(`name: "${k}"[^\\n]*owner: true`));
+    }
+  });
+
+  it("setKey carries the caller's role and the vault route answers 403 on the refusal", () => {
+    expect(config).toMatch(/meta\.owner === true && role !== "owner"/);
+    expect(vault).toMatch(/setKey\(String\(name\), String\(value \?\? ""\), session\.role\)/);
+    expect(vault).toMatch(/updated === "owner-only"[\s\S]{0,120}status: 403/);
+  });
+});

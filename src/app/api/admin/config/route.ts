@@ -33,7 +33,12 @@ export async function POST(req: Request) {
   if (!name) {
     return NextResponse.json({ error: "name required" }, { status: 400 });
   }
-  const updated = await setKey(String(name), String(value ?? ""));
+  const updated = await setKey(String(name), String(value ?? ""), session.role);
+  // The owner tier, enforced at THIS door too (audit F164): the same refusal
+  // /api/admin/waba gives for the same five switches.
+  if (updated === "owner-only") {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
   if (!updated) {
     return NextResponse.json(
       { error: "Unknown or read-only key" },

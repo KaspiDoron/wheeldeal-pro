@@ -64,9 +64,20 @@ export async function GET() {
         "ai_usage",
         `select=id,provider,failed,created_at&failed=eq.true&created_at=gte.${encodeURIComponent(dayAgo)}&limit=100`
       ),
+      // THE ALERT KINDS, NOT THE 30 NEWEST ROWS OF ANYTHING (audit F078).
+      // This read had no kind filter, and both alerts below are JS filters
+      // over its slice. Two per-minute schedulers each write a `cron-ping`
+      // row on every successful ping, so `limit=30` covered about fifteen
+      // minutes of pings: a number that tripped ban recovery at 10:00 had no
+      // "ban-risk event" alert by 10:15, and the vague-reply warning - rarer
+      // than pings by orders of magnitude - could never fire. Asking for the
+      // two kinds the alerts consume keeps this ONE read (the panel already
+      // issues eleven in parallel and the egress meter counts them). The old
+      // `handled=eq.false` predicate is gone: nothing in src/ or supabase/
+      // ever writes handled=true, so it filtered nothing.
       sbSelectDark<{ id: number; kind: string; vendor_name: string; detail: string }>(
         "agent_events",
-        `select=id,kind,vendor_name,detail&handled=eq.false&created_at=gte.${encodeURIComponent(weekAgo)}&order=created_at.desc&limit=30`
+        `select=id,kind,vendor_name,detail&kind=in.(vague-reply,wa-ban-risk)&created_at=gte.${encodeURIComponent(weekAgo)}&order=created_at.desc&limit=30`
       ),
       sbCountDark("wa_sessions", "status=eq.open"),
       sbCountDark("vendor_replies", `created_at=gte.${encodeURIComponent(dayAgo)}`),

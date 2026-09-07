@@ -117,11 +117,23 @@ describe("the anon probe enumerates what the browser key can SEE", () => {
     expect(route).toMatch(/exposed: names/);
   });
 
+  it("the app's own tables are split from the foreign set, and RLS on them is measured (F190)", () => {
+    // The listing measures grants, not RLS: every table created from the SQL
+    // editor is granted to anon by Supabase's defaults, so the app's own
+    // tables must never be reported as foreign - and must be probed instead.
+    expect(route).toMatch(/registeredTables\(\), \.\.\.Object\.keys\(EXCLUDED_TABLES\)/);
+    expect(route).toMatch(/visible\.filter\(\(n\) => !own\.has\(n\)\)/);
+    expect(route).toMatch(/\/rest\/v1\/\$\{table\}\?select=\$\{column\}&limit=1/);
+    expect(route).toMatch(/state: "guarded"/);
+    // Executed coverage: src/app/api/admin/rpc-exposure/own-tables.test.ts.
+  });
+
   it("the combined verdict is worst-of - a clean RPC cannot paint over an exposed table", () => {
     expect(route).toMatch(
       /rpc\.state === "exposed" \|\| tables\.state === "exposed"\s*\n?\s*\? "exposed"/
     );
-    expect(route).toMatch(/rpc\.state === "locked" && tables\.state === "clean"/);
+    expect(route).toMatch(/tables\.state === "clean" \|\| tables\.state === "guarded"/);
+    expect(route).toMatch(/rpc\.state === "locked" && tablesSafe/);
   });
 });
 
@@ -150,8 +162,10 @@ describe("the photo proxy stops echoing Google's project-naming errors", () => {
 describe("conversation tables in /api/admin/data are owner-only", () => {
   const route = read("src/app/api/admin/data/route.ts");
 
-  it("the four transcript-bearing tables carry the flag", () => {
-    for (const t of ["vendor_replies", "bargain_drafts", "whatsapp_messages", "wa_outbox"]) {
+  it("the five transcript-bearing tables carry the flag", () => {
+    // agent_training joined the list with audit F172: the Ops Center writes
+    // verbatim exchange excerpts into it.
+    for (const t of ["vendor_replies", "bargain_drafts", "whatsapp_messages", "wa_outbox", "agent_training"]) {
       expect(route).toMatch(new RegExp(`name: "${t}"[^\\n]*ownerOnly: true`));
     }
   });

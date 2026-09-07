@@ -9,7 +9,7 @@
 import { sbInsert, sbSelectStrict } from "./runtime-config";
 import { boundedSet } from "./bounded-map";
 import { cacheIsStale, UNKNOWN_VERSION } from "./versioned";
-import { numberVariants, outboxKey } from "./wa/phone-key";
+import { numberFilter, numberVariants, outboxKey } from "./wa/phone-key";
 
 // These caches live for the whole PROCESS lifetime in the workers (which import
 // all of src/lib), so an unbounded Map grows one entry per user - and the
@@ -112,10 +112,30 @@ function takeoverNumberFilter(digits: string): string {
   return `&or=(${clauses.join(",")})`;
 }
 
+/**
+ * The vendor id of this traveller's thread with this shop, read off the newest
+ * outbound row that carries one (every agent send stamps `raw.vendorId`). For
+ * the WhatsApp-typed takeover detector, which holds only the digits. Null when
+ * no such row exists or the store is unreadable - the row is then written
+ * unattributed, exactly as before, never withheld.
+ */
+async function vendorIdForThread(email: string, digits: string): Promise<string | null> {
+  const res = await sbSelectStrict<{ raw: { vendorId?: string | null } | null }>(
+    "whatsapp_messages",
+    `select=raw&direction=eq.outbound&raw->>sender=eq.${encodeURIComponent(
+      email
+    )}&raw->>vendorId=not.is.null${numberFilter("to_number", digits)}&order=received_at.desc&limit=1`
+  );
+  if ("error" in res) return null;
+  const v = res.rows[0]?.raw?.vendorId;
+  return typeof v === "string" && v ? v : null;
+}
+
 export async function setThreadTakeover(
   email: string,
   digits: string,
-  on: boolean
+  on: boolean,
+  opts?: { vendorId?: string | null }
 ): Promise<boolean> {
   const kind = on ? "human-takeover" : "human-handback";
   const key = takeoverCacheKey(email, digits);
@@ -138,11 +158,21 @@ export async function setThreadTakeover(
   // structurally confident 0.0% (the flattering-zero shape). The marker row
   // above stays the AUTHORITATIVE flag; this is a second, best-effort write for
   // the join-column surfaces (KPIs, message-path) only.
+  //
+  // vendor_id AS A COLUMN (audit F089). The escalation KPI keys a conversation
+  // on (user_email, vendor_id) - the key every engine-v3-turn row carries -
+  // and folds a row missing it into ONE "unattributed" bucket. This twin wrote
+  // no vendor_id, so nine takeovers across forty conversations counted as one
+  // and the rate read 2.5% instead of 22.5%. The in-app switch passes the id
+  // it was asked about; the WhatsApp-typed detector resolves it from the
+  // thread's own outbound row, once per takeover event.
+  const vendorId = opts?.vendorId ?? (await vendorIdForThread(email, digits).catch(() => null));
   void sbInsert("agent_events", [
     {
       kind,
       user_email: email,
       to_number: digits,
+      ...(vendorId ? { vendor_id: vendorId } : {}),
       vendor_name: `+${digits}`,
       detail: on
         ? "Traveller typed in the thread - agents stood down."

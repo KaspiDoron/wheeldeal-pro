@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireManagement } from "@/lib/session";
-import { sbSelect, sbCountDark } from "@/lib/runtime-config";
+import { sbSelect, sbSelectDark, sbCountDark, pgTimestamp } from "@/lib/runtime-config";
 import { visionAccuracy } from "@/lib/vision-reconcile";
 import {
   bucketTurnsPerHour,
@@ -11,47 +11,149 @@ import {
   leverageUsePct,
   medianShopReplyMins,
   type ReplyEvent,
+  type StatTurn,
 } from "@/lib/admin/engine-stats";
 
-// SESSION BLACKBOARD INSPECTOR (owner-only). A single live snapshot of the
-// ENGINE_V3 (SPTE) runtime: recent single-pass turns with their move + model
-// route + scratchpad, any graph-engine failovers, the outbound queue health, WA
-// socket liveness, and the most recent inbound webhook confirmations. Everything
-// degrades gracefully - a missing table yields an empty section, never a 500.
+// SESSION BLACKBOARD INSPECTOR (management-gated; the words are owner-only).
+// A single live snapshot of the ENGINE_V3 (SPTE) runtime: recent single-pass
+// turns with their move + model route, any graph-engine failovers, the
+// outbound queue health, WA socket liveness, and the most recent inbound
+// webhook confirmations. Every metric reaches all of management - a number is
+// not a transcript - while the model scratchpad, the wire text and the raw
+// event detail are built for the owner only (audit F086), the same line
+// admin/data draws for whatsapp_messages. Everything degrades gracefully - a
+// missing table yields an empty section and an unreadable store a null (a
+// dash on the tile), never a 500 and never a confident zero.
 
 export const dynamic = "force-dynamic";
 
 type EventRow = { kind: string; vendor_name?: string | null; detail?: string | null; created_at?: string };
 
+/** The rare, alarming kinds - read on their own budget, never the stream's. */
+const RARE_KINDS = [
+  "engine-v3-fallback",
+  "engine-graph-turn",
+  "wa-send-unconfirmed",
+  "send-dropped",
+  "wa-send-stale",
+];
+
+/**
+ * The turn-record fields management may read: the metrics the tiles, charts
+ * and TurnRow render. A POSITIVE list, so a free-text field added to the
+ * engine-v3-turn detail later (the way `think` and `text` were) is withheld
+ * from non-owners by default instead of leaking through a blind spread.
+ */
+const TURN_METRIC_KEYS = [
+  "move",
+  "tier",
+  "provider",
+  "providerError",
+  "reason",
+  "legalMoves",
+  "floor",
+  "lowest",
+  "rivals",
+  "quote",
+  "materialDrop",
+  "delivered",
+  "outboxRowId",
+  "imageUnread",
+  "latencyMs",
+  "vehicleKey",
+  "durationDays",
+  "startDate",
+  "leverage",
+  "citedRival",
+  "askVariant",
+  "counterPricePerDay",
+  "variantOk",
+  "truncated",
+] as const;
+
+/**
+ * The shop label a session may see. `vendor_name` is the shop's NAME on a turn
+ * but its bare NUMBER on a dropped send (noteSendDropped stamps the digits),
+ * and the recipient number is the identifier the suppression ledger and the
+ * queue view (F163) treat as the owner's: management gets the national tail.
+ */
+function shopLabel(name: string | null | undefined, owner: boolean): string {
+  const label = name ?? "shop";
+  if (owner) return label;
+  const digits = label.replace(/\D/g, "");
+  if (digits.length >= 5 && digits.length === label.replace(/^\+/, "").length) {
+    return `***${digits.slice(-4)}`;
+  }
+  return label;
+}
+
+function parseDetail(raw: string | null | undefined): Record<string, unknown> {
+  try {
+    return JSON.parse(raw ?? "{}") as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
 export async function GET() {
   const session = await requireManagement();
   if (!session) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  const owner = session.role === "owner";
 
   const sinceIso = new Date(Date.now() - 6 * 3600_000).toISOString();
 
-  // ---- ENGINE_V3 turns + failovers (the ReAct execution telemetry) ----------
-  const events = await sbSelect<EventRow>(
+  // ---- ENGINE_V3 turns: the live stream AND the chart sample, ONE read ------
+  // The newest-first detail sample the charts read is the same rows the 30-row
+  // live stream shows, so its head serves both. Before, the stream shared a
+  // 60-row budget with the alarming kinds below and starved them (F086).
+  const CHART_SAMPLE_CAP = 600;
+  const chartRows = await sbSelect<{ vendor_name?: string | null; detail: string | null; created_at: string }>(
     "agent_events",
-    `select=kind,vendor_name,detail,created_at&kind=in.(engine-v3-turn,engine-v3-fallback,engine-graph-turn,wa-send-unconfirmed,send-dropped,wa-send-stale)&created_at=gte.${encodeURIComponent(
-      sinceIso
-    )}&order=created_at.desc&limit=60`
-  ).catch(() => [] as EventRow[]);
+    `select=vendor_name,detail,created_at&kind=eq.engine-v3-turn&created_at=gte.${pgTimestamp(sinceIso)}&order=created_at.desc&limit=${CHART_SAMPLE_CAP}`
+  ).catch(() => []);
+  const turns = chartRows.slice(0, 30).map((e) => {
+    const d = parseDetail(e.detail);
+    const base = { shop: shopLabel(e.vendor_name, owner), at: e.created_at };
+    // THE WORDS ARE THE OWNER'S. `think` is the model's private scratchpad and
+    // `text` the outbound WhatsApp message, on every user's turns; the same
+    // admin is refused whatsapp_messages by admin/data. Management gets the
+    // positive metric projection above and nothing this list does not name.
+    if (owner) return { ...base, ...d };
+    const metrics: Record<string, unknown> = {};
+    for (const k of TURN_METRIC_KEYS) if (k in d) metrics[k] = d[k];
+    return { ...base, ...metrics };
+  });
 
-  const turns = events
-    .filter((e) => e.kind === "engine-v3-turn")
-    .map((e) => {
-      let d: Record<string, unknown> = {};
-      try {
-        d = JSON.parse(e.detail ?? "{}");
-      } catch {
-        /* keep empty */
-      }
-      return { shop: e.vendor_name ?? "shop", at: e.created_at, ...d };
-    })
-    .slice(0, 30);
-
-  const fallbacks = events.filter((e) => e.kind === "engine-v3-fallback").length;
-  const unconfirmed = events.filter((e) => e.kind === "wa-send-unconfirmed").length;
+  // ---- The alarming kinds: failovers, unconfirmed sends, drops, graph turns --
+  // ONE BUDGET SHARED WITH THE TURN STREAM WAS A BUDGET THE TURN STREAM ATE.
+  // Two hundred turns in six hours pushed every failover and every dropped
+  // send out of a 60-row newest-first sample, and the panel rendered
+  // "turns 200, failovers 0" on the busiest window of the beta - the same
+  // starvation the health route documents for its twelve guard counters. The
+  // stream reads its own rows above; this read is scoped to the rare kinds.
+  // sbSelectDark, not sbSelect: an unreadable store is a null (a dash on the
+  // tile), never a confident zero.
+  const RARE_CAP = 60;
+  const rareRead = await sbSelectDark<EventRow>(
+    "agent_events",
+    `select=kind,vendor_name,detail,created_at&kind=in.(${RARE_KINDS.join(",")})&created_at=gte.${pgTimestamp(sinceIso)}&order=created_at.desc&limit=${RARE_CAP}`
+  );
+  const events = rareRead ?? [];
+  // Below the cap the read IS the whole window, so a per-kind count over it is
+  // exact. At the cap it is a sample and a count over it is only a floor, so
+  // the two counters fall back to exact HEAD counts - the one moment this
+  // route spends a request it did not spend before (the Engine tab polls
+  // every 15s; folding the turn read into the chart read above pays for it).
+  const rareCapped = events.length >= RARE_CAP;
+  const countKind = async (kind: string): Promise<number | null> => {
+    if (rareRead === null) return null;
+    if (!rareCapped) return events.filter((e) => e.kind === kind).length;
+    return sbCountDark("agent_events", `kind=eq.${kind}&created_at=gte.${pgTimestamp(sinceIso)}`);
+  };
+  const [fallbacks, unconfirmed] = await Promise.all([
+    countKind("engine-v3-fallback"),
+    countKind("wa-send-unconfirmed"),
+  ]);
 
   // WHAT THE COUNTS WERE HIDING.
   //
@@ -65,9 +167,11 @@ export async function GET() {
   // structurally cannot show it. Without these rows a thread that got no reply
   // looked identical to a thread with nothing to say.
   const detailOf = (e: EventRow) => ({
-    shop: e.vendor_name ?? "shop",
+    shop: shopLabel(e.vendor_name, owner),
     at: e.created_at,
-    detail: (e.detail ?? "").slice(0, 300),
+    // The raw detail names shop numbers, sender emails and, for a stale
+    // draft, the words it no longer fit - owner-only, like the turn text.
+    detail: owner ? (e.detail ?? "").slice(0, 300) : null,
   });
   const failoverDetail = events
     .filter((e) => e.kind === "engine-v3-fallback")
@@ -187,23 +291,28 @@ export async function GET() {
   );
 
   // ---- Chart aggregations (Tier-2): move mix, provider mix, per-hour bars and
-  // latency percentiles over a WIDER 6h turn sample than the 30-row live stream.
-  // Detail-only slim query so the charts reflect the real fleet, not the head.
-  const CHART_SAMPLE_CAP = 600;
-  const chartRows = await sbSelect<{ detail: string | null; created_at: string }>(
-    "agent_events",
-    `select=detail,created_at&kind=eq.engine-v3-turn&created_at=gte.${encodeURIComponent(
-      sinceIso
-    )}&order=created_at.desc&limit=${CHART_SAMPLE_CAP}`
-  ).catch(() => []);
-  const statTurns = chartRows.map((r) => {
-    let d: { move?: string; provider?: string | null; latencyMs?: number | null } = {};
-    try {
-      d = JSON.parse(r.detail ?? "{}");
-    } catch {
-      /* keep empty */
-    }
-    return { at: r.created_at, move: d.move, provider: d.provider, latencyMs: d.latencyMs };
+  // latency percentiles over the WIDER 6h turn sample read above (up to 600
+  // rows) than the 30-row live stream, so the charts reflect the real fleet.
+  // The projection carries EVERY field its consumers read - rivals and
+  // citedRival included - and is TYPED as StatTurn rather than cast to it, so
+  // the leverage KPI cannot silently go dead again (audit F087: the old
+  // projection dropped both keys and the tile said "no rival yet" forever).
+  const statTurns: StatTurn[] = chartRows.map((r) => {
+    const d = parseDetail(r.detail) as {
+      move?: string;
+      provider?: string | null;
+      latencyMs?: number | null;
+      rivals?: number;
+      citedRival?: boolean;
+    };
+    return {
+      at: r.created_at,
+      move: d.move,
+      provider: d.provider,
+      latencyMs: d.latencyMs,
+      rivals: d.rivals,
+      citedRival: d.citedRival,
+    };
   });
   const charts = {
     turnsPerHour: bucketTurnsPerHour(statTurns, now, 6),
@@ -267,7 +376,7 @@ export async function GET() {
       }
     })
   );
-  const leverage = leverageUsePct(statTurns as Array<{ move?: string; rivals?: number; citedRival?: boolean }>);
+  const leverage = leverageUsePct(statTurns);
 
   return NextResponse.json({
     engine: "ENGINE_V3 (SPTE - Shared Session Blackboard + Single-Pass)",

@@ -68,7 +68,10 @@ const TABLES: TableSpec[] = [
       "email,instance_name,status,host_url,pairing_code_issued_at,proxy_verified_at," +
       "last_active,idle_paused,updated_at",
   },
-  { name: "agent_training", label: "Agent memory", order: "created_at.desc" },
+  // The Ops Center writes verbatim [OPS-EXEMPLAR] / [OPS-CORRECTION] /
+  // [LESSON] excerpts of a traveller's WhatsApp exchange into this table
+  // (audit F172) - it is a transcript table now, whatever its label says.
+  { name: "agent_training", label: "Agent memory", order: "created_at.desc", ownerOnly: true },
   { name: "feedback", label: "Feedback", order: "created_at.desc" },
   { name: "auth_events", label: "Auth events", order: "created_at.desc" },
   { name: "billing_events", label: "Billing events", order: "created_at.desc" },

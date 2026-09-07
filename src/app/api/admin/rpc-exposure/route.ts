@@ -116,11 +116,28 @@ export async function GET() {
   }
 
   // Probe 2 (W9): which RELATIONS can the anon role even see? PostgREST's
-  // root document is an OpenAPI schema enumerating them - for a database
-  // where every table has RLS and no policy, the correct answer is NONE.
-  // Any name here (Evolution's "Message"/"Chat"/"Contact" being the known
-  // offenders) is a table the publishable browser key can query.
+  // root document is an OpenAPI schema enumerating them. Any name that is
+  // NOT one of the app's own tables (Evolution's "Message"/"Chat"/"Contact"
+  // being the known offenders) is a foreign table the publishable browser
+  // key can query, and that is the alarm.
+  //
+  // THE LISTING MEASURES GRANTS, NOT RLS (audit F190). This probe used to
+  // report EVERY path in the document as an exposed relation, on the premise
+  // that a database where every table has RLS and no policy lists NONE. It
+  // does not: PostgREST filters the document by table GRANTS, and Supabase's
+  // default privileges grant anon on every table created from the SQL editor
+  // - which is how schema.sql is run - so on a correctly configured project
+  // the document names all ~57 app tables, the verdict went red every time
+  // with a remedy that did not apply ("move that service to its own
+  // database"), RUNBOOK's launch-gate line could never be ticked, and a real
+  // foreign relation hid inside a 57-name list. RLS blocks ROWS. So the app's
+  // own tables (the erasure registry's CI-pinned list: registeredTables +
+  // EXCLUDED_TABLES, which wave9-erasure.test.ts proves matches every
+  // `create table` in the SQL files) are split out of the foreign set, and
+  // RLS on them is MEASURED below rather than inferred.
   let tables: { state: string; exposed: string[]; detail: string };
+  /** The app's own tables the anon role is GRANTED (expected under Supabase defaults). */
+  let granted: string[] = [];
   try {
     const res = await fetch(`${url}/rest/v1/`, { headers, cache: "no-store" });
     if (!res.ok) {
@@ -137,24 +154,35 @@ export async function GET() {
         paths?: Record<string, unknown>;
         definitions?: Record<string, unknown>;
       } | null;
-      const names = Object.keys(doc?.paths ?? {})
+      const { registeredTables, EXCLUDED_TABLES } = await import("@/lib/privacy/user-tables");
+      const own = new Set<string>([...registeredTables(), ...Object.keys(EXCLUDED_TABLES)]);
+      const visible = Object.keys(doc?.paths ?? {})
         .filter((p) => p.startsWith("/") && p !== "/" && !p.startsWith("/rpc/"))
         .map((p) => p.slice(1))
         .sort();
+      granted = visible.filter((n) => own.has(n));
+      const names = visible.filter((n) => !own.has(n));
       tables = names.length
         ? {
             state: "exposed",
             exposed: names,
             detail:
-              `The public anon key can see ${names.length} relation(s): ${names.slice(0, 12).join(", ")}` +
+              `The public anon key can see ${names.length} FOREIGN relation(s): ${names.slice(0, 12).join(", ")}` +
               (names.length > 12 ? ", ..." : "") +
-              ". Every app table carries RLS with no policies, so these are FOREIGN tables (Evolution's message store being the known way this happens) - move that service to its own database, or enable RLS / revoke anon on each.",
+              ". None of these is an app table (Evolution's message store being the known way this happens) - move that service to its own database, or enable RLS / revoke anon on each.",
           }
-        : {
-            state: "clean",
-            exposed: [],
-            detail: "The anon key sees zero relations - RLS is doing its job.",
-          };
+        : granted.length
+          ? {
+              // Filled in by probe 3 - the listing alone cannot say.
+              state: "unknown",
+              exposed: [],
+              detail: "",
+            }
+          : {
+              state: "clean",
+              exposed: [],
+              detail: "The anon key sees zero relations - RLS is doing its job.",
+            };
     }
   } catch (e) {
     tables = {
@@ -164,12 +192,86 @@ export async function GET() {
     };
   }
 
+  // Probe 3 (F190): MEASURE RLS on the app's own tables, the way an attacker
+  // would - read a row with the anon key. The listing above says anon is
+  // granted on them; only a row read says whether RLS holds. The three
+  // highest-value tables are probed (a transcript, an account, a vault row):
+  // a 200 carrying zero rows is RLS holding, a 200 carrying a row is a REAL
+  // breach named by table, 401 stays "unknown" exactly as above, and 403/404
+  // are refusals (no grant after all). This is what turns "granted" into a
+  // measured verdict instead of a green light that means "we did not check".
+  const HIGH_VALUE: { table: string; column: string }[] = [
+    { table: "whatsapp_messages", column: "wa_message_id" },
+    { table: "app_users", column: "email" },
+    { table: "app_config", column: "key" },
+  ];
+  if (tables.state === "unknown" && tables.detail === "" && granted.length) {
+    const leaking: string[] = [];
+    const held: string[] = [];
+    let rejected = false;
+    let netError: string | null = null;
+    for (const { table, column } of HIGH_VALUE) {
+      if (!granted.includes(table)) continue;
+      try {
+        const res = await fetch(`${url}/rest/v1/${table}?select=${column}&limit=1`, {
+          headers,
+          cache: "no-store",
+        });
+        if (res.status === 401) {
+          rejected = true;
+          break;
+        }
+        if (res.ok) {
+          const rows = (await res.json().catch(() => [])) as unknown[];
+          (Array.isArray(rows) && rows.length > 0 ? leaking : held).push(table);
+        } else {
+          held.push(table);
+        }
+      } catch (e) {
+        netError = e instanceof Error ? e.message : "network error";
+        break;
+      }
+    }
+    if (leaking.length) {
+      tables = {
+        state: "exposed",
+        exposed: leaking,
+        detail: `RLS IS NOT HOLDING on ${leaking.join(", ")}: the public anon key read a row. Open the Supabase SQL editor and re-run supabase/schema.sql (it enables RLS on every app table with no policies), then re-check.`,
+      };
+    } else if (rejected) {
+      tables = {
+        state: "unknown",
+        exposed: [],
+        detail:
+          "The anon key was REJECTED outright (401) on the row read, so RLS was not measured - a wide-open table answers a bad key the same way. Set NEXT_PUBLIC_SUPABASE_ANON_KEY to the current publishable key for THIS project and re-check.",
+      };
+    } else if (netError) {
+      tables = {
+        state: "unknown",
+        exposed: [],
+        detail: `Could not measure RLS with the anon key: ${netError}`,
+      };
+    } else {
+      tables = {
+        state: "guarded",
+        exposed: [],
+        detail:
+          `The anon key is granted on ${granted.length} of the app's own tables (Supabase's default privilege on tables created from the SQL editor) and no foreign relation is visible. RLS was MEASURED to hold on ${held.join(", ")} - zero rows for the anon key. ` +
+          "To remove the grants as well: revoke all on all tables in schema public from anon (the app never reads with the anon key).",
+      };
+    }
+  }
+
   // The combined verdict keeps the original top-level shape the admin panel
   // reads: worst-of, so a clean rpc can never paint over an exposed table.
+  // "guarded" (granted, RLS measured to hold) is the expected state of a
+  // Supabase project set up from the SQL editor and counts as locked; it
+  // stays a distinct tables.state so the detail can say what was measured.
+  const tablesSafe = tables.state === "clean" || tables.state === "guarded";
   const state =
     rpc.state === "exposed" || tables.state === "exposed"
       ? "exposed"
-      : rpc.state === "locked" && tables.state === "clean"
+      : rpc.state === "locked" && tablesSafe
         ? "locked"
         : "unknown";
   return NextResponse.json({

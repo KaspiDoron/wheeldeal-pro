@@ -367,6 +367,8 @@ export async function POST(req: Request) {
     }
     const meta = {
       kind: "recheck",
+      // The agent acting for the traveller (audit F085) - counted as such.
+      auto: true,
       vendorId: info.vendorId ?? null,
       vendorName: info.name,
       ...(englishGloss ? { englishGloss } : {}),

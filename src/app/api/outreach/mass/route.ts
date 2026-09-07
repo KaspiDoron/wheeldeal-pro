@@ -532,6 +532,11 @@ export async function POST(req: Request) {
       vendorName: v.name,
       kind: "rfq",
       round: 0,
+      // An intro the agent wrote (audit F085): the immediate first send of a
+      // batch wrote this meta as its row and carried no `auto`, so the launch
+      // card's intro counter missed one shop per hunt. Parked siblings get it
+      // from the drain; the row written here gets it from the meta.
+      auto: true,
       rfq: settledRfq ?? null,
       region: String(body.region ?? ""),
       plan: session.plan,

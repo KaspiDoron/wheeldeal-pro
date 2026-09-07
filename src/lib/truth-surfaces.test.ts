@@ -166,7 +166,9 @@ describe("fieldKpis renders a dead database as dark, not as a quiet month", () =
         if (table === "offers") return [{ price_per_day: 80, list_price_per_day: 100 }];
         if (table === "searches") return [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }];
         if (table === "bookings") return [{ id: 1 }];
-        if (query.includes("human-takeover")) return [{ user_email: "a@x.com", vendor_id: "v1" }];
+        // The shape setThreadTakeover writes (audit F089): the vendor id is a column.
+        if (query.includes("human-takeover"))
+          return [{ user_email: "a@x.com", vendor_id: "v1", to_number: "66900000001" }];
         return [
           { detail: JSON.stringify({ latencyMs: 500 }), user_email: "a@x.com", vendor_id: "v1" },
           { detail: JSON.stringify({ latencyMs: 900 }), user_email: "a@x.com", vendor_id: "v2" },

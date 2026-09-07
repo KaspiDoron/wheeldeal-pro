@@ -44,6 +44,7 @@ export async function POST(req: Request) {
   }
   const digits = await digitsForVendor(session.email, vendorId);
   if (!digits) return NextResponse.json({ error: "no thread with this shop yet" }, { status: 404 });
-  const ok = await setThreadTakeover(session.email, digits, mode);
+  // The vendor rides along (audit F089): it is the KPI's conversation key.
+  const ok = await setThreadTakeover(session.email, digits, mode, { vendorId });
   return NextResponse.json({ ok, takeover: mode });
 }

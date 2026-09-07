@@ -306,7 +306,15 @@ export async function DELETE(req: Request) {
   }
   await sbDelete("feedback_replies", `feedback_id=eq.${id}`).catch(() => {});
   await sbDelete("feedback_images", `feedback_id=eq.${id}`).catch(() => {});
-  await sbDelete("feedback", `id=eq.${id}`);
+  // HONEST WRITE (audit M45): the report row is the one the reporter sees,
+  // and a delete Supabase refused used to answer ok:true anyway.
+  const removed = await sbDelete("feedback", `id=eq.${id}`);
+  if (!removed) {
+    return NextResponse.json(
+      { ok: false, error: "The report was not deleted - it is still in your reports. Try again." },
+      { status: 502 }
+    );
+  }
   return NextResponse.json({ ok: true });
 }
 

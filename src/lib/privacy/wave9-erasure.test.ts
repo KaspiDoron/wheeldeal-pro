@@ -257,6 +257,9 @@ describe("retention completion", () => {
     ]) {
       expect(sql, t).toMatch(new RegExp(`delete from public\\.${t} where`));
     }
+    // The Ops Center's copies of a traveller's exchange (audit F171) - the
+    // delete spans lines, so the shape is pinned in training-rows-erased.
+    expect(sql).toMatch(/delete from public\.agent_training\s+where/);
   });
 
   it("priced transcripts are DE-IDENTIFIED past the window, not kept verbatim forever", () => {

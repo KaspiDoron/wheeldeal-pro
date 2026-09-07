@@ -43,8 +43,11 @@ line unless you write down why.
 **Data + platform**
 - [ ] `schema.sql`, `perf-indexes.sql`, `retention.sql` all run; Retention
       tile GREEN (a real prune ran, not just pasted SQL).
-- [ ] Admin -> "Check anon RPC lockdown" answers LOCKED, and the table probe
-      lists ZERO anon-visible relations.
+- [ ] Admin -> "Check anon RPC lockdown" answers LOCKED: no FOREIGN relation
+      is anon-visible, and RLS is measured to hold on the app's own tables
+      (Supabase grants anon on every table created from the SQL editor, so
+      the app's own tables being listed is expected - a foreign name or a
+      row read with the anon key is the alarm).
 - [ ] Evolution on its own database, `SAVE_DATA_NEW_MESSAGE/CONTACTS/CHATS`
       false on every host; `AUTHENTICATION_API_KEY` rotated if it ever
       appeared in a chat or screenshot.
