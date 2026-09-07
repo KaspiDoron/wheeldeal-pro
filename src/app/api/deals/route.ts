@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { getSession } from "@/lib/session";
 import { sbSelect, sbSelectStrict, pgTimestamp } from "@/lib/runtime-config";
 import { toTrip } from "@/lib/trips";
-import { groupSearchSessions, huntWindow } from "@/lib/session-life";
+import { groupSearchSessions, huntWindow, closedByOf, type SessionClosedBy } from "@/lib/session-life";
 import {
   termsComplete,
   depositPhrase,
@@ -129,9 +129,15 @@ export interface SessionSummary {
   shopsFound: number;
   status: "booked" | "live" | "waiting" | "wrapped";
   paused: boolean;
-  /** The traveller cleared this hunt - restore will refuse, so the list must
-   *  not offer a live Re-open that can only 404. */
+  /** This hunt is closed - restore/re-ask refuse, so the list must not offer a
+   *  live button that can only 404. */
   closed: boolean;
+  /** WHO closed it (audit F146). Three writers stamp the same marker: the
+   *  traveller's own clear ("user"), the TTL stand-down ("expired") and a
+   *  locked booking ("deal"). Reading `kind` alone told a traveller they had
+   *  cleared a hunt a late reply had merely stood down. An unlabelled legacy
+   *  marker reads as "user", so the strict refusal stays the default. */
+  closedBy: SessionClosedBy | null;
   contacted: number;
   replied: number;
   waiting: number;
@@ -241,6 +247,50 @@ function progressFor(s: {
   return { progress: 10, label: "Setting up the hunt" };
 }
 
+/** The lifecycle half of a free traveller's current rental (audit F147). */
+export interface LockedRental {
+  id: number;
+  status: string;
+  scheduledAt: string | null;
+  durationDays: number | null;
+}
+
+/**
+ * The caller's newest rental that has not finished yet, read with the same
+ * honesty as the rest of this route: `missing` (no bookings table on a fresh
+ * install or in demo mode) is a real absence, `unavailable` is UNKNOWN and is
+ * reported as such rather than rendered as "no rental".
+ *
+ * Deliberately four columns and one row - the locked branch is meant to stay
+ * cheap, and none of these four is paywalled content.
+ */
+async function lockedRental(
+  enc: string
+): Promise<{ rental: LockedRental | null; unknown: boolean }> {
+  const res = await sbSelectStrict<{
+    id: number;
+    status: string | null;
+    scheduled_at: string | null;
+    duration_days: number | null;
+  }>(
+    "bookings",
+    `select=id,status,scheduled_at,duration_days&user_email=eq.${enc}` +
+      `&status=in.(confirmed,picked_up)&order=created_at.desc&limit=1`
+  );
+  if ("error" in res) return { rental: null, unknown: res.error === "unavailable" };
+  const row = res.rows[0];
+  if (!row?.id) return { rental: null, unknown: false };
+  return {
+    rental: {
+      id: row.id,
+      status: row.status ?? "confirmed",
+      scheduledAt: row.scheduled_at ?? null,
+      durationDays: row.duration_days ?? null,
+    },
+    unknown: false,
+  };
+}
+
 export async function GET() {
   const session = await getSession();
   if (!session) return NextResponse.json({ error: "Sign in first." }, { status: 401 });
@@ -327,12 +377,25 @@ export async function GET() {
   // for the upgrade card to say "3 saved hunts are waiting" honestly - and
   // nothing else, which also makes the free path one cheap query instead of ten.
   if (!can(plan, "trips-history")) {
+    // ...WITH ONE EXCEPTION: THE TRAVELLER'S OWN MONEY RECORD (audit F147).
+    //
+    // A free plan CAN book (POST /api/bookings gates on the session only) and
+    // does get the "Did you return the vehicle? - tap to mark the trip
+    // completed" push. With nothing but the upgrade gate on this page the two
+    // lifecycle taps - the only writers of picked_up/completed - were
+    // unreachable, so the booking sat at `confirmed` for ever and its thread
+    // never reached the `completed` funnel stage. This ships the LIFECYCLE
+    // FIELDS ONLY: no shop, no price, no hunt, so the paywall is unchanged.
+    const rental = await lockedRental(enc);
     return NextResponse.json({
       locked: true,
       feature: "trips-history",
       huntCount: groups.length,
       sessions: [],
       bookings: [],
+      rental: rental.rental,
+      // An unreadable store is not "you have no rental" - the card says so.
+      rentalUnknown: rental.unknown,
     });
   }
 
@@ -447,12 +510,15 @@ export async function GET() {
       // live Re-open on a cleared hunt); the restore route keeps its strict
       // gate, so an outage here degrades to a button that 404s honestly, never
       // to a cleared hunt silently coming back.
-      sbSelect<{ received_at: string }>(
+      // `reason` RIDES ALONG (audit F146): one jsonb scalar, not the whole raw
+      // blob. Without it all three closes look identical and a hunt the TTL
+      // stood down was reported as one the traveller cleared.
+      sbSelect<{ received_at: string; reason: string | null }>(
         "whatsapp_messages",
-        `select=received_at&to_number=eq.session&raw->>sender=eq.${enc}&raw->>kind=eq.session-closed&received_at=gte.${pgTimestamp(
+        `select=received_at,reason:raw->>reason&to_number=eq.session&raw->>sender=eq.${enc}&raw->>kind=eq.session-closed&received_at=gte.${pgTimestamp(
           oldestStart
         )}&order=received_at.desc&limit=20`
-      ).catch(() => [] as { received_at: string }[]),
+      ).catch(() => [] as { received_at: string; reason: string | null }[]),
     ]);
 
   // The engine's own extracted per-shop state: the AUTHORITY on how a traveller
@@ -492,8 +558,8 @@ export async function GET() {
   const now = Date.now();
   const paused = pauseMarkers[0]?.raw?.kind === "session-paused";
   const closedStamps = closedMarkers
-    .map((m) => Date.parse(m.received_at))
-    .filter((t) => Number.isFinite(t));
+    .map((m) => ({ at: Date.parse(m.received_at), by: closedByOf(m.reason) }))
+    .filter((m) => Number.isFinite(m.at));
 
   // 3. Build each session's living summary from its activity window.
   const sessions: SessionSummary[] = kept.map((group, gi) => {
@@ -511,7 +577,13 @@ export async function GET() {
     // the group's FIRST row would mark the search-clear-search-again sequence
     // (one 30-min group with the clear in the middle) as closed.
     const groupEnd = Date.parse(group[group.length - 1].created_at);
-    const closed = closedStamps.some((t) => t > groupEnd && t < end);
+    // The newest close inside this hunt's window, and WHO made it (F146).
+    const closeMark = closedStamps.find((m) => m.at > groupEnd && m.at < end) ?? null;
+    const closedBy: SessionClosedBy | null = closeMark ? closeMark.by : null;
+    // Still true for every close: a closed hunt has tombstoned recipients, so
+    // the re-ask stays off whatever the reason was. Only the COPY and the
+    // Re-open decision read `closedBy`.
+    const closed = closedBy !== null;
 
     // The newest row of the group that carried a real origin - the same rule
     // the restore route uses to rebuild the map's centre.
@@ -802,6 +874,7 @@ export async function GET() {
       status,
       paused: isLatest ? paused : false,
       closed,
+      closedBy,
       contacted: Math.max(contacted, humanSent.length ? 1 : 0),
       replied,
       waiting: Math.max(0, contacted - replied),

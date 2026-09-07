@@ -1948,11 +1948,20 @@ export function liveGraphIO(send: LiveSend): GraphIO {
           // negotiation a number nobody could book, and moved their floor to
           // match it. Only the panel honoured the flag; the two places that
           // turn a reading into a NUMBER did not (this one and /api/replies).
-          const { pickBoardPrice } = await import("../media/reading");
+          // ...AND A FORWARDED BOARD IS NOT THIS SHOP'S BOARD AT ALL (audit
+          // F151). `raw.forwarded` was consulted only by the offers writer, so
+          // a competitor's board a shop merely passed on landed in THIS table -
+          // the one whose whole purpose is being quoted at other shops. The
+          // query already projects `raw`, so both provenance signals are free:
+          // the reading's own stamp, and the row key for rows stamped before
+          // that stamp existed.
+          const { pickBoardPrice, attributablePrices } = await import("../media/reading");
           const readRows = await sbSelect<{
             from_number: string | null;
             raw: {
+              forwarded?: unknown;
               reading?: {
+                forwardedSource?: boolean;
                 prices?: Array<{ pricePerDay?: number; currency?: string; available?: boolean }>;
               };
             } | null;
@@ -1963,6 +1972,11 @@ export function liveGraphIO(send: LiveSend): GraphIO {
             )}&received_at=gte.${encodeURIComponent(since)}&raw->reading=not.is.null` +
               `&order=received_at.desc&limit=24`
           ).catch(() => []);
+          /** The rows of one message's reading this shop may be quoted on. */
+          const ownBoard = (m: (typeof readRows)[number] | undefined) =>
+            attributablePrices(
+              m?.raw?.forwarded != null ? { ...m?.raw?.reading, forwardedSource: true } : m?.raw?.reading
+            );
           for (const r of priceless) {
             const digits = numberByVendor.get(r.vendorId)!;
             const read = readRows.find(
@@ -1973,7 +1987,7 @@ export function liveGraphIO(send: LiveSend): GraphIO {
                 // claim this shop, or the newest such message shadows an older
                 // one that really did carry a quotable board.
                 pickBoardPrice(
-                  m.raw?.reading?.prices,
+                  ownBoard(m),
                   spec?.engineSizeCc ?? 0,
                   spec?.durationDays ?? 0
                 ) !== null
@@ -1985,7 +1999,7 @@ export function liveGraphIO(send: LiveSend): GraphIO {
             // another shop. Leverage has to compare like with like or it is
             // fiction, and a tier the traveller cannot book is fiction.
             const cheapest = pickBoardPrice(
-              read?.raw?.reading?.prices,
+              ownBoard(read),
               spec?.engineSizeCc ?? 0,
               spec?.durationDays ?? 0
             );

@@ -85,7 +85,10 @@ describe("the provider actually uses all of it", () => {
     // `pending` and `failed` moved into src/lib/i18n-gate.ts when t() stopped
     // uploading arbitrary user text (the sets and the admission rule belong
     // together). The provider still drives the sweep from them...
-    expect(i18n).toMatch(/const batch = retriable\(pending, failed\);/);
+    // Audit F253 added the in-flight set as the third argument, so a sweep
+    // cannot re-ask for the strings a fetch is still holding. The pin follows
+    // the fix; the "declined once, never asked again" half is unchanged.
+    expect(i18n).toMatch(/const batch = retriable\(pending, failed, inFlight\);/);
     expect(i18n).toMatch(/from "\.\/i18n-gate"/);
     // ...and the "declined once, never asked again" rule is now EXECUTED in
     // i18n-leak.test.ts against queueForTranslation, not pinned as source.

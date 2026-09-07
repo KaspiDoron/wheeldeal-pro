@@ -24,6 +24,7 @@ import { TabBar } from "@/components/TabBar";
 import { FeedbackModal } from "@/components/FeedbackModal";
 import { UpgradeSheet } from "@/components/UpgradeSheet";
 import { CURRENCIES, savedCurrency, setSavedCurrency, moneyLocal } from "@/lib/currency";
+import { formatShopWallClock } from "@/lib/clock";
 import { useI18n } from "@/lib/i18n";
 
 interface Booking {
@@ -828,7 +829,8 @@ export default function ProfilePage() {
                   <div>
                     <div className="text-[13px] font-extrabold text-strong">{b.vendor_name}</div>
                     <div className="text-[11px] text-faint">
-                      {b.scheduled_at ? new Date(b.scheduled_at).toLocaleString() : ""} ·{" "}
+                      {/* The SHOP's wall clock, not the device's (audit F108). */}
+                      {formatShopWallClock(b.scheduled_at)} ·{" "}
                       {b.fulfillment}
                     </div>
                   </div>

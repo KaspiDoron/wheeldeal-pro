@@ -194,6 +194,42 @@ export function deriveReturnDate<
   return { ...rfq, returnDate: derived };
 }
 
+/**
+ * THE DATE THE BOOKING SHEET OPENS ON (audit F107).
+ *
+ * The sheet used to derive it from the clock alone - today for a free plan,
+ * tomorrow otherwise - and never looked at `rfq.startDate`, the field the
+ * traveller filled in and the openers stated to every shop ("5 days from
+ * 20 Sep"). So a Pro traveller who negotiated a window three weeks out tapped
+ * Book and silently got tomorrow, with start_date/return_date written from that
+ * same wrong day.
+ *
+ * The RFQ's start wins whenever it is a real date, run through the SAME
+ * resolveWindow authority the server enforces, so a stale date becomes today
+ * and a date past the plan's ceiling is clamped rather than offered and then
+ * refused. With no usable RFQ date the old defaults stand.
+ */
+export function pickupDefault(opts: {
+  rfqStartDate?: string | null;
+  plan: string | null | undefined;
+  nowMs: number;
+  timeZone?: string;
+}): string {
+  const today = localDay(opts.nowMs, opts.timeZone);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(opts.rfqStartDate ?? ""))) {
+    return resolveWindow({
+      plan: opts.plan,
+      requested: opts.rfqStartDate,
+      nowMs: opts.nowMs,
+      timeZone: opts.timeZone,
+    }).startDate;
+  }
+  // No date to honour: same-day for a plan that can only do same-day, and the
+  // next day for one that books ahead.
+  const ahead = resolveWindow({ plan: opts.plan, nowMs: opts.nowMs, timeZone: opts.timeZone });
+  return ahead.daysAhead === 0 ? today : addDays(today, 1);
+}
+
 /** May this plan schedule a rental starting on this day at all? */
 export function withinWindow(opts: {
   plan: string | null | undefined;

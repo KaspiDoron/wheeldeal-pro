@@ -265,8 +265,17 @@ export async function PATCH(req: Request) {
     return NextResponse.json({ error: "unknown action" }, { status: 400 });
   }
   // advanced:false is an honest state, not an error: the booking is already
-  // at/past this status (a double tap, or another device won the race).
-  return NextResponse.json({ ok: res.advanced, status: res.row?.status ?? null });
+  // at/past this status (a double tap, or another device won the race). An
+  // UNREADABLE store is not that state - the tap changed nothing and the
+  // traveller has to be told, so it answers 502 rather than a 200 the client
+  // would render as the new status (audit F054).
+  if (!res.advanced && res.reason === "unreadable") {
+    return NextResponse.json({ ok: false, reason: "unreadable" }, { status: 502 });
+  }
+  if (!res.advanced) {
+    return NextResponse.json({ ok: false, reason: "refused", status: res.status ?? null });
+  }
+  return NextResponse.json({ ok: true, status: res.row?.status ?? null });
 }
 
 // Remove a past booking from the caller's own history (item #10). Strictly

@@ -328,3 +328,27 @@ export function reopenEpoch(
 ): number {
   return isSessionFresh(huntStartMs, nowMs, ttlMs) ? huntStartMs : nowMs;
 }
+
+/**
+ * WHO closed a hunt (audit F146).
+ *
+ * Three writers stamp the SAME `kind: "session-closed"` marker row and are told
+ * apart only by `raw.reason`: session-close.ts writes `user` for the
+ * traveller's own "Clear search" and `ttl-expired` for the quiet stand-down
+ * agent-loop fires when a shop answers past the TTL, and close-deal writes
+ * `deal-closed` when a booking locks. Every reader filtered on `kind` alone, so
+ * a shop replying four hours late told the traveller they had cleared a hunt
+ * they never touched - and permanently withdrew Re-open with it.
+ */
+export type SessionClosedBy = "user" | "expired" | "deal";
+
+/**
+ * The marker's reason as a verdict. Anything unrecognised - including the rows
+ * written before the reason existed - is the traveller's own clear, so the
+ * strict refusal stays the default and no unlabelled row can unlock Re-open.
+ */
+export function closedByOf(reason: string | null | undefined): SessionClosedBy {
+  if (reason === "ttl-expired") return "expired";
+  if (reason === "deal-closed") return "deal";
+  return "user";
+}

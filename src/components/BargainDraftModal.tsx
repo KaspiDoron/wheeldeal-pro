@@ -6,6 +6,8 @@ import { Modal } from "./Modal";
 import { LoadingDots } from "./LoadingDots";
 import { useI18n } from "@/lib/i18n";
 import { can } from "@/lib/entitlements";
+import { fetchJson } from "@/lib/client/fetch-json";
+import { draftOutcome } from "@/lib/client/draft-outcome";
 
 // Adaptive Bargaining Agent UI: composes the next message and sends it to the
 // shop from INSIDE the app. The traveller can also WRITE or EDIT the message
@@ -62,15 +64,26 @@ export function BargainDraftModal({
   >("idle");
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [upgradeNote, setUpgradeNote] = useState(false);
+  /** WHY there is no draft. Without this a refused compose was a blank box:
+   *  the route's 401/400 and its two 500 rails set no state at all, so the
+   *  modal showed an empty textarea and a disabled Send button (audit F053). */
+  const [draftError, setDraftError] = useState<string | null>(null);
 
   async function compose(langChoice = language) {
     setBusy(true);
     setSendState("idle");
     setStatusMsg(null);
+    setDraftError(null);
     try {
-      const res = await fetch("/api/bargain-draft", {
+      // fetchJson never throws and always settles: `await res.json()` on a
+      // non-JSON 500 used to reject straight out of a try that had only a
+      // finally. The 50s deadline matches the send path's - a compose runs a
+      // real LLM plus a safety screen, so the helper's 10s default would abort
+      // perfectly healthy drafts.
+      const res = await fetchJson<Record<string, unknown>>("/api/bargain-draft", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        timeoutMs: 50_000,
         body: JSON.stringify({
           vendor,
           rfq,
@@ -81,18 +94,19 @@ export function BargainDraftModal({
           language: langChoice,
         }),
       });
-      const data = await res.json();
-      if (data.message) {
-        setText(data.message);
+      const outcome = draftOutcome(res.ok, res.data);
+      if (outcome.kind === "draft") {
+        const data = (res.data ?? {}) as Record<string, unknown>;
+        setText(outcome.message);
         // The draft's English gloss (local-language drafts only; a reused
         // draft comes back without one). Never shown when it just repeats
         // the message.
         setGloss(
-          typeof data.english === "string" && data.english.trim() !== String(data.message).trim()
+          typeof data.english === "string" && data.english.trim() !== outcome.message.trim()
             ? data.english
             : ""
         );
-        setTacticLabel(data.tacticLabel ?? "");
+        setTacticLabel(typeof data.tacticLabel === "string" ? data.tacticLabel : "");
         setWasFallback(Boolean(data.fallback));
         setEdited(false);
         // The server resolves the thread's ESTABLISHED language and may
@@ -101,7 +115,17 @@ export function BargainDraftModal({
         if (data.languageUsed === "english" || data.languageUsed === "local") {
           setLanguage(data.languageUsed);
         }
-      } else if (data.upgrade) setUpgradeNote(true);
+      } else if (outcome.kind === "upgrade") {
+        setUpgradeNote(true);
+      } else {
+        // The route already writes user-safe prose for its own refusals; the
+        // fallback covers a timeout, a dead connection or a non-JSON answer.
+        setDraftError(
+          outcome.error ||
+            res.error ||
+            t("Could not write a draft just now - tap Rewrite, or type your own message.")
+        );
+      }
     } finally {
       setBusy(false);
     }
@@ -250,6 +274,11 @@ export function BargainDraftModal({
         </div>
       ) : (
         <>
+          {draftError && (
+            <p className="mb-2 rounded-xl bg-brandred-soft p-2 text-[12px] font-bold text-brandred" role="alert">
+              {draftError}
+            </p>
+          )}
           {tacticLabel && !edited && (
             <div className="mb-2 inline-flex rounded-full bg-brandred-soft px-2.5 py-1 text-[11px] font-extrabold text-brandred">
               {t("Tactic:")} {tacticLabel}

@@ -9,6 +9,7 @@ import {
   sessionIdOf,
   huntWindow,
   reopenEpoch,
+  closedByOf,
 } from "@/lib/session-life";
 import { searchSessionTtlMs } from "@/lib/session-life-config";
 
@@ -241,9 +242,19 @@ export async function GET(req: Request) {
   // STRICT, because this is a gate rather than a display. Read permissively it
   // would answer `[]` during an outage - "not closed" - and a hunt the traveller
   // had explicitly cleared would come back. Unknown must refuse, not restore.
-  const closedRead = await sbSelectStrict<{ received_at: string }>(
+  //
+  // ...AND CLEARED IS NOT THE ONLY WAY A HUNT CLOSES (audit F146). Three
+  // writers stamp this one marker: the traveller's clear, the TTL stand-down
+  // agent-loop fires when a shop answers past the window, and a locked
+  // booking. Reading `kind` alone refused Re-open for all three and told the
+  // traveller they had cleared a hunt they never touched. `reason` rides along
+  // as a jsonb scalar; a hunt that merely went QUIET is exactly what Re-open
+  // exists for, so only the clear and the booking are refused - and an
+  // unlabelled legacy marker reads as a clear, so the strict refusal is still
+  // the default.
+  const closedRead = await sbSelectStrict<{ received_at: string; reason: string | null }>(
     "whatsapp_messages",
-    `select=received_at&to_number=eq.session&raw->>sender=eq.${enc}&raw->>kind=eq.session-closed` +
+    `select=received_at,reason:raw->>reason&to_number=eq.session&raw->>sender=eq.${enc}&raw->>kind=eq.session-closed` +
       `&received_at=gt.${encodeURIComponent(groupEndIso)}` +
       (nextGroupIso ? `&received_at=lt.${encodeURIComponent(nextGroupIso)}` : "") +
       `&order=received_at.desc&limit=1`
@@ -255,10 +266,21 @@ export async function GET(req: Request) {
     );
   }
   if ("rows" in closedRead && closedRead.rows.length) {
-    return NextResponse.json(
-      { error: "session-closed", hint: "You cleared this hunt." },
-      { status: 404 }
-    );
+    const by = closedByOf(closedRead.rows[0]?.reason);
+    if (by === "user") {
+      return NextResponse.json(
+        { error: "session-closed", closedBy: "user", hint: "You cleared this hunt." },
+        { status: 404 }
+      );
+    }
+    if (by === "deal") {
+      return NextResponse.json(
+        { error: "session-closed", closedBy: "deal", hint: "You booked from this hunt." },
+        { status: 404 }
+      );
+    }
+    // "expired": the agents stood down, nothing was thrown away. Fall through
+    // and rebuild the workspace - reopenEpoch below stamps it fresh.
   }
 
   const withSnap = group.find((r) => Array.isArray(r.snapshot) && r.snapshot.length);

@@ -20,6 +20,7 @@ import { useReadiness } from "@/lib/client/readiness";
 const TRIPS_SOURCES = ["session", "trips"] as const;
 import { TabBar } from "@/components/TabBar";
 import { saveSearch } from "@/lib/client/search-persist";
+import { nextBookingStatus } from "@/lib/client/booking-tap";
 import { FeedbackModal } from "@/components/FeedbackModal";
 import { UpgradeSheet } from "@/components/UpgradeSheet";
 import { startNav } from "@/components/NavVeil";
@@ -29,6 +30,8 @@ import { can } from "@/lib/entitlements";
 import { partitionHunts } from "@/lib/trips";
 import { PLANS } from "@/lib/plans";
 import { SEARCH_SESSION_TTL_MS, isSessionFresh } from "@/lib/session-life";
+import { huntClosure } from "@/lib/client/hunt-closure";
+import { formatShopWallClock } from "@/lib/clock";
 import { useI18n } from "@/lib/i18n";
 
 interface SessionOffer {
@@ -64,9 +67,13 @@ interface SessionSummary {
   shopsFound: number;
   status: "booked" | "live" | "waiting" | "wrapped";
   paused: boolean;
-  /** The traveller cleared this hunt - restore will refuse, so the list must
-   *  not offer a live Re-open that can only 404. */
+  /** This hunt is closed - restore/re-ask refuse, so the list must not offer a
+   *  live button that can only 404. */
   closed: boolean;
+  /** WHO closed it (audit F146): the traveller's own clear, the TTL stand-down
+   *  or a locked booking. Three writers stamp one marker and reading `kind`
+   *  alone told a traveller they had cleared a hunt that merely went quiet. */
+  closedBy: "user" | "expired" | "deal" | null;
   contacted: number;
   replied: number;
   waiting: number;
@@ -231,10 +238,25 @@ export default function DealsPage() {
   // Booking lifecycle taps (bookings.ts doctrine: the traveller is the witness
   // for picked_up/completed, so THEY record it). One in flight at a time.
   const [bookingTap, setBookingTap] = useState<number | null>(null);
+  /** "That tap did not save" - per booking, cleared on the next attempt. */
+  const [bookingNote, setBookingNote] = useState<Record<number, string>>({});
+  /** THE FREE PLAN'S OWN RENTAL (audit F147). Trips history is paywalled, but
+   *  a free traveller can still book, still gets the "did you return it?" push
+   *  and still needs the two lifecycle taps - so the route ships the lifecycle
+   *  fields (no shop, no price) on the locked branch and they render here. */
+  const [lockedRental, setLockedRental] = useState<{
+    id: number;
+    status: string;
+    scheduledAt: string | null;
+    durationDays: number | null;
+  } | null>(null);
+  /** The rental read did not answer. Never rendered as "no rental". */
+  const [rentalUnknown, setRentalUnknown] = useState(false);
 
   async function tapBookingAction(id: number, action: "picked_up" | "completed") {
     if (bookingTap) return;
     setBookingTap(id);
+    setBookingNote((n) => ({ ...n, [id]: "" }));
     try {
       const r = await fetch("/api/bookings", {
         method: "PATCH",
@@ -242,18 +264,29 @@ export default function DealsPage() {
         body: JSON.stringify({ id, action }),
       });
       const d = await r.json().catch(() => ({}));
-      // The server's answer (or the refusal) is the truth - reflect it locally
-      // without a full reload. ok:false means already at/past this status,
-      // which renders the same way.
-      const next = typeof d?.status === "string" && d.status ? d.status : action;
+      // ONLY WHAT THE SERVER CONFIRMED (audit F054). This used to fall back to
+      // the tapped action whenever the body carried no status, so a 401, a 502
+      // from an unreadable store, or an outage-shaped refusal all painted
+      // "Trip completed" over a booking that never moved - and the render then
+      // hides the buttons, so the traveller could not retry. `ok:false` with a
+      // status is still success at THAT status (already there, double tap).
+      const next = nextBookingStatus(r.ok, d, action);
+      if (!next) {
+        setBookingNote((n) => ({ ...n, [id]: t("Could not save that just now - try again.") }));
+        return;
+      }
       setSessions((prev) =>
         prev.map((s) =>
           s.booking?.id === id ? { ...s, booking: { ...s.booking, status: next } } : s
         )
       );
       setBookings((prev) => prev.map((b) => (b.id === id ? { ...b, status: next } : b)));
+      // The free plan's card is fed by its own key, not by `bookings` (F147).
+      setLockedRental((r) => (r && r.id === id ? { ...r, status: next } : r));
     } catch {
-      /* the next poll shows the durable state */
+      // The request never produced an answer - say so rather than let the next
+      // poll silently contradict a card the traveller already believed.
+      setBookingNote((n) => ({ ...n, [id]: t("Could not save that just now - try again.") }));
     } finally {
       setBookingTap(null);
     }
@@ -323,6 +356,68 @@ export default function DealsPage() {
 
   const canHistory = can(plan, "trips-history");
 
+  // THE ONE CARD A LOCKED TRIPS PAGE STILL OWES THE TRAVELLER (audit F147).
+  //
+  // A free plan can book, and suggestCompletions pushes "Did you return the
+  // vehicle? - tap to mark the trip completed" at "/deals" for every plan. With
+  // only the upgrade gate on this page that push was a dead end: the
+  // picked_up/completed taps are the ONLY writers of those statuses, so the
+  // booking sat at `confirmed` for ever and its thread never reached the
+  // `completed` funnel stage. This is the traveller's own money record, not
+  // trips history - the route ships its lifecycle fields alone (no shop, no
+  // price, no hunt) and the taps are the SAME tapBookingAction the paid card
+  // uses, so there is one writer and one honesty rule.
+  //
+  // A plain function, not a nested component: calling it keeps the inputs in
+  // this scope without remounting the subtree on every render.
+  function LockedRentalCard() {
+    if (rentalUnknown && !lockedRental) {
+      return (
+        <div className="rounded-2xl bg-card2 px-3 py-2.5 text-center text-[11.5px] font-bold text-faint">
+          {t("Could not check your current rental just now - it reappears on its own.")}
+        </div>
+      );
+    }
+    if (!lockedRental) return null;
+    const r = lockedRental;
+    return (
+      <div className="rounded-2xl bg-savings-soft p-3">
+        <div className="text-[10px] font-extrabold uppercase tracking-wide text-savings">
+          {t("Your current rental")}
+        </div>
+        {r.scheduledAt && (
+          <div className="mt-0.5 text-[12px] font-bold text-soft">
+            {t("Pick-up")}: {formatShopWallClock(r.scheduledAt)}
+          </div>
+        )}
+        <div className="mt-2">
+          {r.status === "picked_up" ? (
+            <button
+              onClick={() => tapBookingAction(r.id, "completed")}
+              disabled={bookingTap != null}
+              className="w-full rounded-xl bg-savings px-3 py-2 text-[12px] font-extrabold text-white disabled:opacity-60"
+            >
+              {t("Trip completed - I returned it")}
+            </button>
+          ) : (
+            <button
+              onClick={() => tapBookingAction(r.id, "picked_up")}
+              disabled={bookingTap != null}
+              className="w-full rounded-xl bg-card2 px-3 py-2 text-[12px] font-extrabold text-strong disabled:opacity-60"
+            >
+              {t("I picked it up")}
+            </button>
+          )}
+        </div>
+        {bookingNote[r.id] && (
+          <p className="mt-1.5 text-center text-[10.5px] font-bold text-brandred" role="alert">
+            {bookingNote[r.id]}
+          </p>
+        )}
+      </div>
+    );
+  }
+
   // Re-open a past hunt: pull its shops + RFQ from the server, write the same
   // sessionStorage payload a live search uses, then navigate home where the
   // existing rehydrate path renders the full Find-Deals workspace.
@@ -352,7 +447,13 @@ export default function DealsPage() {
       // server will refuse forever - the honest copy names what happened.
       if (d?.error === "session-closed") {
         setRestoring(null);
-        setRestoreErr(t("You cleared this hunt - it stays in your history, but the agents are done with it."));
+        // WHICH close (audit F146). A booked hunt is not a binned one, and the
+        // TTL stand-down never reaches here at all - it re-opens.
+        setRestoreErr(
+          d?.closedBy === "deal"
+            ? t("You booked from this hunt - it stays in your history.")
+            : t("You cleared this hunt - it stays in your history, but the agents are done with it.")
+        );
         return;
       }
       if (!r.ok || !d?.payload) {
@@ -420,6 +521,8 @@ export default function DealsPage() {
           setSessions(s);
           setBookings(d.bookings ?? []);
           setHuntCount(Number(d.huntCount ?? s.length) || 0);
+          setLockedRental(d.rental ?? null);
+          setRentalUnknown(Boolean(d.rentalUnknown));
           setLoadFailed(false);
           // The freshest hunt opens expanded - it's what you came to check.
           // First load only: a refresh must not fight the traveller's own
@@ -592,6 +695,8 @@ export default function DealsPage() {
         {/* TRIPS IS A PRO/ULTRA SECTION (owner report 5 #17), and a free
             traveller is told so in the UI rather than being handed a redacted
             list. The upgrade path is the EXISTING sheet - no second sheet. */}
+        {!loading && !canHistory && LockedRentalCard()}
+
         {!loading && !canHistory && (
           <TripsUpgradeGate hunts={huntCount} onUpgrade={() => setUpgradeOpen(true)} />
         )}
@@ -694,6 +799,14 @@ export default function DealsPage() {
           (() => {
             const renderSession = (s: HuntRow) => {
               const open = Boolean(expanded[s.id]);
+              // WHO CLOSED IT, DEFAULTED ON THE WIRE (audit F146). The route
+              // names the closer, but a payload carrying only the old boolean -
+              // an older revision still answering during a rolling deploy, a
+              // browser on a cached bundle - would otherwise fall past both
+              // honest arms into the Re-open button that can only 404. An
+              // unlabelled close is the traveller's own clear, which is exactly
+              // how the route itself defaults it (session-life closedByOf).
+              const closure = huntClosure(s);
               // W6.1 - THE GATE MOVED OUT OF THE CARD.
               //
               // This used to render a locked PREVIEW for every non-latest hunt
@@ -910,6 +1023,11 @@ export default function DealsPage() {
                               )}
                             </div>
                           )}
+                          {s.booking.id != null && bookingNote[s.booking.id] && (
+                            <p className="mt-1.5 text-center text-[10.5px] font-bold text-brandred" role="alert">
+                              {bookingNote[s.booking.id]}
+                            </p>
+                          )}
                           {s.booking.status === "completed" && (
                             <div className="mt-2 rounded-xl bg-card2 px-3 py-2 text-center text-[11px] font-extrabold text-savings">
                               {t("Trip completed")}
@@ -1097,11 +1215,13 @@ export default function DealsPage() {
                             workspace" - there is no live workspace) is a button
                             that can only fail. Checked FIRST: the newest hunt
                             can be the cleared one. */}
-                        {s.closed ? (
+                        {closure === "user" || closure === "deal" ? (
                           <p className="rounded-2xl bg-card2 px-3 py-2.5 text-center text-[11.5px] font-bold text-faint">
-                            {t("You cleared this hunt - it stays here as history.")}
+                            {closure === "deal"
+                              ? t("You booked from this hunt - it stays here as history.")
+                              : t("You cleared this hunt - it stays here as history.")}
                           </p>
-                        ) : s.isLatest ? (
+                        ) : s.isLatest && !s.closed ? (
                           <a
                             href="/"
                             onClick={() => startNav()}
@@ -1114,20 +1234,31 @@ export default function DealsPage() {
                           // renders only for Pro/Ultra, so a card on screen is a
                           // card the traveller may re-open. A free plan meets the
                           // gate once, up front, instead of on every row.
-                          <button
-                            onClick={() => restoreSession(s.startedAt, false, s.sid)}
-                            disabled={restoring === s.startedAt}
-                            className="btn btn-primary flex flex-1 items-center justify-center gap-2 rounded-2xl py-2.5 text-center text-[13px] disabled:opacity-70"
-                          >
-                            {restoring === s.startedAt ? (
-                              <>
-                                <LoadingDots light />
-                                {t("Re-opening…")}
-                              </>
-                            ) : (
-                              t("Re-open this hunt")
+                          //
+                          // A hunt the TTL stood down lands here too (audit
+                          // F146): it was never cleared, so Re-open still works
+                          // and the line above it says what actually happened.
+                          <>
+                            {closure === "expired" && (
+                              <p className="rounded-2xl bg-card2 px-3 py-2 text-center text-[11px] font-bold text-faint">
+                                {t("This hunt went quiet and the agents stood down - re-open it to pick it back up.")}
+                              </p>
                             )}
-                          </button>
+                            <button
+                              onClick={() => restoreSession(s.startedAt, false, s.sid)}
+                              disabled={restoring === s.startedAt}
+                              className="btn btn-primary flex flex-1 items-center justify-center gap-2 rounded-2xl py-2.5 text-center text-[13px] disabled:opacity-70"
+                            >
+                              {restoring === s.startedAt ? (
+                                <>
+                                  <LoadingDots light />
+                                  {t("Re-opening…")}
+                                </>
+                              ) : (
+                                t("Re-open this hunt")
+                              )}
+                            </button>
+                          </>
                         )}
                         {restoreErr && restoring === null && (
                           <p className="text-center text-[10px] font-bold text-brandred">{restoreErr}</p>
@@ -1241,8 +1372,8 @@ export default function DealsPage() {
                             {b.vendor_name}
                           </div>
                           <div className="mt-0.5 text-[11px] text-soft">
-                            {b.scheduled_at
-                              ? `${t("Pick-up")}: ${b.scheduled_at.replace("T", " · ")}`
+                            {formatShopWallClock(b.scheduled_at)
+                              ? `${t("Pick-up")}: ${formatShopWallClock(b.scheduled_at)}`
                               : t("Pick-up time agreed in chat")}
                           </div>
                         </div>
