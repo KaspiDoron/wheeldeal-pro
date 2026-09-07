@@ -266,7 +266,7 @@ Signed off when the owner has spot-checked each in the product.
 | 14 | ONE engine, graph as failover | Fixed | W0 field persistence; W2 live judge/ladder, steps 7-9, legacy deleted |
 | 15 | Management audit + architecture toggle | Fixed | W6 Architecture card; W7 honesty/egress/delivery-trail |
 | 16 | Template/catalog mining + follow-up | Fixed | W3 ladder provenance + covered tiers |
-| 17 | UI data speed | Partly - see below | W0 waiting predicate; W12g the turn wall clock and the duplicate send-hold; W13c `/api/pulse` - one integer from four indexed rows, polled every 2.5s, waking the heavy fetches on change instead of on their interval (a reply surfaces in ~3s, not ~20s), with the heavy intervals tightening straight back if the pulse goes blind. NOT done: enqueue-first outreach. This row credited it to W4 and no such change exists - the mass tap still blocks on an all-shop opener pre-pass and a live send |
+| 17 | UI data speed | Partly - see below | W0 waiting predicate; W12g the turn wall clock and the duplicate send-hold; W13c `/api/pulse` - one integer from four indexed rows, polled every 2.5s, waking the heavy fetches on change instead of on their interval (a reply surfaces in ~3s, not ~20s), with the heavy intervals tightening straight back if the pulse goes blind. Partly done: enqueue-first outreach. This row credited it to W4 and no such change existed; audit A1 built the ordering half - the batch is durably queued before the one live send - and the opener pre-pass deliberately stays at enqueue time (see below) |
 | 18 | Strict vehicle matching / Similar tag | Fixed | W3 trigger union + digit fold; W12d the verdict finally reaches the label, the ranking and the thread pause, and the SIMILAR VEHICLE tag this row credited now exists |
 | WBA | Company-WABA handoff + toggle | Built; needs owner go-live actions (section 3) | W5 contract; W6 anchor, dispatch, opt-in, suppression, card |
 
@@ -305,9 +305,15 @@ pinning the defect rather than the fix.
 Recorded here rather than quietly closed, because a reconciliation table
 that only lists wins is the thing this section exists to stop being.
 
-- **Enqueue-first outreach (problem 17).** The mass tap still blocks on an
-  all-shop opener pre-pass, ~200 sequential round trips and a live send.
-  Row 17 credited this to Wave 4 and no such change was ever made.
+- **Enqueue-first outreach (problem 17).** Half done, honestly. The tap now
+  writes every parked shop's row BEFORE it dispatches, so the one live send
+  can no longer take the rest of the hunt down with it (audit A1; executed in
+  `src/app/api/outreach/mass-enqueue-first.test.ts`). What remains is the
+  all-shop opener pre-pass and its round trips, which stay in the request on
+  purpose: the drain delivers parked bodies verbatim (`alreadyHumanized`), so
+  compiling or localizing at drain time would mutate the text and change the
+  idempotency slot hash. Row 17 credited the whole item to Wave 4 and no such
+  change was ever made.
 - **A promo / discount entity (problem 5).** Native prices read now; a
   "free helmet" or "10% off for a week" is still only an English regex
   behind a two-confirmation gate.

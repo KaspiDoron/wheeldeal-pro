@@ -102,6 +102,138 @@ export function missedCallReply(pick: () => number = Math.random): string {
   return MISSED_CALL_REPLIES[Math.floor(pick() * MISSED_CALL_REPLIES.length)] ?? MISSED_CALL_REPLIES[0];
 }
 
+export interface MissedCallText {
+  /** What actually goes on the wire. */
+  text: string;
+  /** The English source - the traveller's gloss when `text` is not English. */
+  english: string;
+  localized: boolean;
+  /** Why it is (or is not) localized, so the trace never has to guess. */
+  reason: string;
+}
+
+/**
+ * HARD CEILING on the whole language decision - the reads AND the translation.
+ *
+ * This runs on the inbound-call webhook leg, inside
+ * `finishBeforeResponse("inbound-call", ...)`, whose entire window is
+ * `AFTER_BUDGET_MS` (8s) and which also has to cover guardOutbound,
+ * claimForSend, the Evolution send, afterSend and the outbound row. Two
+ * PostgREST reads (8s ceiling each) plus a 2-attempt translate retry loop (9s
+ * budget per attempt) can eat that window whole - and when the webhook budget
+ * expires the route flushes, Cloud Run throttles the CPU to ~0, and the send
+ * simply never happens. Worse, the hourly claim `call:<shop>:<hour>` is taken
+ * BEFORE this runs, so an Evolution redelivery in the same hour is suppressed
+ * as "already answered": the shop holding a ringing phone gets nothing, once.
+ *
+ * A third of the window, and no more. Expiry is not an error - it is the
+ * English literal, which is exactly what this path sent before it learned to
+ * translate at all.
+ */
+export const MISSED_CALL_LANG_BUDGET_MS = 2_000;
+
+/**
+ * The missed-call reply IN THE LANGUAGE OF THIS THREAD (audit A5).
+ *
+ * DETERMINISTIC CONTENT, LOCAL WORDS. The three variants above remain the only
+ * things this module can ever say - nothing is composed and nothing is reasoned
+ * about - but a shop that has been messaged in Thai for ten minutes and then
+ * receives an English sentence is reading a different person, or a bot. The
+ * translation hop carries no fact, no number and no commitment, so everything
+ * the fixed content protects survives it intact.
+ *
+ * THE LANGUAGE IS NOT RE-DECIDED HERE. Two existing answers are read, in the
+ * repo's own order of authority:
+ *   1. `negotiation_threads.fields.language` - the durable decision. A shop
+ *      that SAID they do not speak the local language gets English, whatever
+ *      the hunt was opened in.
+ *   2. `threadLanguageMode` - the language the thread was OPENED in, which is
+ *      also proof the traveller's plan was entitled to it at the time.
+ * Anything unknown, unreadable, untranslatable OR SLOW degrades to the English
+ * reply: a shop holding a ringing phone must never go unanswered over a
+ * translation. The ceiling is the point - see `MISSED_CALL_LANG_BUDGET_MS`.
+ */
+export async function missedCallText(args: {
+  email: string;
+  toDigits: string;
+  /** Injectable so tests can pin the variant. */
+  pick?: () => number;
+  /** Injectable so tests need not wait out the real ceiling. */
+  budgetMs?: number;
+}): Promise<MissedCallText> {
+  const english = missedCallReply(args.pick);
+  const plain = (reason: string): MissedCallText => ({
+    text: english,
+    english,
+    localized: false,
+    reason,
+  });
+  const budget = Math.max(1, args.budgetMs ?? MISSED_CALL_LANG_BUDGET_MS);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    // `resolveLocalMissedCall` never rejects, so the loser of this race can
+    // never surface as an unhandled rejection after the timer has answered.
+    return await Promise.race([
+      resolveLocalMissedCall(args, english, plain),
+      new Promise<MissedCallText>((resolve) => {
+        timer = setTimeout(() => resolve(plain("timeout")), budget);
+      }),
+    ]);
+  } catch {
+    return plain("threw");
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/** The unbounded body of `missedCallText`. Only ever run inside its race. */
+async function resolveLocalMissedCall(
+  args: { email: string; toDigits: string },
+  english: string,
+  plain: (reason: string) => MissedCallText
+): Promise<MissedCallText> {
+  try {
+    const { countryForShop } = await import("../copy/region");
+    const region = countryForShop(args.toDigits) || undefined;
+    if (!region) return plain("no-region");
+
+    const { threadLanguageMode, threadLanguageFromStored, threadWritesEnglish } = await import(
+      "./thread-language"
+    );
+    const { sbSelectStrict } = await import("../runtime-config");
+    const { numberFilter } = await import("./phone-key");
+    // sbSelectStrict, not sbSelect: an unreadable store must read as "unknown"
+    // (-> English), never as "no decision was ever taken" (-> local).
+    const decided = await sbSelectStrict<{ fields: { language?: unknown } | null }>(
+      "negotiation_threads",
+      `select=fields&user_email=eq.${encodeURIComponent(
+        args.email
+      )}&order=updated_at.desc&limit=1${numberFilter("to_number", args.toDigits)}`
+    ).catch(() => ({ error: "unreadable" }) as const);
+    if ("rows" in decided) {
+      const stored = threadLanguageFromStored(decided.rows[0]?.fields?.language);
+      if (threadWritesEnglish(stored)) return plain("thread-english");
+    }
+    // The opener decides the rest. `null` (no stamp, or an unreadable store)
+    // means we do not know - and we do not guess.
+    const opened = await threadLanguageMode(args.email, args.toDigits).catch(() => null);
+    if (opened !== true) return plain("thread-english");
+
+    const { localizeMessage } = await import("../agents");
+    const localized = await localizeMessage(english, region, undefined, true, {
+      // Mid-conversation by definition: this shop has been messaged already.
+      greet: false,
+    });
+    const out = (localized.text ?? "").trim();
+    if (!localized.localized || !out || out === english) {
+      return plain(localized.reason ?? "not-localized");
+    }
+    return { text: out, english, localized: true, reason: "localized" };
+  } catch {
+    return plain("threw");
+  }
+}
+
 export interface CallHandled {
   /** "not-ours" is the common case and is not a failure. */
   outcome: "answered" | "not-ours" | "ignored" | "no-user";
@@ -121,6 +253,8 @@ export async function handleCallEvent(args: {
   data: unknown;
   /** Injected in tests. */
   now?: number;
+  /** Injected in tests - the real ceiling is `MISSED_CALL_LANG_BUDGET_MS`. */
+  langBudgetMs?: number;
 }): Promise<CallHandled> {
   const { email, data } = args;
   if (!email) return { outcome: "no-user" };
@@ -187,15 +321,26 @@ export async function handleCallEvent(args: {
   //    atomic claim -> sendFromUser (reply lane, fast) -> release on failure
   //    -> durable outbound row on success.
   let detail = "queued";
+  let reply: MissedCallText = { text: "", english: "", localized: false, reason: "unset" };
   try {
     const { guardOutbound, claimForSend, releaseSendClaim, afterSend } = await import("../wa-guard");
+    // ...IN THIS THREAD'S LANGUAGE (audit A5). Nothing between here and the
+    // wire translates - guardOutbound only strips formatting, humanizes and
+    // paces - so an English literal here IS what a Thai shop reads. Hard-capped
+    // at MISSED_CALL_LANG_BUDGET_MS: the rest of this webhook's budget belongs
+    // to the send, and an expired translation still answers, in English.
+    reply = await missedCallText({ email, toDigits: known, budgetMs: args.langBudgetMs });
     const verdict = await guardOutbound({
       senderKey: email,
       toDigits: known,
-      text: missedCallReply(),
+      text: reply.text,
       auto: true,
       queueIfBlocked: true,
-      meta: { kind: "auto-answer", reason: "missed call" },
+      meta: {
+        kind: "auto-answer",
+        reason: "missed call",
+        ...(reply.localized ? { englishGloss: reply.english } : {}),
+      },
     });
     if (!verdict.allow) {
       detail = `held: ${verdict.reason ?? "guard"}`;
@@ -221,7 +366,14 @@ export async function handleCallEvent(args: {
               body: verdict.text,
               type: "text",
               direction: "outbound",
-              raw: { sender: email, kind: "auto-answer", reason: "missed call", auto: true },
+              raw: {
+                sender: email,
+                kind: "auto-answer",
+                reason: "missed call",
+                auto: true,
+                // What the traveller reads when the wire text is not English.
+                ...(reply.localized ? { englishGloss: reply.english } : {}),
+              },
             },
           ]).catch(() => {});
           detail = "sent";
@@ -241,7 +393,13 @@ export async function handleCallEvent(args: {
         kind: "inbound-call",
         user_email: email,
         vendor_name: known,
-        detail: JSON.stringify({ video: frame.isVideo, reply: detail }),
+        detail: JSON.stringify({
+          video: frame.isVideo,
+          reply: detail,
+          // Honest about WHICH language answered, and why.
+          lang: reply.localized ? "local" : "english",
+          langReason: reply.reason,
+        }),
       },
     ]);
   } catch {

@@ -279,3 +279,83 @@ export function pickRival(offers: RivalOffer[], args: RivalArgs): RivalPick | nu
 export function pickCheapestRival(offers: RivalOffer[], args: RivalArgs): number | undefined {
   return pickRival(offers, args)?.pricePerDay;
 }
+
+/**
+ * THE SEARCH A THREAD BELONGS TO (audit A6).
+ *
+ * `currentSession` above answers "which hunt is the traveller running NOW",
+ * and that is the right question for a fresh tap. It is the wrong question for
+ * an inbound reply, because a shop answers on its own clock: the traveller can
+ * start a second hunt in another city while the first one's shops are still
+ * typing.
+ *
+ * The reply path used to ask this in two steps - the thread's earliest stamped
+ * `offers` row, then newest-first - and the second step is where round ONE
+ * lands, because round one is precisely the turn with no offer row yet. So the
+ * first reply of a Krabi thread arriving after a Canggu hunt began was written
+ * with the CANGGU search id, joined the Canggu rival pool, and a Krabi price
+ * could be cited at a Canggu shop as leverage (pickRival scopes by exact
+ * searchId, so a wrong id is not filtered out - it is silently believed).
+ *
+ * The answer was always in the data: the hunt that was LIVE when we first
+ * messaged this shop. Ordered by authority:
+ *   1. an earlier round of this thread that is already stamped;
+ *   2. the newest hunt that started at or before this thread's first outbound;
+ *   3. newest-first, only when there is no first outbound to anchor on (an
+ *      unknown start time degrades to exactly the old behaviour).
+ * A thread whose first contact predates every surviving `searches` row returns
+ * null - unstamped, which `pickRival`'s exact-id scoping treats as "not a
+ * rival", rather than stamped with a hunt we know it does not belong to.
+ */
+export async function searchIdForThread(args: {
+  userEmail: string;
+  vendorId?: string | null;
+  /** The shop's WhatsApp digits - the thread's own key. */
+  toDigits?: string | null;
+}): Promise<number | null> {
+  const email = args.userEmail;
+  if (!email) return null;
+  const enc = encodeURIComponent(email);
+
+  if (args.vendorId) {
+    const prior = await sbSelect<{ search_id: number | null }>(
+      "offers",
+      `select=search_id&user_email=eq.${enc}&vendor_id=eq.${encodeURIComponent(
+        args.vendorId
+      )}&search_id=not.is.null&order=created_at.asc&limit=1`
+    ).catch(() => []);
+    const stamped = prior[0]?.search_id ?? null;
+    if (stamped != null) return stamped;
+  }
+
+  // ROUND ONE: anchor on when this thread STARTED, not on which hunt is newest.
+  let anchor: string | null = null;
+  if (args.toDigits) {
+    const { numberFilter } = await import("./wa/phone-key");
+    const first = await sbSelect<{ received_at: string | null }>(
+      "whatsapp_messages",
+      `select=received_at&direction=eq.outbound&raw->>sender=eq.${enc}&order=received_at.asc&limit=1${numberFilter(
+        "to_number",
+        args.toDigits
+      )}`
+    ).catch(() => []);
+    anchor = first[0]?.received_at ?? null;
+  }
+  // pgTimestamp, never raw interpolation: PostgREST hands timestamps back as
+  // `...+00:00`, and a raw `+` decodes to a space and 400s the read - which
+  // would drop the bound and put the newest-hunt bug straight back.
+  let bound = "";
+  if (anchor) {
+    const { pgTimestamp } = await import("./runtime-config");
+    try {
+      bound = `&created_at=lte.${pgTimestamp(anchor)}`;
+    } catch {
+      bound = "";
+    }
+  }
+  const rows = await sbSelect<{ id: number }>(
+    "searches",
+    `select=id&user_email=eq.${enc}${bound}&order=created_at.desc&limit=1`
+  ).catch(() => []);
+  return rows[0]?.id ?? null;
+}
