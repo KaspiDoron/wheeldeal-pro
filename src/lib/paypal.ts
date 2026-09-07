@@ -25,6 +25,38 @@ async function paypalBase(): Promise<string> {
     : "https://api-m.paypal.com";
 }
 
+/**
+ * HARD CEILING ON EVERY PAYPAL CALL, AND NO THROW EVER ESCAPES ONE.
+ *
+ * The OAuth token call and the subscription GET were bare `await fetch(...)`:
+ * no signal, no try/catch (audit M21). `confirmPaypalSubscription` awaits the
+ * subscription read without a `.catch()`, and both /api/billing/confirm and
+ * /api/subscriptions/paypal-success await THAT bare - so a DNS blip or an
+ * ECONNRESET right after the traveller was charged escaped as a raw 500,
+ * losing the designed "Nothing was charged twice" copy and the redirect path's
+ * pending fallback. Without a signal the same call could instead run to
+ * undici's ~300s default while Cloud Run kills the request at 90.
+ *
+ * So one helper carries the whole discipline - the same one whatsapp.ts and
+ * waba/send.ts already use - and answers `null` for "no reply", which every
+ * caller here already had to handle for a non-ok response.
+ */
+const PAYPAL_TIMEOUT_MS = 10_000;
+
+async function paypalFetch(url: string, init: RequestInit): Promise<Response | null> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), PAYPAL_TIMEOUT_MS);
+  (timer as { unref?: () => void }).unref?.();
+  try {
+    return await fetch(url, { ...init, signal: ctrl.signal, cache: "no-store" });
+  } catch {
+    // Aborted, refused, DNS - all the same answer: PayPal did not reply.
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function paypalConfigured(): Promise<boolean> {
   const [id, secret] = await Promise.all([
     getConfig("PAYPAL_CLIENT_ID"),
@@ -46,15 +78,17 @@ async function paypalToken(): Promise<string | null> {
   if (!id || !secret) return null;
   const base = await paypalBase();
   const basic = Buffer.from(`${id.trim()}:${secret.trim()}`).toString("base64");
-  const res = await fetch(`${base}/v1/oauth2/token`, {
+  // NO RETRY HERE, deliberately: a retried token call against a slow PayPal
+  // multiplies the confirm latency the traveller is already staring at.
+  const res = await paypalFetch(`${base}/v1/oauth2/token`, {
     method: "POST",
     headers: {
       Authorization: `Basic ${basic}`,
       "Content-Type": "application/x-www-form-urlencoded",
     },
     body: "grant_type=client_credentials",
-    cache: "no-store",
   });
+  if (!res) return null;
   const data = await res.json().catch(() => ({}));
   if (!res.ok || !data.access_token) return null;
   tokenCache = {
@@ -92,7 +126,7 @@ export async function createPaypalCheckout(
 
   const base = await paypalBase();
   try {
-    const res = await fetch(`${base}/v1/billing/subscriptions`, {
+    const res = await paypalFetch(`${base}/v1/billing/subscriptions`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${token}`,
@@ -119,8 +153,10 @@ export async function createPaypalCheckout(
           cancel_url: `${origin}/?billing=cancelled`,
         },
       }),
-      cache: "no-store",
     });
+    // Same shape the catch below already produced for a network throw - no
+    // reply is a network error, whether it was refused or simply too slow.
+    if (!res) return { configured: true, error: "network error" };
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       const detail =
@@ -177,11 +213,10 @@ export async function listPaypalWebhooks(): Promise<PaypalWebhookInfo[] | null> 
   if (!token) return null;
   const base = await paypalBase();
   try {
-    const res = await fetch(`${base}/v1/notifications/webhooks`, {
+    const res = await paypalFetch(`${base}/v1/notifications/webhooks`, {
       headers: { Authorization: `Bearer ${token}` },
-      cache: "no-store",
     });
-    if (!res.ok) return null;
+    if (!res || !res.ok) return null;
     const d = (await res.json().catch(() => null)) as {
       webhooks?: { id?: string; url?: string; event_types?: { name?: string }[] }[];
     } | null;
@@ -206,15 +241,15 @@ export async function createPaypalWebhook(
   if (!token) return { error: "PayPal credentials rejected." };
   const base = await paypalBase();
   try {
-    const res = await fetch(`${base}/v1/notifications/webhooks`, {
+    const res = await paypalFetch(`${base}/v1/notifications/webhooks`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({
         url,
         event_types: PAYPAL_WEBHOOK_EVENTS.map((name) => ({ name })),
       }),
-      cache: "no-store",
     });
+    if (!res) return { error: "network error" };
     const d = await res.json().catch(() => ({}) as Record<string, unknown>);
     if (!res.ok || !d?.id) {
       const detail =
@@ -241,7 +276,7 @@ export async function patchPaypalWebhook(id: string, url: string): Promise<boole
   if (!token) return false;
   const base = await paypalBase();
   try {
-    const res = await fetch(`${base}/v1/notifications/webhooks/${encodeURIComponent(wid)}`, {
+    const res = await paypalFetch(`${base}/v1/notifications/webhooks/${encodeURIComponent(wid)}`, {
       method: "PATCH",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify([
@@ -252,9 +287,8 @@ export async function patchPaypalWebhook(id: string, url: string): Promise<boole
           value: PAYPAL_WEBHOOK_EVENTS.map((name) => ({ name })),
         },
       ]),
-      cache: "no-store",
     });
-    return res.ok;
+    return Boolean(res?.ok);
   } catch {
     return false;
   }
@@ -283,7 +317,7 @@ export async function verifyPaypalWebhook(
   }
   const base = await paypalBase();
   try {
-    const res = await fetch(`${base}/v1/notifications/verify-webhook-signature`, {
+    const res = await paypalFetch(`${base}/v1/notifications/verify-webhook-signature`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -295,8 +329,8 @@ export async function verifyPaypalWebhook(
         webhook_id: String(webhookId).trim(),
         webhook_event: event,
       }),
-      cache: "no-store",
     });
+    if (!res) return false;
     const data = await res.json().catch(() => ({}));
     return data?.verification_status === "SUCCESS";
   } catch {
@@ -345,11 +379,13 @@ export async function fetchPaypalSubscription(
   const token = await paypalToken();
   if (!token) return null;
   const base = await paypalBase();
-  const res = await fetch(`${base}/v1/billing/subscriptions/${encodeURIComponent(id)}`, {
+  const res = await paypalFetch(`${base}/v1/billing/subscriptions/${encodeURIComponent(id)}`, {
     headers: { Authorization: `Bearer ${token}` },
-    cache: "no-store",
   });
-  if (!res.ok) return null;
+  // NULL IS THE HONEST ANSWER FOR "PAYPAL DID NOT REPLY", and it is the answer
+  // confirmPaypalSubscription turns into its 502 with the copy that stops a
+  // second checkout. A throw here reached the traveller as a raw 500 instead.
+  if (!res || !res.ok) return null;
   const d = (await res.json().catch(() => null)) as {
     id?: string;
     status?: string;
@@ -385,12 +421,17 @@ export async function cancelPaypalSubscription(
   if (!token) return false;
   const base = await paypalBase();
   try {
-    const res = await fetch(`${base}/v1/billing/subscriptions/${encodeURIComponent(id)}/cancel`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ reason: reason.slice(0, 127) }),
-      cache: "no-store",
-    });
+    const res = await paypalFetch(
+      `${base}/v1/billing/subscriptions/${encodeURIComponent(id)}/cancel`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: reason.slice(0, 127) }),
+      }
+    );
+    // No reply is not a cancellation - say so, so the ledger records a
+    // traveller who may still be billed twice.
+    if (!res) return false;
     // 204 is the success shape. 422 usually means it is already cancelled,
     // which is the state we wanted - treat it as done rather than as a failure
     // that would make a retry loop forever.

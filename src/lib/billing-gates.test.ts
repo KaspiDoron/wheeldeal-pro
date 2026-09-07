@@ -35,27 +35,63 @@ describe("a plan switch cancels the subscription it replaces", () => {
   it("prior activations for THIS account are looked up and cancelled", () => {
     expect(confirm).toMatch(/activationsFor\(email\)/);
     expect(confirm).toMatch(/cancelPaypalSubscription\(/);
-    // Only ids from this account's own trail - never anything a caller named.
-    expect(confirm).toMatch(/\.filter\(\(id\) => id !== sub\.id\)/);
+    // Only ids from this account's own trail - never anything a caller named -
+    // and never the subscription just activated (F043 moved the loop into
+    // `supersedePriorSubscriptions`, so the new id arrives as `newId`).
+    expect(confirm).toMatch(/supersedePriorSubscriptions\(email, sub\.id\)/);
+    expect(confirm).toMatch(/\.filter\(\(id\) => id !== newId\)/);
   });
 
   it("only a still-LIVE subscription is cancelled", () => {
-    expect(confirm).toMatch(/if \(!old \|\| !subscriptionEntitles\(old\.status\)\) continue;/);
+    // Audit F043 moved the branch from a bare `continue` to a recorded outcome
+    // (the row is now written BEFORE the call and patched with what PayPal
+    // said), so the shape changed - the guarantee did not: no cancel is issued
+    // for a subscription PayPal no longer reports as entitling.
+    expect(confirm).toMatch(/if \(!old \|\| !subscriptionEntitles\(old\.status\)\) \{/);
+    const branch = confirm.slice(
+      confirm.indexOf("if (!old || !subscriptionEntitles(old.status)) {"),
+      confirm.indexOf("} else {")
+    );
+    expect(branch.length).toBeGreaterThan(0);
+    expect(branch).not.toMatch(/cancelPaypalSubscription\(/);
   });
 
   it("the cleanup runs AFTER the grant, and cannot fail the request", () => {
     const grantIdx = confirm.indexOf("const granted = await setPlan(email, tier)");
-    const cleanupIdx = confirm.indexOf("activationsFor(email)");
+    const cleanupIdx = confirm.indexOf("supersedePriorSubscriptions(email, sub.id)");
     expect(grantIdx).toBeGreaterThan(-1);
     // A cancel that ran first and then failed to grant would leave someone
     // paying for nothing.
     expect(cleanupIdx).toBeGreaterThan(grantIdx);
     expect(confirm).toMatch(/if \(granted\) \{/);
+    // Only ids from this account's own activation trail are ever cancelled.
+    expect(confirm).toMatch(/activationsFor\(email\)/);
+  });
+
+  it("the cleanup is BOUNDED - a stalled PayPal cannot kill the request", () => {
+    // It awaited two timeout-free PayPal calls per prior activation on the
+    // traveller's own return-from-checkout request (audit F043).
+    expect(confirm).toMatch(/finishBeforeResponse\(\s*"paypal-supersede"/);
+    expect(confirm).toMatch(/SUPERSEDE_BUDGET_MS/);
+    expect(confirm).toMatch(/if \(Date\.now\(\) >= deadline\) break;/);
+    // And every PayPal call itself has a ceiling and swallows no throw.
+    const pp = readCode("src/lib/paypal.ts");
+    expect(pp).toMatch(/const PAYPAL_TIMEOUT_MS = /);
+    expect(pp).toMatch(/ctrl\.abort\(\), PAYPAL_TIMEOUT_MS/);
+    // No bare fetch is left on any PayPal path.
+    expect(pp.replace(/return await fetch\(url, \{ \.\.\.init[^\n]*\n/, "")).not.toMatch(
+      /await fetch\(/
+    );
   });
 
   it("the outcome is recorded either way - a failed cancel is a double charge", () => {
     expect(confirm).toMatch(/SUPERSEDED_KIND/);
     expect(confirm).toMatch(/cancelled,/);
+    // Written BEFORE the call that might never answer, with an honest unknown,
+    // and patched in place afterwards - a race that loses cannot lose the row.
+    expect(confirm).toMatch(/sbInsertReturning<\{ id\?: number \| string \}>/);
+    expect(confirm).toMatch(/\{ cancelled: null, outcome: "pending" \}/);
+    expect(confirm).toMatch(/sbUpdateReturning\(/);
     const link = readCode("src/lib/billing/subscription-link.ts");
     expect(link).toMatch(/SUPERSEDED_KIND = "subscription-superseded"/);
   });
@@ -138,6 +174,20 @@ describe("both purchase paths pass the same two gates", () => {
   ])("%s carves out flagged testers, and only them", (_name, code) => {
     // Otherwise a beta tester could not exercise the paid tiers at all.
     expect(code).toMatch(/isTestUser/);
+  });
+
+  it("and the carve-out means the SAME thing on both - never a live button", () => {
+    // AUDIT F199. A bare /isTestUser/ match cannot tell a sandbox grant from a
+    // gate exemption, and that is exactly how the two drifted: checkout read it
+    // as "free, no charge" while this route read it as "skip the warm-up" and
+    // then handed the same tester live plan ids. The executed proof lives in
+    // src/app/api/subscriptions/paypal-config/test-mode-sandbox.test.ts; this
+    // pins that the one predicate still decides what is handed back.
+    expect(checkout).toMatch(/sandbox: true/);
+    expect(config).toMatch(/const sandbox = await isTestUser\(session\.email\)/);
+    expect(config).toMatch(/clientId: sandbox\s*\n?\s*\? null/);
+    expect(config).toMatch(/pro: sandbox \? null :/);
+    expect(config).toMatch(/ultra: sandbox \? null :/);
   });
 
   it("the gate sits on the CONFIG route, before a payment can exist", () => {
