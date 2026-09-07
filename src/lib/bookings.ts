@@ -18,7 +18,7 @@
 // read-then-write, and only the caller whose PATCH actually changed the row
 // writes the history event.
 
-import { sbUpdateReturning } from "./runtime-config";
+import { sbSelectStrict, sbUpdateReturning } from "./runtime-config";
 import { noteAgentEvent } from "./events";
 import { digitsOnly } from "./phone";
 
@@ -76,10 +76,21 @@ function bookingFilter(id: number, userEmail: string, to: BookingStatus): string
   return `id=eq.${id}&user_email=eq.${encodeURIComponent(userEmail)}&or=(status.is.null,status.in.(${from.join(",")}))`;
 }
 
+/** Why a transition did NOT happen. `refused` is the forward-only filter (or a
+ *  row that is not this traveller's) - an honest no-op. `unreadable` means the
+ *  store never confirmed the write, so nothing may be reported as done. The
+ *  two used to be the same empty array, which is how a store outage rendered
+ *  as "Trip completed" on Trips (audit F054). */
+export type BookingRefusal = "refused" | "unreadable";
+
 export interface BookingAdvance {
   advanced: boolean;
   /** The row after the transition, when it happened. */
   row?: { id: number; status: string; vendor_id: string | null; vendor_name: string | null; thread_key: string | null };
+  /** Set only when `advanced` is false. */
+  reason?: BookingRefusal;
+  /** The status the store actually holds, when the refusal could be read back. */
+  status?: string | null;
 }
 
 /**
@@ -118,7 +129,23 @@ export async function advanceBooking(
     );
   }
   const row = rows[0];
-  if (!row) return { advanced: false };
+  if (!row) {
+    // NOTHING CAME BACK - and that is two opposite facts wearing one shape.
+    // sbUpdateReturning answers [] both for "the filter refused it" (already
+    // at/past this status, or not this traveller's row) and for "PostgREST
+    // never answered", so reporting a bare {advanced:false} let the Trips card
+    // paint an unpersisted status as done. One STRICT read - only on this
+    // path, never on the happy one - separates them: an unreadable store is
+    // `unreadable`, a row that reads back is a genuine refusal and carries the
+    // status the store really holds. A not-yet-migrated table also fails
+    // closed: the write cannot be confirmed, so it is not claimed.
+    const read = await sbSelectStrict<{ status: string | null }>(
+      "bookings",
+      `select=status&id=eq.${id}&user_email=eq.${encodeURIComponent(userEmail)}&limit=1`
+    );
+    if ("error" in read) return { advanced: false, reason: "unreadable" };
+    return { advanced: false, reason: "refused", status: read.rows[0]?.status ?? null };
+  }
 
   const toDigits = row.thread_key ? row.thread_key.slice(row.thread_key.lastIndexOf(":") + 1) : "";
   await noteAgentEvent({

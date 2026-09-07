@@ -48,3 +48,27 @@ export function formatDateRange(
   const b = formatRentalDate(end);
   return b && b !== a ? `${a} - ${b}` : a;
 }
+
+/**
+ * "20 Sep · 10:00" from a SHOP-LOCAL wall clock (audit F108).
+ *
+ * `bookings.scheduled_at` is the shop's own wall clock - the booking sheet
+ * posts "2026-09-20T10:00:00" with no offset by design, and `scheduled_tz` says
+ * "shop-local" - but the column is `timestamptz`, so PostgREST hands it back
+ * wearing a "+00:00" tail it never earned. Feeding that to `new Date(...)` and
+ * a locale format re-reads the tail in the DEVICE's zone, which moved a Bangkok
+ * traveller's 10:00 pickup to 17:00 on the profile card while the Trips card
+ * printed the same row raw. Two screens disagreeing about one booking, and one
+ * of them sending the traveller to the shop seven hours late.
+ *
+ * So: read the digits, drop any offset tail, and never construct a Date for the
+ * time - the same reason formatRentalDate splits the date parts by hand. "" for
+ * anything that is not a full date AND time, so a caller can `&&` it away.
+ */
+export function formatShopWallClock(at: string | null | undefined): string {
+  const m = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}):(\d{2})/.exec((at ?? "").trim());
+  if (!m) return "";
+  const day = formatRentalDate(m[1]);
+  if (!day) return "";
+  return `${day} · ${m[2]}:${m[3]}`;
+}

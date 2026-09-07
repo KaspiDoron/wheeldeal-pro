@@ -9,6 +9,7 @@ import { LoadingDots } from "../LoadingDots";
 import { useI18n } from "@/lib/i18n";
 import { MessageBubble, type ThreadMsg } from "../MessageBubble";
 import { reconcileMessages, useFollowNewMessages } from "../useTranscriptScroll";
+import { writeAck } from "@/lib/client/write-ack";
 
 type Msg = ThreadMsg;
 
@@ -43,6 +44,8 @@ export function TranscriptSheet({
   // Last-good stays on screen; the chip says it is not live.
   const [stale, setStale] = useState(false);
   const [switching, setSwitching] = useState(false);
+  // Said out loud when the takeover write did not persist (audit F017).
+  const [takeoverNote, setTakeoverNote] = useState<string | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
 
@@ -104,14 +107,21 @@ export function TranscriptSheet({
 
   async function switchTakeover(mode: "takeover" | "handback") {
     setSwitching(true);
+    setTakeoverNote(null);
     try {
       const res = await fetch("/api/thread/takeover", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ vendorId, mode }),
       });
-      const d = await res.json();
-      if (d.ok !== undefined) setTakeover(mode === "takeover");
+      const d = await res.json().catch(() => ({}));
+      // ONLY A CONFIRMED WRITE FLIPS THE SWITCH (audit F017) - see
+      // lib/client/write-ack. `{ ok: false }` is the route being honest about a
+      // marker that never landed, not a success.
+      if (writeAck(res.ok, d)) setTakeover(mode === "takeover");
+      else setTakeoverNote(t("Could not save your choice - try again."));
+    } catch {
+      setTakeoverNote(t("Could not save your choice - try again."));
     } finally {
       setSwitching(false);
     }
@@ -160,6 +170,9 @@ export function TranscriptSheet({
             {takeover
               ? t("You have the wheel - Will stays silent on this chat until you hand it back.")
               : t("Will is handling this chat. Take over any time - he'll stand down instantly.")}
+            {takeoverNote && (
+              <span className="mt-1 block font-extrabold text-warn">{takeoverNote}</span>
+            )}
           </div>
           <button
             onClick={() => switchTakeover(takeover ? "handback" : "takeover")}

@@ -19,6 +19,7 @@ import { MessageBubble, type ThreadMsg } from "./MessageBubble";
 import { reconcileMessages, useFollowNewMessages } from "./useTranscriptScroll";
 import type { Vendor, StructuredRFQ } from "@/lib/types";
 import { agentBusyLabel } from "@/lib/client/agent-busy";
+import { writeAck } from "@/lib/client/write-ack";
 import { depositSummary } from "@/lib/deposit";
 import { moneyLocal } from "@/lib/currency";
 
@@ -80,6 +81,9 @@ export function ThreadDashboard({
   const [delivery, setDelivery] = useState<Delivery | null>(null);
   const [takeover, setTakeover] = useState<boolean | null>(null);
   const [switching, setSwitching] = useState(false);
+  // Said out loud when the takeover write did not persist (audit F017), so the
+  // traveller can tap again instead of trusting a switch that never landed.
+  const [takeoverNote, setTakeoverNote] = useState<string | null>(null);
   const [gallery, setGallery] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
@@ -170,14 +174,23 @@ export function ThreadDashboard({
 
   async function switchTakeover(mode: "takeover" | "handback") {
     setSwitching(true);
+    setTakeoverNote(null);
     try {
       const res = await fetch("/api/thread/takeover", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ vendorId: vendor.id, mode }),
       });
-      const d = await res.json();
-      if (d.ok !== undefined) setTakeover(mode === "takeover");
+      const d = await res.json().catch(() => ({}));
+      // ONLY A CONFIRMED WRITE FLIPS THE SWITCH (audit F017) - see
+      // lib/client/write-ack. The route answers 200 { ok: false } when the
+      // takeover marker did not land, and merely testing that an ok key was
+      // PRESENT read that as success - so the panel promised silence over a
+      // thread the agent was still answering.
+      if (writeAck(res.ok, d)) setTakeover(mode === "takeover");
+      else setTakeoverNote(t("Could not save your choice - try again."));
+    } catch {
+      setTakeoverNote(t("Could not save your choice - try again."));
     } finally {
       setSwitching(false);
     }
@@ -379,6 +392,9 @@ export function ThreadDashboard({
               {takeover
                 ? t("You have the wheel - Will stays silent on this chat until you hand it back.")
                 : t("Will is handling this chat. Take over any time - he'll stand down instantly.")}
+              {takeoverNote && (
+                <span className="mt-1 block font-extrabold text-warn">{takeoverNote}</span>
+              )}
             </div>
             <button
               onClick={() => switchTakeover(takeover ? "handback" : "takeover")}

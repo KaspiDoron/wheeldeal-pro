@@ -11,7 +11,7 @@ import { PlaceAutocomplete } from "./PlaceAutocomplete";
 import { LoadingDots } from "./LoadingDots";
 import { digitsOnly } from "@/lib/phone";
 import { useI18n } from "@/lib/i18n";
-import { localDay, addDays, deviceTimeZone } from "@/lib/rental-window";
+import { localDay, addDays, deviceTimeZone, pickupDefault, resolveWindow } from "@/lib/rental-window";
 
 type Step = "verify" | "schedule" | "confirmed";
 
@@ -141,12 +141,19 @@ export function BookingSheet({
   // simply never used it, and never sent its zone either - so the server fell
   // back to UTC and reached the same wrong answer independently.
   const timeZone = deviceTimeZone();
-  const today = localDay(Date.now(), timeZone);
-  const tomorrow = localDay(Date.now() + 86400000, timeZone);
+  const nowMs = Date.now();
+  const today = localDay(nowMs, timeZone);
   const freePlan = plan === "free";
   const minDate = today;
-  const maxDate = freePlan ? today : undefined;
-  const defaultDate = freePlan ? today : tomorrow;
+  // THE WINDOW THE SERVER WILL ENFORCE, asked once. The picker used to leave
+  // `max` open for paid plans, so a traveller could choose a day past the
+  // plan's ceiling and get a bare 400 from a control that said it was allowed.
+  const planWindow = resolveWindow({ plan, requested: rfq?.startDate, nowMs, timeZone });
+  const maxDate = planWindow.maxStartDate;
+  // SEEDED FROM THE RFQ (audit F107): the rental start the traveller picked and
+  // the openers stated to every shop, clamped into this plan's window - not
+  // "tomorrow" invented from the clock.
+  const defaultDate = pickupDefault({ rfqStartDate: rfq?.startDate, plan, nowMs, timeZone });
 
   const pickupDate = date || defaultDate;
   const durationDays = rfq?.durationDays ?? 1;

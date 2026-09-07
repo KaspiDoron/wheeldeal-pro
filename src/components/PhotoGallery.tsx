@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { lockBodyScroll } from "@/lib/scroll-lock";
 import { useI18n } from "@/lib/i18n";
+import { scrollToSlide, slideIndexFromScroll, trackDirection, isRtlDirection } from "@/lib/client/carousel-rtl";
 
 // Full-screen swipeable photo carousel (Google Maps place photos). Snap
 // scrolling + arrows + a live counter, and it silently drops any photo that
@@ -48,12 +49,15 @@ export function PhotoGallery({
 
   const visible = photos.filter((_, i) => ok[i]);
 
+  // `dir` here is +1 / -1 in READING order, so the arrows keep meaning "the
+  // next photo" in Hebrew and Arabic too. The sign of the scroll offset is the
+  // track's business, not the caller's (audit F121).
   function go(dir: number) {
     const track = trackRef.current;
     if (!track) return;
     const next = Math.max(0, Math.min(visible.length - 1, idx + dir));
     setIdx(next);
-    track.scrollTo({ left: next * track.clientWidth, behavior: "smooth" });
+    scrollToSlide(track, next, isRtlDirection(trackDirection(track)));
   }
 
   if (!mounted) return null;
@@ -91,8 +95,15 @@ export function PhotoGallery({
         <div
           ref={trackRef}
           onScroll={(e) => {
-            const w = e.currentTarget.clientWidth || 1;
-            setIdx(Math.round(e.currentTarget.scrollLeft / w));
+            // An RTL scroll port reports the same distance with the opposite
+            // sign, which used to drive idx to -1, -2 and light no dot at all.
+            setIdx(
+              slideIndexFromScroll(
+                e.currentTarget.scrollLeft,
+                e.currentTarget.clientWidth,
+                visible.length
+              )
+            );
           }}
           className="no-scrollbar flex h-full w-full snap-x snap-mandatory overflow-x-auto"
         >
@@ -125,19 +136,22 @@ export function PhotoGallery({
 
         {visible.length > 1 && (
           <>
+            {/* Logical offsets and a mirrored glyph: `start`/`end` follow the
+                reading direction, and `.rtl-flip` (globals.css) turns the
+                chevrons round the way RequestBuilder's wizard arrows do. */}
             <button
               onClick={() => go(-1)}
               aria-label={t("Previous")}
-              className="btn absolute left-2 top-1/2 -translate-y-1/2 rounded-full bg-white/20 px-3 py-2 text-lg font-extrabold text-white"
+              className="btn absolute start-2 top-1/2 -translate-y-1/2 rounded-full bg-white/20 px-3 py-2 text-lg font-extrabold text-white"
             >
-              ‹
+              <span className="rtl-flip inline-block" aria-hidden>‹</span>
             </button>
             <button
               onClick={() => go(1)}
               aria-label={t("Next")}
-              className="btn absolute right-2 top-1/2 -translate-y-1/2 rounded-full bg-white/20 px-3 py-2 text-lg font-extrabold text-white"
+              className="btn absolute end-2 top-1/2 -translate-y-1/2 rounded-full bg-white/20 px-3 py-2 text-lg font-extrabold text-white"
             >
-              ›
+              <span className="rtl-flip inline-block" aria-hidden>›</span>
             </button>
           </>
         )}

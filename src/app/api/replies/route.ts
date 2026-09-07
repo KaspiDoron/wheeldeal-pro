@@ -8,6 +8,7 @@ import { searchSessionTtlMs } from "@/lib/session-life-config";
 import { languageSwitchNotice } from "@/lib/wa/thread-language";
 import { termsComplete } from "@/lib/deal-terms";
 import { effectivePriceFor } from "@/lib/effective-price";
+import { attributablePrices } from "@/lib/media/reading";
 
 // A live poll - never statically cached, or new shop offers stop popping in.
 export const dynamic = "force-dynamic";
@@ -298,10 +299,18 @@ export async function GET(req: Request) {
     const inboundDesc = await sbSelect<{
       from_number: string;
       body: string;
-      reading?: { prices?: import("@/lib/media/reading").ReadPrice[] } | null;
+      reading?: {
+        prices?: import("@/lib/media/reading").ReadPrice[];
+        forwardedSource?: boolean;
+      } | null;
+      /** `raw.forwarded` as a jsonb SCALAR (audit F151) - never the whole raw
+       *  blob, which this route's own egress note forbids. Present = the shop
+       *  passed the content on; ingest writes `{ score: undefined }` when the
+       *  score is 0, so the KEY is the signal, not its contents. */
+      forwarded?: string | null;
     }>(
       "whatsapp_messages",
-      `select=from_number,body,reading:raw->reading&direction=eq.inbound&raw->>receiver=eq.${encodeURIComponent(
+      `select=from_number,body,reading:raw->reading,forwarded:raw->>forwarded&direction=eq.inbound&raw->>receiver=eq.${encodeURIComponent(
         session.email
       )}${
         sinceMs > 0
@@ -325,10 +334,18 @@ export async function GET(req: Request) {
         arr.push(m.body);
         bodiesByNumber.set(key, arr);
       }
-      if (Array.isArray(m.reading?.prices) && m.reading.prices.length) {
+      // A FORWARDED BOARD IS NOT THIS SHOP'S MENU (audit F151). The reading
+      // carries its own provenance since the stamp learned to write it; the
+      // row-level `forwarded` key covers rows stamped before that. Either one
+      // withholds the number - the transcript still shows the photo, because
+      // the board really was sent.
+      const own = attributablePrices(
+        m.forwarded != null ? { ...m.reading, forwardedSource: true } : m.reading
+      );
+      if (own.length) {
         const arr = readingsByNumber.get(key) ?? [];
         // Newest photo wins per vehicle label later; keep arrival order here.
-        arr.push(...m.reading.prices.filter((p) => Number(p?.pricePerDay) > 0));
+        arr.push(...own.filter((p) => Number(p?.pricePerDay) > 0));
         readingsByNumber.set(key, arr);
       }
     }

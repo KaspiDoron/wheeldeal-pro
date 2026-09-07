@@ -8,6 +8,7 @@ import {
   sessionIdOf,
   huntWindow,
   huntWindowFilter,
+  closedByOf,
 } from "@/lib/session-life";
 import { recheckMessage } from "@/lib/wa/recheck-message";
 import { can, localLanguageAllowed } from "@/lib/entitlements";
@@ -165,9 +166,15 @@ export async function POST(req: Request) {
   // for the same reason: unknown must refuse, not message.
   const groupEndIso = groups[gi][groups[gi].length - 1].created_at;
   const nextGroupIso = gi > 0 ? groups[gi - 1][0].created_at : null;
-  const closedRead = await sbSelectStrict<{ received_at: string }>(
+  //
+  // EVERY close still refuses (audit F146): the clear AND the TTL stand-down
+  // both tombstone every recipient, so re-asking would queue sends that die at
+  // the guard while this route cheerfully reported "Asking N shops". What the
+  // reason buys is HONEST COPY - a traveller whose hunt merely went quiet, or
+  // who booked from it, is no longer told they cleared it.
+  const closedRead = await sbSelectStrict<{ received_at: string; reason: string | null }>(
     "whatsapp_messages",
-    `select=received_at&to_number=eq.session&raw->>sender=eq.${enc}&raw->>kind=eq.session-closed` +
+    `select=received_at,reason:raw->>reason&to_number=eq.session&raw->>sender=eq.${enc}&raw->>kind=eq.session-closed` +
       `&received_at=gt.${encodeURIComponent(groupEndIso)}` +
       (nextGroupIso ? `&received_at=lt.${encodeURIComponent(nextGroupIso)}` : "") +
       `&order=received_at.desc&limit=1`
@@ -176,7 +183,14 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Could not reach your shops just now. Try again." }, { status: 503 });
   }
   if ("rows" in closedRead && closedRead.rows.length) {
-    return NextResponse.json({ error: "You cleared this hunt - its shops are no longer messaged." }, { status: 404 });
+    const by = closedByOf(closedRead.rows[0]?.reason);
+    const error =
+      by === "expired"
+        ? "This hunt went quiet and the agents stood down - re-open it to ask again."
+        : by === "deal"
+          ? "You booked from this hunt - its shops are no longer messaged."
+          : "You cleared this hunt - its shops are no longer messaged.";
+    return NextResponse.json({ error }, { status: 404 });
   }
   const days =
     [...groups[gi]].reverse().find((r) => typeof r.rfq?.durationDays === "number")?.rfq

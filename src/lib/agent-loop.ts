@@ -728,7 +728,9 @@ export async function processVendorReply(opts: {
   // to no vehicle (matchesSpec=false -> the offer is dropped, UI stuck on "No
   // price yet"). Instead, extract from the WHOLE unread inbound buffer since our
   // last outbound, chronologically, so one read sees the vehicle AND its price.
-  const { coalesceUnreadInbound, onlyForwardedContent } = await import("./wa/coalesce");
+  const { coalesceUnreadInbound, onlyForwardedContent, onlyForwardedMedia } = await import(
+    "./wa/coalesce"
+  );
   const extractText = coalesceUnreadInbound(thread, priorAt ?? "", text) || text;
   // WHOSE PRICE IS THIS? (`contextInfo.isForwarded`, previously unread anywhere
   // in the codebase.) A shop that FORWARDS a competitor's price board - or a
@@ -737,19 +739,27 @@ export async function processVendorReply(opts: {
   // and cited at a third shop as this shop's quote. Conservative by design: see
   // `onlyForwardedContent`. The reply still happens - the shop is talking to us
   // - it is only the ATTRIBUTION of the number that is withheld.
-  const forwardedOnly = onlyForwardedContent(
-    thread.map((m) => {
-      const raw = (m.raw ?? null) as { forwarded?: unknown; media?: unknown } | null;
-      return {
-        direction: m.direction,
-        body: m.body,
-        received_at: m.received_at,
-        forwarded: Boolean(raw?.forwarded),
-        hasMedia: Boolean(raw?.media),
-      };
-    }),
-    priorAt ?? ""
-  );
+  const provenanceFrames = thread.map((m) => {
+    const raw = (m.raw ?? null) as { forwarded?: unknown; media?: unknown } | null;
+    return {
+      direction: m.direction,
+      body: m.body,
+      received_at: m.received_at,
+      // Truthiness of the KEY, not of `.score`: ingest writes
+      // `{ score: undefined }` when the score is 0 (wa/ingest.ts).
+      forwarded: Boolean(raw?.forwarded),
+      hasMedia: Boolean(raw?.media),
+    };
+  });
+  const forwardedOnly = onlyForwardedContent(provenanceFrames, priorAt ?? "");
+  // ...AND THE BOARD HALF OF THE SAME QUESTION (audit F151). The offers rule
+  // above is deliberately conservative and lets "our rate is 300" + a forwarded
+  // board through, which is right for the OFFER and wrong for the READING: the
+  // reading is a reading of the board, and the board is still the rival's. This
+  // marks the reading so the two places that turn `prices` into a number - the
+  // card's board price and graph/engine's cross-thread rival table - withhold
+  // it. The panel still shows the rows; only the attribution is refused.
+  const forwardedBoard = onlyForwardedMedia(provenanceFrames, priorAt ?? "");
   // PENDING REPLIES COUNT TOO. A reply parked in wa_outbox with a human
   // "thinking" delay is NOT yet in whatsapp_messages. Without counting it, a
   // SECOND shop message arriving inside that 45-240s window reads the counters
@@ -2254,6 +2264,9 @@ export async function processVendorReply(opts: {
       !usablePrice && extraction.found === false && !readingIsFailure(draft)
         ? { ...draft, notUsedReason: "No usable price in this image." }
         : draft;
+    // WHOSE BOARD THIS IS, carried WITH the reading (audit F151) rather than
+    // left on a sibling jsonb key that only the offers writer ever read.
+    if (forwardedBoard) mediaReading = { ...mediaReading, forwardedSource: true };
     // ARM THE DEFERRED RE-READ. A failure that is about the MINUTE - every rung
     // exhausted, a cut-off answer, an unparseable one - is not a statement about
     // the photo, and the per-minute budgets reset. The reply has already gone

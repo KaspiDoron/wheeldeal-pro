@@ -85,8 +85,16 @@ describe("the clients finally say where they are", () => {
 
   it("the booking sheet computes the traveller's day, not the UTC one", () => {
     expect(sheet).toMatch(/const timeZone = deviceTimeZone\(\);/);
-    expect(sheet).toMatch(/const today = localDay\(Date\.now\(\), timeZone\);/);
-    expect(sheet).toMatch(/const tomorrow = localDay\(Date\.now\(\) \+ 86400000, timeZone\);/);
+    expect(sheet).toMatch(/const nowMs = Date\.now\(\);/);
+    expect(sheet).toMatch(/const today = localDay\(nowMs, timeZone\);/);
+    // The hand-rolled `tomorrow` is gone: the default pickup is now seeded
+    // from the RFQ's own start date through the shared window authority
+    // (audit F107), which does the same local-day arithmetic in the
+    // traveller's zone and clamps to what the plan may actually book.
+    expect(sheet).toMatch(
+      /pickupDefault\(\{ rfqStartDate: rfq\?\.startDate, plan, nowMs, timeZone \}\)/
+    );
+    expect(sheet).not.toMatch(/localDay\(Date\.now\(\) \+ 86400000/);
     // The two toISOString() day renders are gone.
     expect(sheet).not.toMatch(/new Date\(\)\.toISOString\(\)\.slice\(0, 10\)/);
     expect(sheet).not.toMatch(/returnDate\.toISOString\(\)/);

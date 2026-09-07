@@ -65,10 +65,24 @@ export function unavailableNote(status: number, data: TranslateResponseShape | n
  * A string the server has already declined to translate is REMOVED from the
  * work, not left in the pending set to be asked about on every sweep for the
  * rest of the session. That single omission is what turned a miss into a loop.
+ *
+ * ...AND NEITHER IS A STRING SOMEBODY IS ALREADY FETCHING (audit F253). The
+ * catalogue sweep that follows a language switch runs for tens of seconds; the
+ * empty dict it starts from makes every rendered t() re-queue its own string,
+ * so the 1.5s interval asked for the SAME strings again every 1.5 seconds -
+ * each re-ask a request charged against the daily translate cap.
  */
-export function retriable(pending: Iterable<string>, failed: ReadonlySet<string>): string[] {
+export function retriable(
+  pending: Iterable<string>,
+  failed: ReadonlySet<string>,
+  inFlight?: ReadonlySet<string>
+): string[] {
   const out: string[] = [];
-  for (const s of pending) if (!failed.has(s)) out.push(s);
+  for (const s of pending) {
+    if (failed.has(s)) continue;
+    if (inFlight?.has(s)) continue;
+    out.push(s);
+  }
   return out;
 }
 

@@ -108,6 +108,16 @@ export function AgenticSummary({
           )}
           {!empty && (
             <>
+              {/* WHOSE BOARD IT IS (audit F151). The rows stay - the shop
+                  really did send this - but a board it merely FORWARDED is
+                  somebody else's menu, and the app quotes none of it. Without
+                  this line the panel showed prices the card refuses to use,
+                  with no explanation for the gap. */}
+              {reading.forwardedSource && reading.prices.length > 0 && (
+                <p className="text-[11px] font-bold text-soft">
+                  {t("The shop forwarded this from somewhere else, so these are not their own prices.")}
+                </p>
+              )}
               {reading.prices.length > 0 && (
                 <Block label={t("Prices read")}>
                   <ul className="space-y-1">

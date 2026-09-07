@@ -105,6 +105,10 @@ import { translateOutcome, unavailableNote, retriable, retirementsFrom } from ".
 import {
   pending,
   failed,
+  inFlight,
+  markInFlight,
+  clearInFlight,
+  requeueForTranslation,
   catalogue,
   queueForTranslation,
   queueSharedText,
@@ -139,6 +143,8 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
   // Consecutive entirely-empty answers per string - the bounded patience
   // behind retirementsFrom's no-loop guarantee.
   const emptyStrikes = useRef(new Map<string, number>());
+  /** A sweep is running - see the 1.5s interval below (audit F253). */
+  const sweepInFlight = useRef(false);
   langRef.current = lang;
 
   const applyDirection = useCallback((code: string) => {
@@ -150,6 +156,12 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
   const fetchTranslations = useCallback(
     async (code: string, texts: string[]) => {
       if (code === "en" || texts.length === 0 || stoppedRef.current) return;
+      // CLAIM WHAT WE ARE ABOUT TO ASK FOR (audit F253). The 1.5s sweep asks
+      // `retriable` about this set, so it can no longer re-POST the strings the
+      // catalogue fetch behind a language switch is still holding - which, on a
+      // cold cache, is every string on screen, every 1.5 seconds, each re-ask a
+      // request charged against the daily translate cap.
+      const claimed = markInFlight(texts);
       setBusy(true);
       setError(null);
       try {
@@ -202,7 +214,13 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
             terminal = { status: r.status, data: r.data };
             continue;
           }
-          if (outcome === "retry") continue; // a transient miss stays retriable
+          if (outcome === "retry") {
+            // ...and STAYS retriable in fact, not just in name: the sweep
+            // clears `pending` when it takes a batch, so without this the
+            // strings were simply lost until some later render re-queued them.
+            requeueForTranslation(r.batch);
+            continue;
+          }
           Object.assign(merged, r.data?.map ?? {});
           // Retire what the server answered "no" to, so the sweep stops asking
           // - but an ENTIRELY empty answer only earns a strike (see
@@ -232,9 +250,12 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
           pending.clear();
         }
       } catch {
-        // A network blip IS worth retrying - the next sweep picks it up.
+        // A network blip IS worth retrying - the next sweep picks it up, and
+        // now it has something to pick up.
+        requeueForTranslation(texts);
         setError("Could not reach the translation service.");
       } finally {
+        clearInFlight(claimed);
         setBusy(false);
       }
     },
@@ -290,11 +311,21 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
     if (lang === "en") return;
     const id = setInterval(() => {
       if (stoppedRef.current) return;
+      // ONE SWEEP AT A TIME (audit F253), the same in-flight discipline the
+      // activity and replies polls use. Belt to the `inFlight` set's braces:
+      // the set already stops a sweep re-asking for strings a fetch holds, and
+      // this stops a second sweep starting at all while one is running.
+      if (sweepInFlight.current) return;
       // Only the strings still worth asking about - see lib/i18n-retry.
-      const batch = retriable(pending, failed);
-      pending.clear();
+      const batch = retriable(pending, failed, inFlight);
+      // Take ONLY what we are about to ask for. Clearing the whole set here
+      // threw away strings the guard had just deferred.
+      for (const s of batch) pending.delete(s);
       if (batch.length === 0) return;
-      fetchTranslations(lang, batch);
+      sweepInFlight.current = true;
+      void Promise.resolve(fetchTranslations(lang, batch)).finally(() => {
+        sweepInFlight.current = false;
+      });
     }, 1500);
     return () => clearInterval(id);
   }, [lang, fetchTranslations]);

@@ -345,4 +345,13 @@ export const I18N_EXTRAS: string[] = [
   "Asked what separates the options",
   "Asked when it's back in stock",
   "Recapped the deal for the shop to confirm",
+
+  // src/app/api/deals/recheck/route.ts - the re-ask refusal, rendered on Trips
+  // as t(d.error) (the route's own words win when it declined to ask anyone),
+  // so no literal exists for the grep. Audit F146 split the one line into
+  // three, because the clear, the TTL stand-down and a locked booking are not
+  // the same event and only one of them is the traveller's doing.
+  "You cleared this hunt - its shops are no longer messaged.",
+  "You booked from this hunt - its shops are no longer messaged.",
+  "This hunt went quiet and the agents stood down - re-open it to ask again.",
 ];

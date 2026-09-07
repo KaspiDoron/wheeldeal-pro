@@ -113,8 +113,18 @@ export async function POST(req: Request) {
   const session = await getSession();
   if (!session) return NextResponse.json({ map: {} }, { status: 401 });
   const { checkDailyLimit } = await import("@/lib/usage");
+  // A PEEK, NOT A RESERVATION (audit F253). This used to reserve a unit of
+  // LIMIT_TRANSLATE_PER_DAY on every POST and then `recordApi` below added a
+  // SECOND one whenever the LLM swept - so each request cost two units and a
+  // request served entirely from cache cost one, flatly contradicting the "a
+  // cache hit costs nothing" rule below it. One cold catalogue switch is ~29
+  // parallel batches, which spent 58 of a free tester's 60 before a single
+  // string had been translated; the 429 that followed latched the terminal
+  // stop and left the app in English for the rest of the day. `recordApi` is
+  // now the only debit, and it fires only when work was actually done.
   const gate = await checkDailyLimit("translate", session.email, "LIMIT_TRANSLATE_PER_DAY", {
     plan: session.plan,
+    reserve: false,
   });
   if (!gate.allowed) return NextResponse.json({ map: {} }, { status: 429 });
 

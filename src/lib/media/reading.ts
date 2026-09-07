@@ -209,6 +209,19 @@ export interface MediaReading {
    * this field is what stops the panel implying the picture is what was read.
    */
   recoveredFrom?: ModelReadFailure;
+  /**
+   * THIS BOARD IS SOMEBODY ELSE'S (audit F151).
+   *
+   * A shop that FORWARDS a competitor's price board has not quoted us. Ingest
+   * already stamps `raw.forwarded` on the row and the offers writer already
+   * honours it - but the reading of that board sat on the same row with no
+   * provenance of its own, so the two consumers that turn `prices` into a
+   * NUMBER (the card's "Read from their price-menu photo" and graph/engine's
+   * cross-thread rival table, which is quoted at OTHER shops) read a rival's
+   * board as this shop's menu. The panel still shows the rows - the board
+   * really was sent - but `attributablePrices` withholds the number.
+   */
+  forwardedSource?: boolean;
 }
 
 /** The shape the vision/extraction step produces. Deliberately loose - this is
@@ -559,6 +572,22 @@ export function quotablePrices<T extends { available?: boolean | null }>(
   prices: readonly T[] | null | undefined
 ): T[] {
   return (prices ?? []).filter((p) => p?.available !== false);
+}
+
+/**
+ * THE ROWS OF A READING THAT MAY BE QUOTED AS THIS SHOP'S (audit F151).
+ *
+ * Availability is one filter (`quotablePrices`); PROVENANCE is the other, and
+ * it was missing entirely. A reading stamped `forwardedSource` came off a board
+ * the shop passed on, so it contributes NO price - not to the traveller's card
+ * and not to the cross-thread rival table. Pure, generic over the row shape,
+ * and beside its sibling so the two filters cannot drift apart.
+ */
+export function attributablePrices<T>(
+  reading: { forwardedSource?: boolean; prices?: readonly T[] | null } | null | undefined
+): T[] {
+  if (!reading || reading.forwardedSource === true) return [];
+  return [...(reading.prices ?? [])];
 }
 
 /** The cheapest row that is genuinely on offer, or null when none is. */

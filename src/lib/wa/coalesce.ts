@@ -96,6 +96,32 @@ export function onlyForwardedContent(
   );
 }
 
+/**
+ * IS THE BOARD WE JUST READ SOMEBODY ELSE'S? (audit F151.)
+ *
+ * `onlyForwardedContent` answers a different, deliberately conservative
+ * question - "is EVERY number in this burst somebody else's?" - because the
+ * cost of a false positive there is losing a real offer. It therefore lets
+ * "our rate is 300" + a forwarded board through, which is right for the offers
+ * row and wrong for the MEDIA READING: the reading is a reading of the board,
+ * and the board is still the rival's.
+ *
+ * This is the media half. True when the unread window contains forwarded media
+ * and no unforwarded frame carried media of its own - i.e. every picture the
+ * reader could have priced was passed on rather than taken by this shop.
+ */
+export function onlyForwardedMedia(
+  thread: ProvenanceMsg[],
+  lastOutboundAt: string
+): boolean {
+  const unread = thread.filter(
+    (m) => m.direction === "inbound" && (!lastOutboundAt || m.received_at > lastOutboundAt)
+  );
+  if (!unread.length) return false;
+  if (!unread.some((m) => m.forwarded === true && m.hasMedia === true)) return false;
+  return !unread.some((m) => m.forwarded !== true && m.hasMedia === true);
+}
+
 export function coalesceUnreadInbound(
   thread: CoalesceMsg[],
   lastOutboundAt: string,

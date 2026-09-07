@@ -9,6 +9,13 @@ const updates: { table: string; filter: string; values: Record<string, unknown> 
 let updateResult: Record<string, unknown>[] = [];
 const selects: string[] = [];
 let selectResult: Record<string, unknown>[] = [];
+// advanceBooking now READS BACK on the no-rows path so it can tell a filter
+// refusal apart from an unreadable store (audit F054). The default is a
+// readable table holding nothing, which is what a refused transition looks
+// like when the row is not the caller's.
+let strictResult: { rows: Record<string, unknown>[] } | { error: "missing" | "unavailable" } = {
+  rows: [],
+};
 const pushes: { email: string; payload: Record<string, unknown> }[] = [];
 const events: Record<string, unknown>[] = [];
 
@@ -20,6 +27,10 @@ vi.mock("./runtime-config", () => ({
   sbSelect: async (_table: string, q: string) => {
     selects.push(q);
     return selectResult;
+  },
+  sbSelectStrict: async (_table: string, q: string) => {
+    selects.push(q);
+    return strictResult;
   },
   sbInsert: async (_table: string, rows: Record<string, unknown>[]) => {
     events.push(...rows);
@@ -40,6 +51,7 @@ beforeEach(() => {
   events.length = 0;
   updateResult = [];
   selectResult = [];
+  strictResult = { rows: [] };
 });
 
 describe("the booking state machine", () => {

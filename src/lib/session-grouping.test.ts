@@ -140,8 +140,12 @@ describe("a cleared hunt is recognisable everywhere, not just at the restore gat
     // After this group's newest row, before the next group begins - comparing
     // against the group's FIRST row would mark the search-clear-search-again
     // sequence (one 30-minute group with the clear in the middle) as closed.
-    expect(code).toMatch(/closedStamps\.some\(\(t\) => t > groupEnd && t < end\)/);
+    // The bounds are unchanged; audit F146 turned the boolean into a WHO, so
+    // the marker's own reason is picked up with it.
+    expect(code).toMatch(/closedStamps\.find\(\(m\) => m\.at > groupEnd && m\.at < end\)/);
     expect(code).toMatch(/raw->>kind=eq\.session-closed/);
+    expect(code).toMatch(/reason:raw->>reason/);
+    expect(code).toMatch(/closedByOf\(m\.reason\)/);
   });
 
   it("recheck refuses a cleared hunt instead of reporting phantom sends", () => {
@@ -151,7 +155,10 @@ describe("a cleared hunt is recognisable everywhere, not just at the restore gat
     expect(code).toMatch(/raw->>kind=eq\.session-closed/);
     expect(code).toMatch(/You cleared this hunt/);
     // STRICT read: unknown must refuse to message, never default to sending.
-    expect(code).toMatch(/sbSelectStrict<\{ received_at: string \}>/);
+    // (Audit F146 widened the projection with the marker's reason so the
+    // refusal can name WHICH close it was - it still refuses every one.)
+    expect(code).toMatch(/sbSelectStrict<\{ received_at: string; reason: string \| null \}>/);
+    expect(code).toMatch(/closedByOf\(closedRead\.rows\[0\]\?\.reason\)/);
   });
 
   it("the client offers no live button on a cleared hunt", () => {

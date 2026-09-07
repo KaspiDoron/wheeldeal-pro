@@ -35,6 +35,45 @@ export const pending = new Set<string>();
  */
 export const failed = new Set<string>();
 
+/**
+ * Strings a fetch is CURRENTLY asking the server about (audit F253).
+ *
+ * Without this set the 1.5s sweep re-POSTed the strings the initial catalogue
+ * fetch was still holding: `setLang` commits an empty dict for a cold cache, so
+ * every t() on screen re-queues its string into `pending` while those very
+ * strings are in flight. Each re-post is a request, each request is charged
+ * against LIMIT_TRANSLATE_PER_DAY, and the 429 that follows latches the
+ * terminal stop that leaves the app in English for the rest of the day.
+ */
+export const inFlight = new Set<string>();
+
+/** Claim these strings as in flight. Returns the ones this call actually
+ *  claimed, so the caller releases exactly what it took. */
+export function markInFlight(texts: Iterable<string>): string[] {
+  const claimed: string[] = [];
+  for (const s of texts) {
+    if (inFlight.has(s)) continue;
+    inFlight.add(s);
+    claimed.push(s);
+  }
+  return claimed;
+}
+
+/** Release strings claimed by markInFlight - always from a `finally`. */
+export function clearInFlight(texts: Iterable<string>): void {
+  for (const s of texts) inFlight.delete(s);
+}
+
+/**
+ * Put a batch back after a TRANSIENT failure. The sweep clears `pending` when
+ * it takes a batch, so a 5xx or a dropped connection used to lose those strings
+ * until some later render happened to re-queue them. A string the server has
+ * already declined is never resurrected.
+ */
+export function requeueForTranslation(texts: Iterable<string>): void {
+  for (const s of texts) if (!failed.has(s)) pending.add(s);
+}
+
 /** Is this string app copy - i.e. may it be sent to the translator at all? */
 export function translatable(s: string): boolean {
   return CATALOG.has(s);
