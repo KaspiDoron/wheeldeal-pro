@@ -226,6 +226,45 @@ describe("admission control and the recovery roster", () => {
     expect(waitMs).toBeGreaterThan(8_000);
   });
 
+  it("the media stages are inside the request ceiling too, not beside it", () => {
+    // THE OTHER HALF OF THE SUM (audit F062). The assertion above adds the
+    // gate and the turn - and passed green while a photo turn ALSO paid, in
+    // the same request and before either of them, a media ladder plus one
+    // sequential download per burst sibling, each able to burn Evolution's 12s
+    // abort. Summing two of four sequential terms cannot see the ceiling break.
+    //
+    // The request now carries one deadline: media is clipped to a bounded
+    // window, and an item that can no longer be given a real turn is left
+    // unclaimed and redelivered. The behaviour is executed in
+    // wa/request-deadline.test.ts; what is pinned here is the ARITHMETIC, plus
+    // the absence of the unclipped shapes.
+    const ingest = readCode("src/lib/wa/ingest.ts");
+    const deploy = readCode(".github/workflows/deploy-gcp.yml");
+    const num = (src: string, re: RegExp, what: string) => {
+      const m = src.match(re);
+      expect(m, `could not read ${what}`).toBeTruthy();
+      return Number(m![1].replace(/_/g, ""));
+    };
+    const requestMs = num(ingest, /REQUEST_WALL_MS = ([\d_]+)/, "REQUEST_WALL_MS");
+    const mediaMs = num(ingest, /MEDIA_WINDOW_MS = ([\d_]+)/, "MEDIA_WINDOW_MS");
+    const floorMs = num(ingest, /TURN_ENTRY_FLOOR_MS = ([\d_]+)/, "TURN_ENTRY_FLOOR_MS");
+    const timeoutS = num(deploy, /--timeout (\d+)/, "Cloud Run --timeout");
+
+    const HEADROOM_MS = 5_000;
+    expect(
+      requestMs + HEADROOM_MS,
+      `the request wall ${requestMs}ms must fit the ${timeoutS}s Cloud Run timeout`
+    ).toBeLessThanOrEqual(timeoutS * 1000);
+    // Media must never be able to eat the room a turn needs to start.
+    expect(mediaMs + floorMs).toBeLessThanOrEqual(requestMs);
+
+    // The unguarded shapes: every media fetch and the gate carry the deadline.
+    expect(ingest).toMatch(/fetchOwn: \(\) => fetchMediaWithRetry\(email, data, mediaDeadlineAt\)/);
+    expect(ingest).not.toMatch(/fetchMediaWithRetry\(email, data\)/);
+    expect(ingest).toMatch(/mediaDeadlineAt,\n\s*\}\);/);
+    expect(ingest).toMatch(/\}\), gatePatienceMs\);/);
+  });
+
   it("the recovery sweep's roster is the linked fleet, not the loudest senders", () => {
     const sync = readCode("src/lib/wa-sync.ts");
     expect(sync).toMatch(/"wa_sessions",\s*"select=email&status=eq\.open/);

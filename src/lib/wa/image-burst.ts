@@ -38,6 +38,8 @@ import { BURST_WINDOW_MS } from "../media/reading";
 
 const DEFER_MS = 4_000;
 const MAX_BURST_ROWS = 16;
+/** What ONE sibling download can cost: evoFetch's hard per-request abort. */
+const SIBLING_FETCH_MS = 12_000;
 
 /**
  * HOW FAR BACK THE *DISCOVERY* PROBE LOOKS - and it is not the burst window.
@@ -200,6 +202,17 @@ export async function assembleImageBurst(opts: {
   fetchOwn: () => Promise<{ mime: string; base64: string } | null>;
   fetchByKey: (key: unknown) => Promise<{ mime: string; base64: string } | null>;
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * The wall clock the WHOLE webhook request shares (audit F062). The sibling
+   * loop below is sequential and each fetch can burn Evolution's full 12s
+   * abort, so a 16-frame burst on a cold host could spend minutes here - all of
+   * it upstream of the inbound gate and the turn wall, and therefore invisible
+   * to the request-ceiling arithmetic that only summed those two. Frames that
+   * do not fit are counted as fetch failures, exactly like a failed download,
+   * so the media-fetch-failed breadcrumb and the never-silent clarify still
+   * carry the degraded case honestly.
+   */
+  mediaDeadlineAt?: number;
 }): Promise<BurstVerdict> {
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
 
@@ -266,6 +279,12 @@ export async function assembleImageBurst(opts: {
     }
     const key = r.raw?.media?.key;
     if (!key) {
+      fetchFailures++;
+      continue;
+    }
+    // No request budget left for another 12s download: stop fetching rather
+    // than push the turn past the request ceiling (audit F062).
+    if (opts.mediaDeadlineAt !== undefined && Date.now() + SIBLING_FETCH_MS > opts.mediaDeadlineAt) {
       fetchFailures++;
       continue;
     }

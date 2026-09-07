@@ -4,6 +4,54 @@
 import "server-only";
 import { getConfig } from "./runtime-config";
 
+// NOTHING ON THIS LADDER MAY OUTLIVE THE REQUEST (audit F042).
+//
+// The first rung is Gmail SMTP, and nodemailer's defaults are 120s to connect
+// and 600s of socket inactivity - both longer than Cloud Run's 90s ceiling. A
+// server that accepts the TCP connection and then stops answering (Google
+// throttling a shared egress address is the ordinary SMTP failure mode) killed
+// the traveller's signup or reset request before the CONFIGURED Brevo key was
+// ever read, so the "everything degrades gracefully" ladder was inert against
+// the one failure it exists for - and on the reset path the compensating clear
+// of the live 30-minute token hash was skipped with it.
+//
+// Two halves, because either alone only relocates the stall: the transport
+// gives up on its own socket, and every rung runs under a shared wall clock so
+// the NEXT rung is always reached inside the platform ceiling.
+const SMTP_CONNECTION_TIMEOUT_MS = 8_000;
+const SMTP_GREETING_TIMEOUT_MS = 8_000;
+/** Generous on purpose: feedback mail carries base64 attachments. */
+const SMTP_SOCKET_TIMEOUT_MS = 25_000;
+/** Ceiling for ONE provider attempt. */
+const RUNG_BUDGET_MS = 30_000;
+/** Ceiling for the whole Gmail -> Brevo -> Resend ladder. */
+const LADDER_BUDGET_MS = 60_000;
+
+/** SMTP transport options shared by the live probe and the send path. */
+const SMTP_TIMEOUTS = {
+  connectionTimeout: SMTP_CONNECTION_TIMEOUT_MS,
+  greetingTimeout: SMTP_GREETING_TIMEOUT_MS,
+  socketTimeout: SMTP_SOCKET_TIMEOUT_MS,
+} as const;
+
+/**
+ * Run one rung under a deadline. A race does NOT cancel the loser - the
+ * transport timeouts above are what actually end the abandoned attempt - but it
+ * does free the ladder to try the next provider inside the request.
+ */
+async function withRungBudget<T>(work: Promise<T>, budgetMs: number, onTimeout: T): Promise<T> {
+  if (budgetMs <= 0) return onTimeout;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const capped = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(onTimeout), budgetMs);
+  });
+  try {
+    return await Promise.race([work, capped]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export interface Attachment {
   filename: string;
   content: string; // base64 (no data: prefix)
@@ -90,6 +138,9 @@ export async function emailLiveProbe(): Promise<EmailProbe[]> {
         port: 465,
         secure: true,
         auth: { user: gmailUser.trim(), pass: gmailPass.replace(/\s+/g, "") },
+        // An admin probe must answer too (audit F042): verify() opens a real
+        // session, and without these it inherits the same 120s/600s defaults.
+        ...SMTP_TIMEOUTS,
       });
       await transporter.verify();
       return {
@@ -228,6 +279,7 @@ async function sendViaGmail(
       port: 465,
       secure: true,
       auth: { user, pass: appPassword.replace(/\s+/g, "") },
+      ...SMTP_TIMEOUTS,
     });
     const info = await transporter.sendMail({
       from: `WheelDeal <${user}>`,
@@ -262,15 +314,26 @@ export async function sendEmail(opts: {
     getConfig("GMAIL_USER"),
     getConfig("GMAIL_APP_PASSWORD"),
   ]);
+  // One wall clock for the whole ladder, and a ceiling per rung.
+  const ladderDeadlineAt = Date.now() + LADDER_BUDGET_MS;
+  const rungMs = () => Math.max(0, Math.min(RUNG_BUDGET_MS, ladderDeadlineAt - Date.now()));
   if (gmailUser && gmailPass) {
-    const gmail = await sendViaGmail(gmailUser, gmailPass, opts);
+    const gmail = await withRungBudget(sendViaGmail(gmailUser, gmailPass, opts), rungMs(), {
+      sent: false,
+      reason: "error",
+      error: "gmail smtp did not answer in time",
+    } as EmailResult);
     if (gmail.sent) return { ...gmail, provider: "gmail" };
-    // On a hard Gmail failure fall through to the other providers.
+    // On a hard Gmail failure - or a stall - fall through to the others.
   }
 
   const brevoKey = await getConfig("BREVO_API_KEY");
   if (brevoKey && !opts.attachments?.length) {
-    const brevo = await sendViaBrevo(brevoKey, opts);
+    const brevo = await withRungBudget(sendViaBrevo(brevoKey, opts), rungMs(), {
+      sent: false,
+      reason: "error",
+      error: "brevo did not answer in time",
+    } as EmailResult);
     if (brevo.sent || brevo.reason === "error") return { ...brevo, provider: "brevo" };
   }
 
@@ -280,20 +343,30 @@ export async function sendEmail(opts: {
   if (!apiKey) return { sent: false, reason: "unconfigured" };
 
   try {
-    const res = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        from,
-        to: opts.to,
-        subject: opts.subject,
-        html: opts.html,
-        attachments: opts.attachments,
+    // The last rung is bounded too: a bare fetch has no timeout of its own, so
+    // an unanswering Resend would simply move the stall to the end of the
+    // ladder (audit F042).
+    const res = await withRungBudget(
+      fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          from,
+          to: opts.to,
+          subject: opts.subject,
+          html: opts.html,
+          attachments: opts.attachments,
+        }),
       }),
-    });
+      rungMs(),
+      null
+    );
+    if (!res) {
+      return { sent: false, reason: "error", error: "resend did not answer in time", provider: "resend" };
+    }
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       return { sent: false, reason: "error", error: data?.message ?? `resend ${res.status}`, provider: "resend" };

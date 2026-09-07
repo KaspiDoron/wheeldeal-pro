@@ -15,7 +15,15 @@
 
 import "server-only";
 import { createHash } from "crypto";
-import { getConfig, sbInsert, sbSelect, sbUpdate, sbDelete, sbSelectStrict } from "./runtime-config";
+import {
+  getConfig,
+  setConfig,
+  sbInsert,
+  sbSelect,
+  sbUpdate,
+  sbDelete,
+  sbSelectStrict,
+} from "./runtime-config";
 import { deriveWebhookToken, sameWebhookTarget, classifyRegisteredWebhook } from "./wa/webhook-token";
 import type { TokenState } from "./wa/webhook-token";
 import { jidMatches } from "./wa/jid";
@@ -581,6 +589,52 @@ function rearmStore(): Map<string, number> {
 const REARM_THROTTLE_MS = 60 * 60 * 1000; // ~1h per instance unless forced
 const rearmConfigKey = (instance: string) => `WH_REARM_${instance}`;
 
+// THE THROTTLE MUST NOT OUTLIVE THE TOKEN IT WAS STAMPED FOR (audit F180).
+//
+// The webhook token is derived from SESSION_SECRET (+ WEBHOOK_TOKEN_SALT), so
+// the documented rotation in RUNBOOK.md leaves Evolution holding the OLD token
+// on every registered URL: each inbound reply is answered 403 and DROPPED (a
+// 403 is not the 503 redeliver path). The repair sweep is the only thing that
+// re-registers - and it was returning skipped:"throttled" on the shared clock
+// alone, WITHOUT ever reading the token, for up to a full hour per instance.
+// One fleet-wide row records which token the fleet is being re-armed to AND
+// THE MOMENT THAT TOKEN CAME INTO FORCE. The moment is what makes the repair
+// reach the whole fleet: comparing a bare fingerprint would repair exactly ONE
+// instance per rotation, because the first verified re-arm writes the row and
+// every later instance in the same sweep then reads a fingerprint that matches
+// and falls back to its own <1h clock - still holding the old token, still
+// 403ing every reply. An instance is throttled only when its OWN re-arm clock
+// is at or after that moment; every instance whose clock predates it is stale
+// by definition and repairs on the tick that reaches it. It is a single vault
+// key on the 30s runtime-config cache - no per-instance row, no extra query in
+// the loop (the clock read was already there).
+const REARM_TOKEN_FP_KEY = "WH_REARM_TOKEN_FP";
+
+/** The fleet-wide token mark: which token, and when it came into force (0 =
+ *  never observed rotating, so nothing is known to be stale). */
+type RearmTokenMark = { fp: string; inForceAt: number };
+
+/** A short, non-reversible fingerprint of a webhook token (never the token). */
+function webhookTokenFingerprint(token: string): string {
+  return createHash("sha256").update(`wh-fp:${token}`).digest("hex").slice(0, 16);
+}
+
+/** The token mark the last VERIFIED re-arm recorded, fleet-wide. A legacy bare
+ *  fingerprint (written before the moment was recorded) reads as inForceAt 0,
+ *  so an upgrade forces nothing. */
+async function lastRearmedTokenMark(): Promise<RearmTokenMark | null> {
+  try {
+    const raw = await getConfig(REARM_TOKEN_FP_KEY);
+    if (!raw) return null;
+    const [fp, at] = String(raw).split(":");
+    if (!fp) return null;
+    const inForceAt = Number(at);
+    return { fp, inForceAt: Number.isFinite(inForceAt) && inForceAt > 0 ? inForceAt : 0 };
+  } catch {
+    return null;
+  }
+}
+
 /** The last re-arm time for an instance. The shared clock lives on the
  *  instance's OWN wa_sessions row (webhook_rearmed_at) - the old per-instance
  *  app_config rows polluted the owner's Key Vault with one WH_REARM_* entry
@@ -626,6 +680,25 @@ async function stampRearmShared(email: string, atMs: number): Promise<void> {
   }
 }
 
+/** Record WHICH token the verified re-arm registered and WHEN it came into
+ *  force - only when it moved, so a healthy fleet writes this row once per
+ *  rotation, not once per instance. The FIRST fingerprint ever recorded marks
+ *  no moment (there is no rotation to repair, and dating it "now" would force
+ *  a one-off fleet-wide re-register on the deploy that introduced the row). */
+async function rememberRearmedToken(
+  tokenFp: string,
+  prior: RearmTokenMark | null,
+  atMs: number
+): Promise<void> {
+  if (prior?.fp === tokenFp) return;
+  const inForceAt = prior === null ? 0 : atMs;
+  try {
+    await setConfig(REARM_TOKEN_FP_KEY, `${tokenFp}:${inForceAt}`);
+  } catch {
+    /* the hourly clock still throttles; the next verified re-arm retries */
+  }
+}
+
 /**
  * Re-assert the user's webhook URL on Evolution with the CURRENT token, WITHOUT
  * touching the session. This is the fix for a rotated SESSION_SECRET (Evolution
@@ -651,17 +724,31 @@ export async function reassertWebhook(
   const origin = await canonicalWebhookOrigin(opts.requestOrigin);
   if (!origin) return { ok: false, changed: false, registeredUrl: null, skipped: "no-origin" };
 
+  // THE TOKEN IS READ BEFORE THE THROTTLE, ON PURPOSE (audit F180). A clock
+  // stamped against a token that is no longer in force says nothing about the
+  // registration; skipping on it is how a rotated secret left inbound 403 for
+  // an hour per instance.
+  const token = await webhookToken();
+  if (!token) return { ok: false, changed: false, registeredUrl: null, skipped: "no-host" };
+  const tokenFp = webhookTokenFingerprint(token);
+  const mark = await lastRearmedTokenMark();
+  // Two ways this instance can be holding a token that is no longer in force:
+  // nobody has recorded the new one yet, or somebody has - and this instance
+  // was last re-armed BEFORE that moment. The second is the fleet case: the
+  // first repaired instance writes the mark, so without the moment every other
+  // instance in the same sweep would read "nothing rotated" and stay broken.
   const now = Date.now();
-  if (!opts.force && now - (await lastRearmAt(email, instance)) < REARM_THROTTLE_MS) {
+  const lastAt = opts.force ? 0 : await lastRearmAt(email, instance);
+  const holdsStaleToken =
+    mark !== null && (mark.fp !== tokenFp || (mark.inForceAt > 0 && lastAt < mark.inForceAt));
+
+  if (!opts.force && !holdsStaleToken && now - lastAt < REARM_THROTTLE_MS) {
     return { ok: true, changed: false, registeredUrl: null, skipped: "throttled" };
   }
   // In-process stampede guard only. The SHARED clock is stamped below, and
   // only on a verified outcome - a failed set used to advance it, throttling a
   // broken re-arm into staying broken for the next hour, fleet-wide.
   rearmStore().set(instance, now);
-
-  const token = await webhookToken();
-  if (!token) return { ok: false, changed: false, registeredUrl: null, skipped: "no-host" };
   const webhookUrl = `${origin}/api/webhooks/evolution?token=${token}`;
   const events = [...WEBHOOK_EVENTS];
 
@@ -693,6 +780,7 @@ export async function reassertWebhook(
     (registeredEvents.length === events.length && events.every((e) => registeredEvents!.includes(e)));
   if (registeredUrl && sameWebhookTarget(registeredUrl, origin, token) && eventsMatch) {
     await stampRearmShared(email, now);
+    await rememberRearmedToken(tokenFp, mark, now);
     return { ok: true, changed: false, registeredUrl };
   }
 
@@ -728,6 +816,9 @@ export async function reassertWebhook(
   // The shared clock advances ONLY on success - a failed set leaves the next
   // cycle (or the next instance) free to repair immediately.
   if (set.ok) await stampRearmShared(email, now);
+  // The fingerprint rides the same verified outcome (audit F180), and is
+  // written only when it actually moved.
+  if (set.ok) await rememberRearmedToken(tokenFp, mark, now);
   return { ok: set.ok, changed: set.ok, registeredUrl: set.ok ? webhookUrl : registeredUrl };
 }
 
@@ -1210,10 +1301,24 @@ export async function testOneHost(
   }
 }
 
+// evoFetch's hard per-request abort. A caller that holds a WALL CLOCK
+// (ensureConnected - audit F045) may ask for LESS through `opts.timeoutMs`;
+// nothing may ask for more. The SEND path never passes it: shortening the
+// abort there would turn a slow-but-successful send into an ambiguous one the
+// drain must not re-POST, which is duplicate messages at a shop.
+const EVO_TIMEOUT_MS = 12_000;
+
+/** What is left of a deadline, clamped to one evoFetch abort window. */
+function evoTimeoutFor(deadlineAt?: number): number {
+  if (!deadlineAt) return EVO_TIMEOUT_MS;
+  return Math.min(EVO_TIMEOUT_MS, Math.max(0, deadlineAt - Date.now()));
+}
+
 async function evoFetch(
   host: Host,
   path: string,
-  init?: RequestInit
+  init?: RequestInit,
+  opts?: { timeoutMs?: number }
 ): Promise<{ ok: boolean; status: number; data: any }> {
   // HARD TIMEOUT. undici's fetch has no short overall request timeout, so a
   // cold/asleep Evolution host (Render free tier) could hang the caller until
@@ -1223,7 +1328,8 @@ async function evoFetch(
   // re-queues. The sibling probes (hostHealthDetail 4.5s, pingAllHosts 7s)
   // already do this; the actual send/connect path must too.
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 12_000);
+  const abortAfterMs = Math.max(1, Math.min(EVO_TIMEOUT_MS, opts?.timeoutMs ?? EVO_TIMEOUT_MS));
+  const timer = setTimeout(() => ctrl.abort(), abortAfterMs);
   try {
     const res = await fetch(`${host.url}${path}`, {
       ...init,
@@ -1242,7 +1348,13 @@ async function evoFetch(
     return {
       ok: false,
       status: 0,
-      data: { error: aborted ? "evolution host timed out (12s)" : e instanceof Error ? e.message : "network error" },
+      data: {
+        error: aborted
+          ? `evolution host timed out (${Math.round(abortAfterMs / 1000)}s)`
+          : e instanceof Error
+            ? e.message
+            : "network error",
+      },
     };
   } finally {
     clearTimeout(timer);
@@ -1253,11 +1365,12 @@ async function evoFetch(
 async function evo(
   email: string,
   path: string,
-  init?: RequestInit
+  init?: RequestInit,
+  opts?: { timeoutMs?: number }
 ): Promise<{ ok: boolean; status: number; data: any }> {
   const host = await resolveHost(email);
   if (!host) return { ok: false, status: 0, data: { error: "not configured" } };
-  return evoFetch(host, path, init);
+  return evoFetch(host, path, init, opts);
 }
 
 /**
@@ -1624,15 +1737,47 @@ export async function ensureConnected(
     return { ok: false, state: "close" };
   }
 
+  // ONE WALL CLOCK FOR THE WHOLE CALL (audit F045).
+  //
+  // `budgetMs` used to start counting AFTER four unbounded 12s evoFetch calls
+  // (two probes, /instance/create, /instance/connect), so a hung host made a
+  // call the caller had budgeted at 6s cost about 73s - past the ping's 55s
+  // self-kill and the drain's 50s budget, with the eight post-drain sweeps
+  // never running and the next minute starting an overlapping fleet drain.
+  // Every transport step below now gets min(12s, what is left) and the
+  // function returns the moment the budget is spent.
+  const deadlineAt = Date.now() + budgetMs;
+  const msLeft = (): number => deadlineAt - Date.now();
+
   const instance = instanceNameFor(email);
   const host = await resolveHost(email);
   if (!host) return { ok: false, state: null };
 
-  let state = await connectionState(email);
+  const probe = await connectionStateDetailed(email, { deadlineAt });
+  let state = probe.state;
   if (state === "open") {
     markOpen(email).catch(() => {});
     return { ok: true, state };
   }
+
+  // A TRANSPORT TIMEOUT IS NOT A MISSING INSTANCE (audit F045). Neither probe
+  // got an answer, so we know nothing about this session - and the recreate
+  // below is a fresh device registration. Only a host that ANSWERED may
+  // authorise it.
+  if (!probe.answered) return { ok: false, state: null };
+
+  // THE SESSION ROW IS READ BEFORE THE TRANSPORT IS TOUCHED (audit F052).
+  //
+  // A null stored status means the user is NOT linked (never paired, erased,
+  // or just unlinked). This read used to happen AFTER /instance/create +
+  // /instance/connect, so one surviving wa_outbox row for an erased account
+  // re-registered that account's instance on the host and re-armed a webhook
+  // for it before the check that says "a background drain must NEVER mint a
+  // connecting session for them" ever ran. It is the same read, moved above
+  // the two calls it was meant to prevent - latency-neutral, and it keeps
+  // failing OPEN for "unknown" (unreadable store) and "open".
+  const prior = await storedStatus(email);
+  if (prior === null) return { ok: false, state };
 
   // If we've failed the user over to a different host, the instance may not
   // exist there yet - creating it makes Evolution load the SHARED creds from
@@ -1654,6 +1799,7 @@ export async function ensureConnected(
           },
         }
       : {};
+  if (msLeft() <= 0) return { ok: false, state };
   await evoFetch(host, "/instance/create", {
     method: "POST",
     body: JSON.stringify({
@@ -1669,30 +1815,29 @@ export async function ensureConnected(
       syncFullHistory: false,
       ...recreateWebhook,
     }),
-  });
+  }, { timeoutMs: evoTimeoutFor(deadlineAt) });
   // Kick a reconnect on the resolved host.
-  await evoFetch(host, `/instance/connect/${instance}`);
+  if (msLeft() <= 0) return { ok: false, state };
+  await evoFetch(host, `/instance/connect/${instance}`, undefined, {
+    timeoutMs: evoTimeoutFor(deadlineAt),
+  });
   // NEVER regress a durable "open" to "connecting" on a failed/unknown probe:
   // a transient host outage must not make a linked user read as "never
   // connected" (wasEverConnected == status "open"). Only record "connecting"
   // when we are not already durably open. The success branch below still
   // writes "open" when the socket returns; if it never returns, the row
   // correctly stays "open" = still-linked (genuine unlink goes through the
-  // explicit logout/ban paths, never this transient one).
-  const prior = await storedStatus(email);
-  // A null stored status means the user is NOT linked (never paired, or just
-  // disconnected). A background drain must NEVER mint a "connecting" session for
-  // them - that resurrected a torn-down link. Only ever record "connecting" for
-  // a session that genuinely exists and is not already durably open/unknown.
-  if (prior === null) return { ok: false, state };
+  // explicit logout/ban paths, never this transient one). A session that does
+  // not exist at all never reaches here - `prior === null` returned above,
+  // before the transport was touched.
   if (prior !== "open" && prior !== "unknown") {
     await saveSession(email, instance, "connecting", host.url);
   }
 
-  const deadline = Date.now() + budgetMs;
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 1200));
-    state = await connectionState(email);
+  while (msLeft() > 0) {
+    await new Promise((r) => setTimeout(r, Math.min(1200, Math.max(0, msLeft()))));
+    if (msLeft() <= 0) break;
+    state = (await connectionStateDetailed(email, { deadlineAt })).state;
     if (state === "open") {
       markOpen(email).catch(() => {});
       await saveSession(email, instance, "open", host.url);
@@ -2214,6 +2359,16 @@ async function findMessagesRecords(
         method: "POST",
         body: JSON.stringify(body),
       });
+      // A TRANSPORT ABORT IS NOT AN EMPTY CHAT (audit F044). evoFetch reports
+      // its own 12s abort (and a network error) as status 0 - no HTTP answer
+      // at all - which says nothing about this chat's contents and cannot be
+      // repaired by trying the NEXT BODY SHAPE. Retrying it bought three 12s
+      // aborts (36s, or 72s once a second candidate JID is tried) inside the
+      // traveller's /api/replies poll and inside the ping's sweep. Stop here;
+      // the next sweep retries a host that is not answering. A 4xx/5xx DID
+      // answer, and is exactly the version-dialect rejection the shape loop
+      // exists for, so those still advance to the next shape.
+      if (res.status === 0) return [];
       const arr: any[] = Array.isArray(res.data)
         ? res.data
         : res.data?.messages?.records ?? res.data?.messages ?? res.data?.records ?? [];
@@ -2301,6 +2456,7 @@ export async function resolveChatJid(
 
   const instance = instanceNameFor(email);
   // 1) Ask WhatsApp for the canonical JID of this number - under the budget.
+  let probeUnanswered = false;
   if (takeJidProbeSlot(email)) {
     try {
       const res = await evo(email, `/chat/whatsappNumbers/${instance}`, {
@@ -2309,18 +2465,27 @@ export async function resolveChatJid(
       });
       const jid = res.data?.[0]?.jid ?? res.data?.[0]?.remoteJid;
       if (typeof jid === "string" && jid.includes("@")) return remember(jid);
+      // status 0 = evoFetch's own abort or a network error (audit F044). The
+      // host did not answer, so the chat list will not answer either: paying a
+      // second 12s abort for it doubles the stall inside the traveller's poll.
+      // The probe SLOT stays spent - it is the only throttle on
+      // /chat/whatsappNumbers, and refunding it would let a flapping host
+      // re-probe WhatsApp's contact directory at poll rate.
+      probeUnanswered = res.status === 0;
     } catch {
       /* fall through */
     }
   }
   // 2) Otherwise match against the synced chat list by trailing digits.
-  try {
-    const chats = await fetchChats(email);
-    const tail = digits.slice(-9);
-    const found = chats.find((c) => digitsOnly(c.jid).endsWith(tail));
-    if (found) return remember(found.jid);
-  } catch {
-    /* fall through */
+  if (!probeUnanswered) {
+    try {
+      const chats = await fetchChats(email);
+      const tail = digits.slice(-9);
+      const found = chats.find((c) => digitsOnly(c.jid).endsWith(tail));
+      if (found) return remember(found.jid);
+    } catch {
+      /* fall through */
+    }
   }
   // 3) Best-effort default form. NOT memoised - it is a guess, not a
   //    resolution, and remembering it would mask a later successful probe.
@@ -2614,10 +2779,18 @@ export async function fetchProfilePictureUrl(
  * "connecting" (stale cache) while fetchInstances already reports "open" - so
  * we cross-check both. Returns "open" | "connecting" | "close" | null.
  */
-async function stateFromFetchInstances(email: string): Promise<string | null> {
+async function stateFromFetchInstances(
+  email: string,
+  opts?: { deadlineAt?: number }
+): Promise<{ state: string | null; answered: boolean }> {
   const instance = instanceNameFor(email);
-  const res = await evo(email, `/instance/fetchInstances?instanceName=${instance}`);
-  if (!res.ok) return null;
+  const res = await evo(email, `/instance/fetchInstances?instanceName=${instance}`, undefined, {
+    timeoutMs: evoTimeoutFor(opts?.deadlineAt),
+  });
+  // status 0 is evoFetch's OWN abort or a network error - no answer at all, as
+  // opposed to a host that answered "this instance is not here" (audit F045).
+  const answered = res.status !== 0;
+  if (!res.ok) return { state: null, answered };
   const arr: any[] = Array.isArray(res.data) ? res.data : res.data ? [res.data] : [];
   // Evolution v2 shapes vary: [{ name, connectionStatus }] or
   // [{ instance: { instanceName, state|status } }].
@@ -2629,7 +2802,7 @@ async function stateFromFetchInstances(email: string): Promise<string | null> {
         x?.instance?.instanceName === instance ||
         x?.instance?.name === instance
     ) ?? arr[0];
-  if (!match) return null;
+  if (!match) return { state: null, answered };
   const raw =
     match.connectionStatus ??
     match.state ??
@@ -2638,9 +2811,9 @@ async function stateFromFetchInstances(email: string): Promise<string | null> {
     match.instance?.status ??
     match.instance?.connectionStatus ??
     null;
-  if (!raw) return null;
+  if (!raw) return { state: null, answered };
   const s = String(raw).toLowerCase();
-  return s === "connected" ? "open" : s;
+  return { state: s === "connected" ? "open" : s, answered };
 }
 
 // A recently-confirmed OPEN socket, per email. Only the "open" verdict is
@@ -2658,28 +2831,41 @@ function openStateCache(): Map<string, number> {
   return (globalThis.__wd_open_state__ ??= new Map());
 }
 
-/** "open" = paired and ready to send. Cross-checks both Evolution endpoints.
- *  `opts.fresh` bypasses the short open-verdict cache (link/status flows). */
-export async function connectionState(
+/**
+ * The state PLUS whether the host answered at all (audit F045).
+ *
+ * `state === null` used to mean two different things: "the host says this
+ * instance is not here" (which authorises the failover recreate) and "no HTTP
+ * answer came back" (which authorises nothing - firing /instance/create at a
+ * number we have no live information about is a fresh device registration).
+ * `answered` separates them; `opts.deadlineAt` clamps both probes to what is
+ * left of the caller's wall clock instead of two full 12s aborts.
+ */
+async function connectionStateDetailed(
   email: string,
-  opts?: { fresh?: boolean }
-): Promise<string | null> {
+  opts?: { fresh?: boolean; deadlineAt?: number }
+): Promise<{ state: string | null; answered: boolean }> {
   if (!opts?.fresh) {
     const cachedAt = openStateCache().get(email);
-    if (cachedAt && Date.now() - cachedAt < OPEN_STATE_TTL_MS) return "open";
+    if (cachedAt && Date.now() - cachedAt < OPEN_STATE_TTL_MS) return { state: "open", answered: true };
   }
   const instance = instanceNameFor(email);
-  const res = await evo(email, `/instance/connectionState/${instance}`);
+  const res = await evo(email, `/instance/connectionState/${instance}`, undefined, {
+    timeoutMs: evoTimeoutFor(opts?.deadlineAt),
+  });
+  let answered = res.status !== 0;
   let state: string | null = res.ok
     ? res.data?.instance?.state ?? res.data?.state ?? null
     : null;
   // If the dedicated endpoint is not already "open", ask the instance list -
   // it reflects a fresh pairing-code link faster. This is the fix for
-  // "WhatsApp says linked but the app still says NOT CONNECTED".
-  if (state !== "open") {
-    const alt = await stateFromFetchInstances(email);
-    if (alt === "open") state = "open";
-    else if (!state && alt) state = alt;
+  // "WhatsApp says linked but the app still says NOT CONNECTED". A caller whose
+  // budget is already spent does not issue this second probe at all.
+  if (state !== "open" && evoTimeoutFor(opts?.deadlineAt) > 0) {
+    const alt = await stateFromFetchInstances(email, { deadlineAt: opts?.deadlineAt });
+    if (alt.answered) answered = true;
+    if (alt.state === "open") state = "open";
+    else if (!state && alt.state) state = alt.state;
   }
   if (state === "open") {
     boundedSet(openStateCache(), email, Date.now(), 2000);
@@ -2687,7 +2873,16 @@ export async function connectionState(
   } else {
     openStateCache().delete(email);
   }
-  return state;
+  return { state, answered };
+}
+
+/** "open" = paired and ready to send. Cross-checks both Evolution endpoints.
+ *  `opts.fresh` bypasses the short open-verdict cache (link/status flows). */
+export async function connectionState(
+  email: string,
+  opts?: { fresh?: boolean }
+): Promise<string | null> {
+  return (await connectionStateDetailed(email, opts)).state;
 }
 
 export interface DisconnectResult {

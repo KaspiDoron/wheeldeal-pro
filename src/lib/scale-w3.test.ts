@@ -107,7 +107,11 @@ describe("scale #9 - the recovery sweep scales with the fleet", () => {
 
   it("the ping route uses the proportional cap with a full-window rotation", () => {
     const ping = readCode("src/app/api/wa/ping/route.ts");
-    expect(ping).toMatch(/rotateWindow\(roster, minute, sweepCapForFleet\(roster\.length\)\)/);
+    // The cap and the full-window rotation are unchanged; the call was split
+    // across two lines when the ping started handing the per-thread rotation
+    // its own tick (audit F233 - the two rotations must not share one clock).
+    expect(ping).toMatch(/const cap = sweepCapForFleet\(roster\.length\)/);
+    expect(ping).toMatch(/rotateWindow\(roster, minute, cap\)/);
     expect(ping).not.toMatch(/pickSweepEmails\(senders, minute, 3\)/);
   });
 });

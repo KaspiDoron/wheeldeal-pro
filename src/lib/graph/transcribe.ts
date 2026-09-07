@@ -81,14 +81,23 @@ export async function whisperModel(): Promise<string> {
   return ((await getConfig("GROQ_WHISPER_MODEL")) ?? "").trim() || DEFAULT_WHISPER_MODEL;
 }
 
+/**
+ * THE 20s WHISPER BUDGET SPANS HEADERS **AND** BODY (audit M20).
+ *
+ * `clearTimeout` used to run the moment `await fetch(...)` resolved, which is
+ * the header boundary - and the caller then does `await res.json()` on the same
+ * controller. A transcription endpoint that flushed 200 headers and then went
+ * quiet therefore ran on undici's ~300s default bodyTimeout instead of this
+ * budget, holding the inbound turn (and the reply-tick invocation behind it)
+ * open until the platform killed it. Same rule, same shape, same words as
+ * runtime-config's `timedFetch`; `unref()` so a pending timer never keeps the
+ * runtime alive, and once the body is read the abort is a no-op.
+ */
 async function fetchWithTimeout(url: string, init: RequestInit, ms: number): Promise<Response> {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), ms);
-  try {
-    return await fetch(url, { ...init, signal: controller.signal });
-  } finally {
-    clearTimeout(t);
-  }
+  (t as { unref?: () => void }).unref?.();
+  return fetch(url, { ...init, signal: controller.signal });
 }
 
 export async function transcribeAudio(opts: {

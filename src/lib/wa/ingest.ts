@@ -45,6 +45,7 @@ import { kickDispatcher } from "@/lib/wa/kick";
 import { finishBeforeResponse } from "@/lib/after";
 import { parseInboundCoords, describeShopLocation, distanceNote } from "@/lib/wa/inbound-location";
 import { insertUserEvent } from "../events";
+import { mediaClarifyKind } from "@/lib/wa/media-clarify";
 
 // The region of the last outbound to this shop - primes the voice transcriber
 // for the local accent (best-effort; undefined just means no language hint).
@@ -167,13 +168,69 @@ function contactMessage(data: any): { name?: string; digits?: string } | null {
 
 // Media downloads fail transiently (host mid-restart, expired media). A
 // price-list photo silently lost = a lost offer, so retry with backoff.
-async function fetchMediaWithRetry(
+//
+// BOUNDED BY A WALL CLOCK, NOT BY AN ATTEMPT COUNT (audit F047).
+//
+// The ladder used to count only its SLEEPS: "0+2s+5s", 7s, which is what the
+// turn-wall arithmetic in agent-loop.ts assumed the media stage cost. But each
+// attempt is a REQUEST, and fetchMediaBase64 swallows evoFetch's 12s abort as
+// a plain null - so a host that does not answer bought 12+2+12+5+12 = 43s, all
+// of it spent BEFORE the inbound slot and therefore entirely outside
+// processVendorReply's 72s wall. 43 + 12 + 72 against Cloud Run's 90s timeout
+// killed the request mid-turn, and the shop's photo then sat behind the
+// 10-minute inbound claim lease.
+//
+// The budget only decides whether the NEXT attempt may START: an attempt
+// already in flight is never cut short, so a large price board that is slow
+// but SUCCEEDING still completes on evoFetch's own clock and never degrades
+// into the "send it as text" clarify. A stage that cannot fit another full
+// attempt stops instead, leaving the media-fetch-failed breadcrumb and the
+// media re-read sweep to carry the degraded case honestly.
+const MEDIA_ATTEMPT_MS = 12_000; // evoFetch's hard per-request abort
+const MEDIA_STAGE_BUDGET_MS = 20_000;
+/**
+ * The whole webhook request's wall clock (audit F062), under Cloud Run's
+ * `--timeout 90` with room for auth, the payload parse, the response write and
+ * the opportunistic drain in the tail.
+ */
+const REQUEST_WALL_MS = 85_000;
+/**
+ * How much of that a request may spend downloading media, across EVERY stage it
+ * runs (burst leader + siblings + video + voice note). Sized so a turn always
+ * enters with well over TURN_ENTRY_FLOOR_MS left, while a healthy host - where
+ * a frame takes well under a second - never notices the ceiling.
+ */
+const MEDIA_WINDOW_MS = 30_000;
+/**
+ * A turn started with less than this left cannot land inside the request, so
+ * the item is redelivered instead. It is deliberately far BELOW the 72s turn
+ * wall: that wall is a ceiling for the pathological case, not the cost of a
+ * turn (a median inbound turn is 15-25s), and refusing to start below it would
+ * strand ordinary photo turns that would have finished comfortably.
+ */
+const TURN_ENTRY_FLOOR_MS = 20_000;
+
+//
+// AND THE STAGE BUDGET IS CLIPPED TO THE REQUEST (audit F062). The 20s ceiling
+// above bounds ONE stage; a single webhook can hold several (a burst leader's
+// own frame, then every sibling, then a video or a voice note), and they are
+// all sequential in front of the gate and the turn. `requestDeadlineAt` is the
+// one deadline the whole request shares, so the ladder stops when EITHER clock
+// runs out.
+export async function fetchMediaWithRetry(
   email: string,
-  data: any
+  data: any,
+  requestDeadlineAt?: number
 ): Promise<{ mime: string; base64: string } | null> {
   const { fetchMediaBase64 } = await import("@/lib/evolution");
+  const deadlineAt = Math.min(
+    Date.now() + MEDIA_STAGE_BUDGET_MS,
+    requestDeadlineAt ?? Number.POSITIVE_INFINITY
+  );
   const delays = [0, 2000, 5000];
   for (const wait of delays) {
+    // Never start a backoff + attempt that cannot finish inside the budget.
+    if (Date.now() + wait + MEDIA_ATTEMPT_MS > deadlineAt) break;
     if (wait > 0) await new Promise((r) => setTimeout(r, wait));
     try {
       const media = await fetchMediaBase64(email, data);
@@ -244,6 +301,27 @@ export async function processEvolutionWebhook(
   // paid on the reply's critical path. Each message arms a closure here; they
   // all fire together after the replies have been composed and parked.
   const deferredPushes: Array<() => Promise<void>> = [];
+  // ONE DEADLINE FOR THE WHOLE REQUEST (audit F062).
+  //
+  // The inbound budget was derived as gate (12s) + turn (72s) against Cloud
+  // Run's 90s ceiling, and called real because those two are sequential. They
+  // are - and so is everything upstream of them in this same request: the burst
+  // leader's own media ladder, one sequential download per sibling frame, a
+  // video or a voice note, and then the next item of the batch. Each of those
+  // bottoms out in Evolution's 12s abort, so a three-frame board on a cold host
+  // burned ~67s before the gate was even entered and the turn then opened a
+  // FRESH 72s wall. The request was killed mid-turn, the inbound claim kept its
+  // ten-minute lease, and the shop's price board sat unanswered for roughly
+  // nineteen minutes.
+  //
+  // The clocks below are the fix: media work is clipped to what is left of the
+  // media window, and an item that can no longer be given a real turn is left
+  // UNCLAIMED and redelivered instead of half-run. The turn wall itself is
+  // never shortened - five downstream budgets derive from it, so a clipped wall
+  // would buy latency by degrading the reply.
+  const requestStartedAt = Date.now();
+  const msLeft = () => requestStartedAt + REQUEST_WALL_MS - Date.now();
+  const mediaDeadlineAt = requestStartedAt + MEDIA_WINDOW_MS;
   if (!body) return { retryable };
 
   try {
@@ -476,6 +554,21 @@ export async function processEvolutionWebhook(
           via: "webhook",
           total: items.length,
           kept: heavyProcessed,
+          redelivery: "requested",
+        });
+        break;
+      }
+      // THE SAME ADVANCING WINDOW, ON THE CLOCK (audit F062). Checked here -
+      // before any store claim is taken - so a deferred item is genuinely
+      // unclaimed and the redelivery runs it with a full budget, rather than
+      // being cheap-skipped as "already handled" by a turn that never ran.
+      if (msLeft() < TURN_ENTRY_FLOOR_MS) {
+        retryable = true;
+        void noteInboundDropped(undefined, "batch", "batch-truncated", {
+          via: "webhook",
+          total: items.length,
+          kept: heavyProcessed,
+          cause: "request-budget",
           redelivery: "requested",
         });
         break;
@@ -734,11 +827,29 @@ export async function processEvolutionWebhook(
             const g = worthAnInterruption({ kind: "takeover" }, await notifyState(email));
             if (g.notify) {
               const { sendPushToUser } = await import("@/lib/push");
-              await sendPushToUser(email, {
-                title: "You've got the wheel 🤝",
-                body: "You messaged this shop yourself - Will is standing down on that chat until you hand it back (open the conversation in the app).",
-                url: "/",
-              }).catch(() => {});
+              // BUDGETED, like every other push in this file (audit F040).
+              //
+              // This was the ONE bare `await sendPushToUser(...)` here - the
+              // wa-disconnected push, the deferred shop-replied pushes and the
+              // read receipts all run inside finishBeforeResponse. web-push
+              // gives its https.request no timeout, so a push endpoint that
+              // completes TLS and then stops answering held THIS webhook open
+              // until Cloud Run killed it at 90s - after the destructive
+              // stand-down above had already deleted the queue - taking the
+              // rest of the batch, the deferred pushes and the blue-tick
+              // receipts with it. push.ts now bounds each device too, so one
+              // dead subscription cannot eat the whole allowance.
+              await finishBeforeResponse("takeover-push", () =>
+                sendPushToUser(email, {
+                  title: "You've got the wheel 🤝",
+                  body: "You messaged this shop yourself - Will is standing down on that chat until you hand it back (open the conversation in the app).",
+                  url: "/",
+                }).catch(() => {})
+              );
+              // OUTSIDE the budget on purpose: this is the 4-per-window
+              // ceiling accounting, and leaving it inside the race meant it
+              // was skipped exactly when the push was slowest - the same
+              // under-count as before, merely bounded.
               await markPushSent(email, `takeover: ${g.reason}`);
             }
           }
@@ -1205,18 +1316,29 @@ export async function processEvolutionWebhook(
       // frame is exactly where it used to be lost.
       const images: InboundImage[] = [];
       let mediaFetchFailed = false;
+      // WHY the image/document stage came up empty: a download that never
+      // answered, or a frame OUR request budget excluded. The two need
+      // different words in the traveller's panel, and only one of them is
+      // worth retrying (audit F154).
+      let mediaFailure: import("@/lib/agent-loop").MediaClarifyReason = "download";
       let videoUnreadable = false;
+      let audioUnreadable = false;
+      // A shop's PDF rate card is not a photo, and the breadcrumbs used to call
+      // it one - the single trace a dropped rate card left said "Photo ... is
+      // too large to read" (audit F154).
+      const frameLabel = docIsImage && !hasImage ? "Document" : "Photo";
       if ((hasImage || docIsImage) && email) {
         const { assembleImageBurst } = await import("@/lib/wa/image-burst");
         const verdict = await assembleImageBurst({
           email,
           fromDigits: from,
           ownMsgId: msgId,
-          fetchOwn: () => fetchMediaWithRetry(email, data),
+          fetchOwn: () => fetchMediaWithRetry(email, data, mediaDeadlineAt),
           fetchByKey: async (key) => {
             const { fetchMediaBase64 } = await import("@/lib/evolution");
             return fetchMediaBase64(email, { key }).catch(() => null);
           },
+          mediaDeadlineAt,
         });
         if (verdict.standDown) {
           // A newer sibling's invocation owns the whole burst - this frame's
@@ -1247,7 +1369,7 @@ export async function processEvolutionWebhook(
                   kind: "media-unreadable",
                   vendor_id: "",
                   vendor_name: from,
-                  detail: `Photo from +${from} is too large to read (${Math.round(d.chars / 1_400_000) / 1}MB) - the agent asks for a smaller one (email ${email}).`,
+                  detail: `${frameLabel} from +${from} is too large to read (${Math.round(d.chars / 1_400_000) / 1}MB) - the agent asks for a smaller one (email ${email}).`,
                 }
               : {
                   kind: "image-batch-truncated",
@@ -1265,7 +1387,7 @@ export async function processEvolutionWebhook(
             kind: "media-fetch-failed",
             vendor_id: "",
             vendor_name: from,
-            detail: `${verdict.ownFetchFailed ? "Photo" : "Burst photo"} from +${from} failed to download after 3 attempts (email ${email}).`,
+            detail: `${verdict.ownFetchFailed ? frameLabel : `Burst ${frameLabel.toLowerCase()}`} from +${from} failed to download after 3 attempts (email ${email}).`,
           }).catch(() => {});
         }
         // NEVER-SILENT with the SHOP: when NOTHING readable survived (every
@@ -1273,6 +1395,13 @@ export async function processEvolutionWebhook(
         // processVendorReply with the photo-clarify so the agent warmly asks
         // for the price in text. The old `continue` left the vendor on read.
         mediaFetchFailed = images.length === 0;
+        // A frame that arrived and was then excluded for its SIZE was never
+        // sent to a reader - saying "download failed" about it, and arming a
+        // re-read that can only fail the same way, is the lie F154 found.
+        if (mediaFetchFailed) {
+          mediaFailure =
+            verdict.ownFetchFailed || verdict.fetchFailures > 0 ? "download" : "too-large";
+        }
       }
 
       // NATIVE VIDEO (owner report 4, owner decision): a shop filming the bike
@@ -1283,7 +1412,7 @@ export async function processEvolutionWebhook(
       // one video at a time). Oversized or exotic formats degrade to the
       // honest "could not watch it" ask below - never silence.
       if (hasVideo && email && images.length === 0) {
-        const media = await fetchMediaWithRetry(email, data);
+        const media = await fetchMediaWithRetry(email, data, mediaDeadlineAt);
         const mime = media?.mime || videoMessage(data)?.mimetype || "";
         const { MAX_REQUEST_B64_CHARS } = await import("@/lib/media/frame-budget");
         if (media && /^video\/(mp4|3gpp)\b/i.test(mime) && media.base64.length <= MAX_REQUEST_B64_CHARS) {
@@ -1312,9 +1441,33 @@ export async function processEvolutionWebhook(
       // engine. Caption and transcript both feed the turn now.
       let transcript: { text: string; language?: string; source: string } | null = null;
       if (hasAudio && email) {
+        // WHICH HALF FAILED. Both were silent: a download that returned null
+        // fell through `if (media)`, and a transcription that returned null
+        // fell through the empty catch - so a revoked transcription key made
+        // every voice note in the fleet arrive as the bare label "[voice
+        // note]" with no breadcrumb anywhere and no ask to the shop, while the
+        // health panel counted three confident zeroes (audit F153).
+        let audioDownloaded = false;
         try {
-          const media = await fetchMediaWithRetry(email, data);
+          const media = await fetchMediaWithRetry(email, data, mediaDeadlineAt);
           if (media) {
+            audioDownloaded = true;
+            // AN AUDIT COPY, LIKE EVERY OTHER MEDIA KIND ON THIS PATH (F152).
+            // The burst frames (:audit above) and native video both keep a
+            // redeemable copy in Supabase Storage; audio never did. WhatsApp
+            // expires media and the mandatory wd-evo-prune cron drops the
+            // message from Evolution's own database after 7 days, so
+            // /api/wa/media - which already probes `<id>.ogg` - could only
+            // ever miss, and the <audio> element in "Full conversation" died
+            // while a photo from the same thread still played. Fire-and-
+            // forget by contract: it never throws and never slows the turn.
+            const { storeMediaAudit } = await import("@/lib/media/audit");
+            if (msgId) {
+              void storeMediaAudit(msgId, {
+                mime: media.mime || "audio/ogg",
+                base64: media.base64,
+              });
+            }
             const { transcribeAudio } = await import("@/lib/graph/transcribe");
             const { threadLanguageMode } = await import("@/lib/wa/thread-language");
             const rfqRegion = await regionForThread(from, email);
@@ -1331,6 +1484,20 @@ export async function processEvolutionWebhook(
           }
         } catch {
           /* transcription is best-effort - engine sends a polite fallback */
+        }
+        // ONE ROW PER VOICE NOTE NOBODY COULD HEAR - the breadcrumb the photo
+        // and video paths have had all along. Voided, never awaited: the audio
+        // branch is on the inbound reply path and a metric never costs a turn.
+        if (!(transcript?.text ?? "").trim()) {
+          audioUnreadable = true;
+          void insertUserEvent(email, {
+            kind: "transcribe-failed",
+            vendor_id: "",
+            vendor_name: from,
+            detail: audioDownloaded
+              ? `Voice note from +${from} downloaded but could not be transcribed - the agent asks for the price in text (email ${email}).`
+              : `Voice note from +${from} failed to download, so there was nothing to transcribe (email ${email}).`,
+          }).catch(() => {});
         }
         // THE SPOKEN HALF IS THE MESSAGE (owner report 6 K1). syntheticText
         // was "[voice note]" by the time transcription finished, and nothing
@@ -1380,11 +1547,45 @@ export async function processEvolutionWebhook(
         }
       }
 
+      // NEVER-SILENT, FOR EVERY LABEL THE SHARED READER CAN EMIT (audit F154).
+      //
+      // This decision used to be three string comparisons inline - "[photo]",
+      // "[image]" and "[video]" - and waMessageText also returns "[document]"
+      // for a captionless PDF rate card and "[video note]" for a round
+      // ptvMessage. Both skipped BOTH arms: the turn extracted from a bare
+      // bracket label, no reading was stamped, and the shop was left on read.
+      // The rule is pure and lives in wa/media-clarify so it is executed under
+      // test rather than pinned by a regex over this file.
+      const clarifyKind = mediaClarifyKind({
+        text: syntheticText,
+        mediaFetchFailed,
+        videoUnreadable,
+        audioUnreadable,
+      });
+      let preExtracted: import("@/lib/agents").ExtractedOffer | undefined;
+      if (clarifyKind) {
+        const clarify = await import("@/lib/agent-loop");
+        preExtracted =
+          clarifyKind === "photo"
+            ? clarify.photoClarifyExtraction({
+                reason: mediaFailure,
+                subject: docIsImage && !hasImage ? "file" : "photo",
+              })
+            : clarifyKind === "video"
+              ? clarify.videoClarifyExtraction()
+              : clarify.voiceClarifyExtraction();
+      }
+
       // BOUNDED CONCURRENCY (scale #7): cap heavy AI turns in flight per
       // instance so a burst of simultaneous webhooks under --concurrency 32
       // cannot spike RAM/CPU and slow everyone's reply together. Never drops a
       // turn - a waiter proceeds ungated past its patience window.
       const { withInboundSlot } = await import("@/lib/wa/inbound-gate");
+      // The gate's patience is the half of the ceiling that can move for free
+      // (audit F062): a turn that has already spent request budget on media
+      // must not then queue for the full 12s. The gate never drops a reply -
+      // a waiter past its patience simply proceeds ungated.
+      const gatePatienceMs = msLeft() - TURN_ENTRY_FLOOR_MS;
       await withInboundSlot(async () => processVendorReply({
         fromDigits: from,
         // The RESOLVED origin chat - asserted against `from` before attributing.
@@ -1397,24 +1598,10 @@ export async function processEvolutionWebhook(
         waMessageId: msgId,
         senderEmail: email ?? undefined,
         humanDelay: Boolean(email),
-        // A photo we could not download (and no caption to extract from):
-        // inject the never-silent clarify so the shop still gets a warm ask
-        // for the price in text instead of silence. A video we could not
-        // watch gets its own honest ask - "[video]" is the placeholder body a
-        // captionless video carries, so the guard reads as "video and nothing
-        // else to go on".
-        preExtracted:
-          // '[photo]'/'[image]' is what a CAPTIONLESS photo carries by the
-          // time it gets here (the shared reader's placeholder) - so the old
-          // `!syntheticText` guard made the never-silent clarify dead code on
-          // the live path: a failed download ran a bare text turn over the
-          // placeholder instead.
-          mediaFetchFailed &&
-          (!syntheticText || syntheticText === "[photo]" || syntheticText === "[image]")
-            ? (await import("@/lib/agent-loop")).photoClarifyExtraction()
-            : videoUnreadable && syntheticText === "[video]"
-              ? (await import("@/lib/agent-loop")).videoClarifyExtraction()
-              : undefined,
+        // Media we could not read, and no words beside it: the never-silent
+        // clarify computed above, so the shop gets a warm ask for the price in
+        // a form we can read instead of silence.
+        preExtracted,
         // THE AGENT'S REPLY IS A REPLY. It was billed as a cold introduction.
         //
         // This is the send SPTE's inline `guardAndSend` uses for the actual
@@ -1435,7 +1622,7 @@ export async function processEvolutionWebhook(
           if (!email) return { ok: false, error: "unknown instance" };
           return sendFromUser(email, to, message, true, { lane: "reply" });
         },
-      }));
+      }), gatePatienceMs);
       } catch (e) {
         // One bad message in the batch must not drop its siblings (DEFECT 5) -
         // the webhook already 200s so Evolution never redelivers. Skip this

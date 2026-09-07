@@ -376,6 +376,7 @@ const UNAVAILABLE_REASON: Record<string, string> = {
   blocked: "the image reader declined to describe this one",
   timeout: "the image reader did not answer in time",
   network: "we could not reach the image reader",
+  "too-large": "the file was too large for the image reader",
   upstream: "the image reader was having problems",
 };
 

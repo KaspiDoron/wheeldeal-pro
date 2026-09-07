@@ -25,6 +25,7 @@ export type VisionFailure =
   | "bad-model" // 400/404 - the model id drifted
   | "blocked" // 200 with no content - safety filter / empty generation
   | "truncated" // the generation hit OUR token ceiling - a cut-off answer, not a read
+  | "too-large" // the frame exceeded OUR request ceiling - never sent to a reader
   | "timeout" // our own budget aborted the call
   | "network" // fetch threw
   | "upstream"; // 5xx and anything else
@@ -89,6 +90,9 @@ const FAILURE_RANK: VisionFailure[] = [
   "truncated",
   "blocked",
   "bad-model",
+  // Our own ceiling, and the one the traveller can act on ("send a smaller
+  // one") - so it outranks the provider moods below it.
+  "too-large",
   "timeout",
   "upstream",
   "network",

@@ -73,8 +73,16 @@ export async function recentActiveSenders(hours = 36, scan = 100): Promise<strin
 /**
  * Reconcile recent inbound replies for one user. Returns how many missed
  * messages were recovered (0 on the throttled fast path).
+ *
+ * `rotationTick` is which PASS over the sender roster this call belongs to -
+ * the cron passes it (audit F233), the traveller's own poll leaves it unset and
+ * keeps the wall-clock minute, which is honest there because that caller runs
+ * on consecutive ticks.
  */
-export async function syncInboundReplies(email: string): Promise<number> {
+export async function syncInboundReplies(
+  email: string,
+  opts: { rotationTick?: number; deadlineAt?: number } = {}
+): Promise<number> {
   const store = lastSyncStore();
   const last = store.get(email) ?? 0;
   if (Date.now() - last < SYNC_MIN_GAP_MS) return 0;
@@ -95,12 +103,42 @@ export async function syncInboundReplies(email: string): Promise<number> {
   // large batch (ultra: 40 shops) the earlier shops were NEVER swept - the
   // same newest five were re-checked every pass while an older shop's missed
   // reply stayed missed. The minute index walks the whole list over time.
+  //
+  // AND ITS TICK IS NOT THE WALL CLOCK ON THE CRON PATH (audit F233). The ping
+  // picks WHICH travellers to sweep this minute with the same rotateWindow on
+  // the same `Math.floor(Date.now()/60_000)`, so a traveller selected only on a
+  // sparse residue of minutes only ever saw the inner window starts belonging
+  // to those minutes: a fixed contiguous block of their shops was never pulled
+  // at all (15 of 20 threads on a 4-user fleet, 5 of 20 on a 60-user one, for
+  // every roster position). The cron hands us its roster PASS instead, which
+  // advances by exactly one per visit - what rotateWindow's "a full window per
+  // tick" contract actually needs.
   const { rotateWindow } = await import("./wa/sweep");
-  const numbers = rotateWindow(allNumbers, Math.floor(Date.now() / 60_000), MAX_THREADS);
+  const numbers = rotateWindow(
+    allNumbers,
+    opts.rotationTick ?? Math.floor(Date.now() / 60_000),
+    MAX_THREADS
+  );
   if (numbers.length === 0) return 0;
 
   let recovered = 0;
-  const deadline = Date.now() + RUN_BUDGET_MS;
+  // ONE DEADLINE FOR THE WHOLE SWEEP, INNER LOOP INCLUDED (audit F063).
+  //
+  // This was tested only at the top of the per-THREAD loop below, while the
+  // per-MESSAGE loop called processVendorReply - a full 72s-wall turn - with no
+  // deadline at all. One thread holding four unanswered shop messages ran four
+  // sequential turns after passing a single 8s check, inside a caller that
+  // advertises 8s: the ping (already up to 50s into its drain) blew Cloud Run's
+  // 90s kill, so its end-of-run heartbeat was never written and the rest of that
+  // minute's senders were never swept.
+  //
+  // A turn already under way is never cut short - the wall stays a full
+  // TURN_WALL_MS, because five downstream budgets are derived from it and a
+  // shortened one produces a DEGRADED reply on the traveller's own number
+  // rather than a faster sweep. What the deadline decides is whether the NEXT
+  // turn starts; anything left over keeps its claim and is picked up by the
+  // next pass, which is exactly what the claim lease is for.
+  const deadline = opts.deadlineAt ?? Date.now() + RUN_BUDGET_MS;
   for (const digits of numbers) {
     if (Date.now() > deadline) break; // stay snappy - next poll continues
     try {
@@ -246,6 +284,10 @@ export async function syncInboundReplies(email: string): Promise<number> {
       const ourIds = new Set(ours.map((o) => o.wa_message_id).filter(Boolean));
 
       for (const m of inbound) {
+        // The budget the caller was promised, honoured per MESSAGE (F063).
+        // Whatever is left here still holds its claim and is recovered by the
+        // next pass - a late reply, never a lost one.
+        if (Date.now() > deadline) break;
         // ANSWERED is the skip predicate, not STORED: a stored row whose turn
         // failed still deserves a retry (its reply claim was released).
         if (answeredIds.has(m.id)) continue;
