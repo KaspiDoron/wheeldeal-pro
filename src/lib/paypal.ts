@@ -40,19 +40,58 @@ async function paypalBase(): Promise<string> {
  * So one helper carries the whole discipline - the same one whatsapp.ts and
  * waba/send.ts already use - and answers `null` for "no reply", which every
  * caller here already had to handle for a non-ok response.
+ *
+ * THE CEILING COVERS THE BODY, NOT JUST THE HEADERS (audit M21b). fetch()
+ * resolves the instant response HEADERS arrive; clearing the timer there would
+ * leave the `res.json()` every caller then performs sharing an AbortController
+ * nobody will ever fire, and undici's default bodyTimeout is ~300s - far past
+ * the platform request limit. A PayPal that streams headers and then stalls
+ * mid-body would still hang the pre-grant read inside
+ * `confirmPaypalSubscription`, which sits outside the 8s supersede race. So the
+ * body is read HERE, inside the armed deadline, and the timer is cleared only
+ * afterwards - the rule written down at `runtime-config.ts` (`timedFetch`) and
+ * the shape `waba/send.ts` already follows.
  */
 const PAYPAL_TIMEOUT_MS = 10_000;
 
-async function paypalFetch(url: string, init: RequestInit): Promise<Response | null> {
+interface PaypalReply {
+  ok: boolean;
+  status: number;
+  /**
+   * Re-serves the ALREADY-READ body. Rejects on a non-JSON body exactly as
+   * `Response.json()` does, so every call site's `.catch(...)` fallback still
+   * lands on the same value it did before.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  json: () => Promise<any>;
+}
+
+async function paypalFetch(url: string, init: RequestInit): Promise<PaypalReply | null> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), PAYPAL_TIMEOUT_MS);
   (timer as { unref?: () => void }).unref?.();
   try {
-    return await fetch(url, { ...init, signal: ctrl.signal, cache: "no-store" });
+    const res = await fetch(url, { ...init, signal: ctrl.signal, cache: "no-store" });
+    // Inside the deadline. `undefined` means "there was no JSON body" - an
+    // empty 204, or an HTML error page - which is not itself a failure.
+    const body = await res.json().catch(() => undefined);
+    // But a deadline that fired WHILE the body was in flight is: that is
+    // "PayPal did not reply", not a 200 whose body happened to be empty. Saying
+    // otherwise would report a stalled cancel as a confirmed one.
+    if (ctrl.signal.aborted) return null;
+    return {
+      ok: res.ok,
+      status: res.status,
+      json: async () => {
+        if (body === undefined) throw new Error("PayPal returned no JSON body");
+        return body;
+      },
+    };
   } catch {
     // Aborted, refused, DNS - all the same answer: PayPal did not reply.
     return null;
   } finally {
+    // Safe HERE and only here: the body is already read.
     clearTimeout(timer);
   }
 }

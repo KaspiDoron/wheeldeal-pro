@@ -529,8 +529,25 @@ runcmd:
   - iptables -I INPUT 6 -m state --state NEW -p tcp --dport 8080 -j ACCEPT
   - netfilter-persistent save
   - sleep 5
-  - docker run -d --name evolution --restart always -p 8080:8080 -e AUTHENTICATION_API_KEY="wd-pool-KEY" -e DATABASE_ENABLED="true" -e DATABASE_PROVIDER="postgresql" -e DATABASE_CONNECTION_URI="postgresql://user:YOUR-DB-PASSWORD@your-dedicated-evo-db-host:5432/postgres" -e DATABASE_SAVE_DATA_INSTANCE="true" -e DATABASE_SAVE_DATA_NEW_MESSAGE="false" -e DATABASE_SAVE_DATA_MESSAGE_UPDATE="false" -e DATABASE_SAVE_DATA_CONTACTS="false" -e DATABASE_SAVE_DATA_CHATS="false" -e CACHE_LOCAL_ENABLED="true" -e CACHE_REDIS_ENABLED="false" -e CONFIG_SESSION_PHONE_CLIENT="Mac OS" -e CONFIG_SESSION_PHONE_NAME="Chrome" evoapicloud/evolution-api:v2.3.7
+  - docker run -d --name evolution --restart always -p 8080:8080 -e AUTHENTICATION_API_KEY="wd-pool-KEY" -e DATABASE_ENABLED="true" -e DATABASE_PROVIDER="postgresql" -e DATABASE_CONNECTION_URI="postgresql://user:YOUR-DB-PASSWORD@your-dedicated-evo-db-host:5432/postgres" -e DATABASE_SAVE_DATA_INSTANCE="true" -e DATABASE_SAVE_DATA_NEW_MESSAGE="true" -e DATABASE_SAVE_DATA_MESSAGE_UPDATE="false" -e DATABASE_SAVE_DATA_CONTACTS="false" -e DATABASE_SAVE_DATA_CHATS="true" -e DATABASE_SAVE_IS_ON_WHATSAPP="false" -e CACHE_LOCAL_ENABLED="true" -e CACHE_REDIS_ENABLED="false" -e CONFIG_SESSION_PHONE_CLIENT="Mac OS" -e CONFIG_SESSION_PHONE_NAME="Chrome" evoapicloud/evolution-api:v2.3.7
 ```
+
+**The message store is ON in that line, so the prune is MANDATORY.**
+`SAVE_DATA_NEW_MESSAGE` and `SAVE_DATA_CHATS` are `true` because the
+missed-reply sweep reads a 10-row tail per chat via `/chat/findMessages` and
+that endpoint serves FROM this store - a host built with them `false` answers an
+empty list and silently rescues nothing. The price is a transient copy of every
+message on every linked number, so a 7-day prune has to run against the shared
+Evolution database. Run it ONCE for the whole pool (one VM, or the
+`wd-evo-prune` cron on Render) - not once per host, they all share one DB:
+
+```
+docker run -d --name evo-prune --restart always -e PGPASSWORD="YOUR-DB-PASSWORD" postgres:16-alpine sh -c "while true; do sleep 86400; psql -h your-dedicated-evo-db-host -U user -d postgres -v ON_ERROR_STOP=0 -c 'DELETE FROM \"Message\" WHERE \"messageTimestamp\" < EXTRACT(EPOCH FROM now()) - 604800;' || echo 'prune: skipped (table missing or renamed) - not fatal'; done"
+```
+
+604800 seconds is the 7-day window the Privacy Policy discloses. Nothing in the
+app reads further back than a 10-row tail, so this deletes only what no code
+path wants.
 
 Shape choice (smooth WhatsApp, $0): the ARM VM.Standard.A1.Flex (up to 4 OCPU +
 24 GB total, splittable) is the real powerhouse and is free. If it shows "Out of

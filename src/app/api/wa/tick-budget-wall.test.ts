@@ -43,7 +43,9 @@ const ctl = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/evolution", () => ({
-  webhookToken: async () => "tok",
+  // Host-independent since audit M5: the cron routes authenticate with the
+  // env-only derivation, so a vault brownout can no longer 403 the scheduler.
+  webhookAuthToken: () => "tok",
   sendFromUser: async () => ({ ok: true, messageId: "3EB0" }),
 }));
 vi.mock("@/lib/wa/webhook-token", () => ({ tokenMatches: () => true }));

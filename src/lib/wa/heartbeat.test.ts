@@ -39,8 +39,16 @@ describe("the heartbeat exists in infrastructure, not in a doc", () => {
 
   it("it authenticates with the token the ping route already accepts", () => {
     // Same derivation as src/lib/wa/webhook-token.ts - no new secret to set,
-    // nothing extra for the owner to configure by hand.
-    expect(wf).toMatch(/printf 'wd-webhook:%s' "\$SESSION_SECRET" \| sha256sum \| cut -c1-32/);
+    // nothing extra for the owner to configure by hand. This USED TO PIN the
+    // unsalted shape, which is exactly what audit F179/M10 found: the app
+    // folds WEBHOOK_TOKEN_SALT in and the schedulers did not, so the
+    // documented rotation 403'd the whole heartbeat. The equality of the two
+    // derivations is now proven by EXECUTING the workflow's own snippet in
+    // src/lib/wa/scheduler-token-salt.test.ts; this only pins that the salted
+    // form is what is there.
+    expect(wf).toMatch(/SALTED="wd-webhook:\$SESSION_SECRET"/);
+    expect(wf).toMatch(/TOKEN="\$\(printf '%s' "\$SALTED" \| sha256sum \| cut -c1-32\)"/);
+    expect(wf).not.toMatch(/printf 'wd-webhook:%s'/);
     const tok = readCode("src/lib/wa/webhook-token.ts");
     expect(tok).toMatch(/wd-webhook:\$\{secret\}/);
     expect(tok).toMatch(/\.slice\(0, 32\)/);
@@ -164,8 +172,13 @@ describe("a heartbeat with one source of failure is not a heartbeat", () => {
     expect(hb).toMatch(/cron: "0 \* \* \* \*"/);
     expect(hb).not.toMatch(/cron: "\*\/5/);
     expect(hb).toMatch(/\/api\/wa\/ping\?token=/);
-    // Same token derivation - no new secret for the owner to manage.
-    expect(hb).toMatch(/printf 'wd-webhook:%s' "\$SESSION_SECRET" \| sha256sum \| cut -c1-32/);
+    // Same token derivation - no new secret for the owner to manage, and the
+    // optional rotation salt folded in the way the app folds it (F179/M10:
+    // this line used to pin the UNSALTED form, so a rotation locked the
+    // backstop out too).
+    expect(hb).toMatch(/SALTED="wd-webhook:\$SESSION_SECRET"/);
+    expect(hb).toMatch(/TOKEN="\$\(printf '%s' "\$SALTED" \| sha256sum \| cut -c1-32\)"/);
+    expect(hb).not.toMatch(/printf 'wd-webhook:%s'/);
     // A failed ping must not paint the repo red and train the owner to ignore it.
     expect(hb).toMatch(/::warning::/);
   });

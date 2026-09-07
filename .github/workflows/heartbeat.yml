@@ -67,6 +67,10 @@ jobs:
           APP_DOMAIN: ${{ secrets.APP_DOMAIN }}
           SERVICE_URL: ${{ secrets.CLOUD_RUN_URL }}
           SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+          # The rotation salt the app folds into the same token (audit
+          # F179/M10). Dropping it here 403'd the backstop the moment the
+          # owner used the documented rotation knob.
+          WEBHOOK_TOKEN_SALT: ${{ secrets.WEBHOOK_TOKEN_SALT }}
         run: |
           set -uo pipefail
           BASE="${APP_DOMAIN:-${SERVICE_URL:-}}"
@@ -79,8 +83,11 @@ jobs:
             http://*|https://*) ;;
             *) BASE="https://$BASE" ;;
           esac
-          # Same derivation as src/lib/wa/webhook-token.ts - no new secret.
-          TOKEN="$(printf 'wd-webhook:%s' "$SESSION_SECRET" | sha256sum | cut -c1-32)"
+          # Same derivation as src/lib/wa/webhook-token.ts - no new secret,
+          # and the optional salt folded in exactly as the app folds it.
+          SALTED="wd-webhook:$SESSION_SECRET"
+          if [ -n "${WEBHOOK_TOKEN_SALT:-}" ]; then SALTED="$SALTED:$WEBHOOK_TOKEN_SALT"; fi
+          TOKEN="$(printf '%s' "$SALTED" | sha256sum | cut -c1-32)"
           CODE="$(curl -sS -o /tmp/ping.out -w '%{http_code}' --max-time 60 \
             "$BASE/api/wa/ping?token=$TOKEN" || echo 000)"
           echo "HTTP $CODE"

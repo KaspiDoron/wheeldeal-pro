@@ -455,7 +455,10 @@ loop, at zero reply-path risk; the live call buys suppression and narrowing.
 
 **Corpus sources by value:** `agent_reviews` (`better_response` plus
 rating/verdict/tags) is the richest labelled set and the first target;
-`vendor_replies` second; `agent_training` is owner-authored and small;
+`vendor_replies` second; `agent_training` is small and, since audit F171,
+registered as user-keyed (`user_email`) in the erasure registry - the Ops
+writers stamp the person whose exchange the text was copied from, so a corpus
+built from it inherits that person and must be erased with them;
 `agent_events` `engine-v3-turn` is clipped to 180 characters, so the sidecar's
 1200-character snippet is strictly better material than what the distil loop
 mines today; `agent_traces` is written only by the graph engine and is nearly

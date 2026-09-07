@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { pingAllHosts, webhookToken } from "@/lib/evolution";
+import { pingAllHosts, webhookAuthToken } from "@/lib/evolution";
 
 export const dynamic = "force-dynamic";
 
@@ -18,15 +18,27 @@ export async function GET(req: Request) {
   const INVOCATION_BUDGET_MS = 75_000;
   const msLeft = () => invocationStartedAt + INVOCATION_BUDGET_MS - Date.now();
   // FAIL CLOSED. This route drains the outbox, pings hosts and sweeps inbound -
-  // heavy, fleet-wide work. When the token cannot be derived (no hosts
-  // configured, or SESSION_SECRET unset) the old code skipped the check
-  // entirely and ran fully OPEN to anonymous callers. Every sibling token route
-  // fails CLOSED; so does this one now. With no WhatsApp hosts there is nothing
-  // to keep awake anyway, so refusing is also the correct no-op.
-  const expected = await webhookToken();
+  // heavy, fleet-wide work. When the token cannot be derived (SESSION_SECRET
+  // unset in production) the old code skipped the check entirely and ran fully
+  // OPEN to anonymous callers. Every sibling token route fails CLOSED; so does
+  // this one now.
+  //
+  // HOST-INDEPENDENT (audit M5). This used to gate on `webhookToken()`, which
+  // ALSO returns null when getHosts() is empty - and getHosts() is a pure vault
+  // read. So an app_config brownout (a cold instance whose first read failed,
+  // or a SESSION_SECRET rotation that made every row undecryptable) turned
+  // "hosts unreadable" into "not configured" and 403'd this route's own
+  // scheduler, stopping the drain, the wakeups, the inbound sweep, retention
+  // and - because its only call site is below - rearmOpenWebhooks, the repair
+  // that would have rescued the rotation. That is the exact conflation
+  // evolution.ts:531-540 already fixed for the inbound webhook. Authenticity
+  // never depended on the host list: the token comes from SESSION_SECRET
+  // (bootstrap env) alone. With genuinely no hosts, pingAllHosts below is
+  // simply an empty no-op, which is the honest answer rather than a refusal.
+  const expected = webhookAuthToken();
   if (!expected) {
     return NextResponse.json(
-      { error: "WhatsApp is not configured (no hosts) - nothing to ping." },
+      { error: "No webhook token can be derived - SESSION_SECRET is unset." },
       { status: 403 }
     );
   }

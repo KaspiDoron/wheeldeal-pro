@@ -208,12 +208,20 @@ opted out permanently - the guard refuses every future send, manual included.
 
 **Concurrency + herd hardening (wa_send_claims + jittered holds):**
 - Every send claims two atomic slots in `wa_send_claims` (PK conflict = the
-  lock): a per-sender min-gap bucket (serializes the 5+ concurrent drain
-  callers - two invocations can no longer both pass the same stale gap
-  check) and a per-message idempotency hash claimed BEFORE the network send
-  (concurrent duplicates can no longer both deliver). Straddle-proof at
-  bucket boundaries via a previous-bucket age check. Failed sends release
-  their message claim so retries are not self-deduped. GC after 24h.
+  lock): a per-sender pacing slot keyed on a FIXED 5s quantum
+  (`FLEET_SLOT_QUANTUM_SEC` in `wa/pacing.ts`; the key never carries the
+  configured gap, so two instances that disagree about the gap still contend
+  for one key) - it serializes the 5+ concurrent drain callers, so two
+  invocations can no longer both pass the same stale gap check - and a
+  per-message idempotency hash claimed BEFORE the network send (concurrent
+  duplicates can no longer both deliver). The CONFIGURED gap is enforced on
+  top of that quantum by one gap-wide straddle READ (audit F243): the
+  previous `ceil(gap / quantum)` slots are fetched in a single round trip and
+  the newest claim among them must be older than the gap, so nothing lands
+  min-gap-minus-epsilon apart across a slot boundary, whatever the gap. It is
+  a read, never a probe insert - a refused attempt must never be mistaken for
+  a send. Failed sends release their message claim so retries are not
+  self-deduped. GC after 24h.
 - Cap holds are JITTERED (hourly +15-35m, daily new-contact +60-90m, pause
   +60-75m): a held batch regains individual release times - never ten
   messages sharing one "~15:27" ETA again. Parked rows count toward the

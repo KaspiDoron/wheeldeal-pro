@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { webhookToken, sendFromUser } from "@/lib/evolution";
+import { webhookAuthToken, sendFromUser } from "@/lib/evolution";
 import { sbSelect, sbInsertClaim, sbDelete } from "@/lib/runtime-config";
 import { REPLY_KIND_FILTER } from "@/lib/wa-guard";
 
@@ -56,7 +56,14 @@ const slotFor = (sender: string, atMs: number) =>
 
 export async function GET(req: Request) {
   const url = new URL(req.url);
-  const expected = await webhookToken();
+  // HOST-INDEPENDENT, AND STILL FAIL-CLOSED (audit M5). `webhookToken()` also
+  // returns null when getHosts() reads empty, and getHosts() is a pure vault
+  // read - so an app_config brownout 403'd this route's own scheduler (and the
+  // ping that kicks it) while the inbound webhook, which authenticates with
+  // this same env-only derivation, kept working. Authenticity never depended
+  // on the host list. A missing SESSION_SECRET in production still derives no
+  // token, and no token still refuses.
+  const expected = webhookAuthToken();
   const { tokenMatches } = await import("@/lib/wa/webhook-token");
   if (!expected || !tokenMatches(url.searchParams.get("token"), expected)) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
