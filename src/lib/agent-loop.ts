@@ -177,7 +177,25 @@ function fallbackAnswer(rfq: StructuredRFQ): string {
  * uniqueness all apply). matchesSpec stays true - "unreadable" must never be
  * mistaken for "wrong vehicle" (false would freeze the whole negotiation).
  */
-export function photoClarifyExtraction(): import("./agents").ExtractedOffer {
+/**
+ * WHY the frame never got read - and it is not always the download.
+ *
+ * A frame the vision budget excluded for its SIZE was never sent to a reader
+ * at all, so stamping it "media download failed / retryable" put a lie in the
+ * traveller's panel and armed a re-read that could only fail the same way
+ * (audit F154). The caller knows which happened; this is how it says so.
+ */
+export type MediaClarifyReason = "download" | "too-large";
+
+/** What the shop actually sent, so the ask does not call a PDF a photo. */
+export type MediaClarifySubject = "photo" | "file";
+
+export function photoClarifyExtraction(opts?: {
+  reason?: MediaClarifyReason;
+  subject?: MediaClarifySubject;
+}): import("./agents").ExtractedOffer {
+  const reason = opts?.reason ?? "download";
+  const subject = opts?.subject ?? "photo";
   return {
     found: false,
     matchesSpec: true,
@@ -188,9 +206,20 @@ export function photoClarifyExtraction(): import("./agents").ExtractedOffer {
     // showed the honest-placeholder "reading was never stored" under a photo
     // we KNEW we failed to download. The taxonomy's unavailable state was
     // unreachable exactly where nobody could look.
-    imageRead: { seen: false, failure: "network", detail: "media download failed", retryable: true },
+    imageRead:
+      reason === "too-large"
+        ? {
+            seen: false,
+            failure: "too-large",
+            detail: "the frame exceeded the vision request budget",
+            // Retrying cannot shrink it, and the panel must not promise one.
+            retryable: false,
+          }
+        : { seen: false, failure: "network", detail: "media download failed", retryable: true },
     clarifyMessage:
-      "We couldn't read that photo clearly - could you type the daily price out for us? 🙂",
+      subject === "file"
+        ? "We couldn't open that file - could you type the daily price out for us? 🙂"
+        : "We couldn't read that photo clearly - could you type the daily price out for us? 🙂",
   } as import("./agents").ExtractedOffer;
 }
 
@@ -204,6 +233,28 @@ export function videoClarifyExtraction(): import("./agents").ExtractedOffer {
     confidence: "low",
     clarifyMessage:
       "I could not watch the video - could you send a photo of the price list, or type the daily price? 🙂",
+  } as import("./agents").ExtractedOffer;
+}
+
+/**
+ * AND FOR A VOICE NOTE NOBODY COULD HEAR (audit F153).
+ *
+ * The download failed, or every transcription rung did. Until this existed the
+ * turn ran extraction over the bare label "[voice note]": no price, no ask, and
+ * the shop left on read after speaking their offer out loud.
+ *
+ * Deliberately carries NO `imageRead`. A voice note is not an image - stamping
+ * one would make holdsMediaReading() true, render the picture-shaped reading
+ * panel under audio, and arm the deferred IMAGE re-read for bytes no vision
+ * rung will ever be asked to look at.
+ */
+export function voiceClarifyExtraction(): import("./agents").ExtractedOffer {
+  return {
+    found: false,
+    matchesSpec: true,
+    confidence: "low",
+    clarifyMessage:
+      "Sorry, we couldn't hear that voice note - could you type the daily price for us? 🙂",
   } as import("./agents").ExtractedOffer;
 }
 
@@ -271,10 +322,18 @@ export async function processVendorReply(opts: {
   //
   // Every stage had its OWN budget and they summed past the request ceiling. An
   // image turn on the Next route (the production path - the vision offload is
-  // worker-only) runs media retries 0+2s+5s, then readImages at 45s, then a
+  // worker-only) runs the media ladder, then readImages at 45s, then a
   // failure-class re-read at 14s that fires precisely on the SLOW cases, and
   // only THEN starts the SPTE turn with a fresh 45s. 7+45+14+45 = 111s against
   // Cloud Run's --timeout 90.
+  //
+  // AND THE MEDIA LADDER IS REQUESTS, NOT SLEEPS (audit F047). Its cost was
+  // stated here as "0+2s+5s" = 7s, counting only the backoff; each attempt is
+  // an Evolution request that can burn evoFetch's full 12s abort, so an
+  // unanswering host actually cost 43s - and it is spent upstream of this
+  // wall, not inside it. The ladder now stops when it cannot fit another full
+  // attempt inside a 20s stage budget (wa/ingest.ts), so the honest upstream
+  // figure is <= 20s per media stage.
   //
   // What a kill costs is the real problem: the inbound claim is a 10-MINUTE
   // lease, so the shop's photo goes unanswered until the dead-turn sweep

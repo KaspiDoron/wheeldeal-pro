@@ -57,6 +57,7 @@ export const AGENT_EVENT_KINDS = [
   "image-batch-truncated", // more photos than the batch cap; tail unread
   "media-fetch-failed", // provider media redeem failed
   "media-unreadable", // media bytes fetched but unusable
+  "transcribe-failed", // a voice note we could not download or could not hear
   "reading-stamp-failed", // could not stamp the media reading onto the row
   // ---- outbound path --------------------------------------------------------
   "send-failed", // direct send failed (route path)

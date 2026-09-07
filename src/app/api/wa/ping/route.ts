@@ -10,6 +10,13 @@ export const dynamic = "force-dynamic";
 // in Admin -> Keys guidance) stops anonymous callers from forcing outbox
 // drains and host pings.
 export async function GET(req: Request) {
+  // WHAT IS LEFT OF THIS INVOCATION (audit F063). The sweeps below run AFTER a
+  // drain budgeted at 50s, inside a request Cloud Run kills at 90s and a cron
+  // that self-kills at 55s - so "8s per sender" is only honest if it is also
+  // clipped to the time this invocation actually has left.
+  const invocationStartedAt = Date.now();
+  const INVOCATION_BUDGET_MS = 75_000;
+  const msLeft = () => invocationStartedAt + INVOCATION_BUDGET_MS - Date.now();
   // FAIL CLOSED. This route drains the outbox, pings hosts and sweeps inbound -
   // heavy, fleet-wide work. When the token cannot be derived (no hosts
   // configured, or SESSION_SECRET unset) the old code skipped the check
@@ -84,7 +91,7 @@ export async function GET(req: Request) {
   let synced = 0;
   try {
     const { recentActiveSenders, syncInboundReplies } = await import("@/lib/wa-sync");
-    const { rotateWindow, sweepCapForFleet } = await import("@/lib/wa/sweep");
+    const { rotateWindow, sweepCapForFleet, rosterPassTick } = await import("@/lib/wa/sweep");
     const senders = await recentActiveSenders();
     const minute = Math.floor(Date.now() / 60_000);
     // Proportional to the fleet (scale #9), and a FULL-WINDOW rotation so
@@ -94,8 +101,22 @@ export async function GET(req: Request) {
     // advancing a whole window per tick -> every sender swept within ~20-30 min
     // at any size. Dedup+sort for a stable rotation order.
     const roster = [...new Set(senders.filter(Boolean))].sort();
-    for (const email of rotateWindow(roster, minute, sweepCapForFleet(roster.length))) {
-      synced += await syncInboundReplies(email).catch(() => 0);
+    const cap = sweepCapForFleet(roster.length);
+    // ONE CLOCK, TWO ROTATIONS - and the inner one must not read this minute
+    // (audit F233). syncInboundReplies rotates the traveller's THREADS with the
+    // same helper; keyed off the same wall clock it only ever saw the window
+    // starts belonging to the minutes that select this traveller, so a fixed
+    // block of their shops was never pulled from Evolution. The roster PASS
+    // advances by exactly one per visit, which is what that rotation needs.
+    for (const email of rotateWindow(roster, minute, cap)) {
+      // Never start another sender's sweep on time this invocation does not
+      // have: the ones left keep their claims and are swept next minute, and
+      // the breadcrumb at the end of this route still gets written.
+      if (msLeft() <= 0) break;
+      synced += await syncInboundReplies(email, {
+        rotationTick: rosterPassTick(minute, roster.length, cap),
+        deadlineAt: Date.now() + Math.min(8_000, msLeft()),
+      }).catch(() => 0);
     }
   } catch {
     /* best-effort */

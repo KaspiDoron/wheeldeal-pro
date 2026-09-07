@@ -300,6 +300,9 @@ export async function GET(req: Request) {
     "vision-unavailable",
     "media-fetch-failed",
     "media-unreadable",
+    // A voice note nobody could hear. Without it a revoked transcription key
+    // rendered as three confident zeroes over a capability that was dead.
+    "transcribe-failed",
     // An inbound that never became a turn, with its reason - the difference
     // between "the shop went quiet" and "we dropped their message".
     "inbound-dropped",

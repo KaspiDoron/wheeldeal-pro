@@ -305,6 +305,24 @@ describe("resilience: external fetches are bounded by a hard timeout", () => {
     expect(code).not.toMatch(/clearTimeout/);
     expect(code).toMatch(/\.unref\?\.\(\)/);
   });
+
+  it("the AI and Whisper wrappers keep their deadline armed too (audit M20)", () => {
+    // Same rule, same reason: neither path streams, so `await res.json()` runs
+    // on the controller the timer had disarmed at the headers, and a provider
+    // that flushed 200 and then stalled ran on undici's ~300s bodyTimeout
+    // instead of the 14s / 20s budget. wa/ai-body-timeout EXECUTES both; this
+    // pins the absence of the unguarded shape inside the two wrappers.
+    for (const rel of ["src/lib/ai.ts", "src/lib/graph/transcribe.ts"]) {
+      const body = /async function fetchWithTimeout\([\s\S]*?\n}/.exec(readCode(rel))?.[0] ?? "";
+      expect(body, `${rel}: fetchWithTimeout not found`).toMatch(/AbortController/);
+      expect(body, `${rel}: the deadline is cleared at the header boundary`).not.toMatch(
+        /clearTimeout/
+      );
+      expect(body, `${rel}: a pending timer must not hold the runtime open`).toMatch(
+        /\.unref\?\.\(\)/
+      );
+    }
+  });
 });
 
 // The v1 fallback body fired on ANY definitive send failure. On the pinned v2

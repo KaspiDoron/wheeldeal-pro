@@ -216,14 +216,24 @@ export async function sendPushCollapsed(
 }
 
 /**
+ * A SINGLE DEAD ENDPOINT MUST NOT COST THE WHOLE ALLOWANCE (audit F040).
+ *
+ * web-push builds a plain https.request, and Node gives that no timeout at
+ * all: a push service that completes the TLS handshake and then never answers
+ * leaves the promise pending forever. Every caller of sendPushToUser is
+ * therefore unbounded by construction - and the takeover push was awaited
+ * inline in the Evolution webhook, so one such endpoint held the webhook open
+ * until Cloud Run killed the request at 90s. A per-request timeout is the
+ * half that belongs HERE: the caller's after-work budget bounds the whole
+ * block, this bounds each device, so one dead subscription out of twenty
+ * cannot eat the budget the other nineteen need.
+ */
+const PUSH_TIMEOUT_MS = 4_000;
+
+/**
  * Send a push to all of a user's subscribed devices. Best-effort: prunes dead
  * subscriptions (410 Gone / 404) and never throws. No-op when VAPID is unset.
  */
-/** Per-endpoint https timeout for one push. Short on purpose: the callers that
- *  await this sit inside a webhook, and a dead endpoint must not spend their
- *  whole after-work budget. */
-const PUSH_TIMEOUT_MS = 4_000;
-
 export async function sendPushToUser(
   email: string,
   payload: { title: string; body: string; url?: string; tag?: string }

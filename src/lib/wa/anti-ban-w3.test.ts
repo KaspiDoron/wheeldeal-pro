@@ -114,7 +114,12 @@ describe("A8 webhook re-arm throttle is a SHARED clock, not per-process", () => 
     expect(evo).toMatch(/webhook_rearmed_at/);
     expect(evo).toMatch(/async function lastRearmAt/);
     expect(evo).toMatch(/async function stampRearmShared/);
-    expect(evo).toMatch(/now - \(await lastRearmAt\(email, instance\)\) < REARM_THROTTLE_MS/);
+    expect(evo).toMatch(/const lastAt = opts\.force \? 0 : await lastRearmAt\(email, instance\)/);
+    expect(evo).toMatch(/now - lastAt < REARM_THROTTLE_MS/);
+    // ...and the hourly window is only reachable when the instance is NOT
+    // holding a superseded token (audit F180): the throttle must never be the
+    // reason a rotated fleet keeps 403ing its inbound.
+    expect(evo).toMatch(/if \(!opts\.force && !holdsStaleToken && now - lastAt < REARM_THROTTLE_MS\)/);
     expect(evo).toMatch(/rearmConfigKey = \(instance: string\) => `WH_REARM_\$\{instance\}`/);
   });
 

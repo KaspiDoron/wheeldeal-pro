@@ -42,6 +42,14 @@ const MAX_INFLIGHT = 4;
  * 2s over the ceiling is stranded for roughly nineteen minutes, against a
  * product that promises a first reply in 15-25 seconds.
  *
+ * AND THE SUM HAD TWO MORE TERMS THAN IT COUNTED (audit F062). The media
+ * stages run in the SAME request, ahead of this gate: the burst leader's own
+ * download ladder and one sequential fetch per sibling frame, each able to burn
+ * Evolution's 12s abort. wa/ingest.ts now carries one request-scoped deadline
+ * that clips both of them and passes what is left here as `patienceMs`, so the
+ * gate's wait shrinks on a request that has already spent its budget instead of
+ * being added to it.
+ *
  * 12s restores the margin (12 + 72 = 84, leaving ~6s for auth, parse, the
  * response write and the opportunistic drain) WITHOUT touching the turn clock -
  * which is the point. Five downstream budgets are derived from the turn wall
@@ -71,9 +79,17 @@ export function resetInboundGate(): void {
  * Run `work` with at most MAX_INFLIGHT concurrent heavy turns per instance.
  * Acquires a slot (waiting up to MAX_WAIT_MS), always releases it - and never
  * changes what `work` returns or throws. A gate must never eat a reply.
+ *
+ * `patienceMs` clips the wait to what the CALLER's request still has (audit
+ * F062): the media stages upstream of this gate are part of the same request,
+ * so a photo turn that has already spent its budget downloading must not then
+ * sit here for the full 12s. Clipping the wait is free - the gate's
+ * proceed-ungated escape means nothing is dropped, only unsmoothed - and it
+ * leaves the turn wall itself untouched, which matters because five downstream
+ * budgets are derived from it.
  */
-export async function withInboundSlot<T>(work: () => Promise<T>): Promise<T> {
-  const acquired = await acquire();
+export async function withInboundSlot<T>(work: () => Promise<T>, patienceMs?: number): Promise<T> {
+  const acquired = await acquire(patienceMs);
   try {
     return await work();
   } finally {
@@ -81,11 +97,13 @@ export async function withInboundSlot<T>(work: () => Promise<T>): Promise<T> {
   }
 }
 
-async function acquire(): Promise<boolean> {
+async function acquire(patienceMs?: number): Promise<boolean> {
   if (inflight < MAX_INFLIGHT) {
     inflight++;
     return true;
   }
+  const wait = Math.max(0, Math.min(MAX_WAIT_MS, patienceMs ?? MAX_WAIT_MS));
+  if (wait === 0) return false; // no budget to wait with - proceed ungated
   // Wait for a slot, but bounded: a reply that waits forever is worse than one
   // heavy moment. If the timer wins, proceed WITHOUT holding a slot (so we do
   // not later release one we never took, and never wedge the counter).
@@ -97,7 +115,7 @@ async function acquire(): Promise<boolean> {
       const i = waiters.indexOf(grant);
       if (i >= 0) waiters.splice(i, 1);
       resolve(false);
-    }, MAX_WAIT_MS);
+    }, wait);
     const grant = () => {
       if (settled) return;
       settled = true;

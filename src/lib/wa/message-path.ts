@@ -97,6 +97,7 @@ const EVENT_STAGE: Record<string, PathStep["stage"]> = {
   "vision-unavailable": "vision",
   "media-fetch-failed": "media",
   "media-unreadable": "media",
+  "transcribe-failed": "media",
   "localize-fallback": "localize",
   "engine-v3-turn": "engine-turn",
   "host-geo-mismatch": "transport",

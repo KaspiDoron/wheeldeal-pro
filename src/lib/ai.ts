@@ -700,7 +700,22 @@ export async function visionProviderTestTarget(configKey: string): Promise<{
   };
 }
 
-/** fetch with a hard timeout so one slow provider cannot stall the request. */
+/** fetch with a hard timeout so one slow provider cannot stall the request.
+ *
+ * THE DEADLINE SPANS HEADERS **AND** BODY (audit M20).
+ *
+ * `clearTimeout` used to run in a `finally` that fires the instant `await
+ * fetch(...)` resolves - and that is the HEADER boundary. Nothing here streams,
+ * so every caller immediately does `await res.json()`, and that body read
+ * shares the very controller the timer had just disarmed: a provider that
+ * flushed 200 headers and then stalled mid-body ran on undici's ~300s default
+ * bodyTimeout instead of this 14s budget, holding a reply-tick invocation open
+ * long past the point Cloud Run kills it - after the sender claim was taken.
+ * runtime-config's `timedFetch` states the same rule in the same words and is
+ * the shape copied here; once the body is fully read the pending abort is a
+ * harmless no-op on a settled request. `unref()` so a still-pending timer never
+ * keeps the runtime alive.
+ */
 async function fetchWithTimeout(
   url: string,
   init: RequestInit,
@@ -708,11 +723,8 @@ async function fetchWithTimeout(
 ): Promise<Response> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...init, signal: ctrl.signal });
-  } finally {
-    clearTimeout(timer);
-  }
+  (timer as { unref?: () => void }).unref?.();
+  return fetch(url, { ...init, signal: ctrl.signal });
 }
 
 // Trim a provider error body to a short, safe diagnostic (never leaks the key).
@@ -741,6 +753,14 @@ async function errorDetail(res: Response, name: string): Promise<string> {
 // provider name, no status, nothing a panel or a rescue gate can key on. Every
 // text-completion fetch goes through here so a timeout is always reported as
 // WHOSE timeout it was and how long the budget actually was.
+function namedFetchError(name: string, timeoutMs: number, e: unknown): unknown {
+  const m = e instanceof Error ? `${e.name} ${e.message}` : String(e);
+  if (/abort/i.test(m)) {
+    return new Error(`${name} timed out after ${timeoutMs}ms (no response)`);
+  }
+  return e;
+}
+
 async function fetchNamed(
   name: string,
   url: string,
@@ -750,11 +770,23 @@ async function fetchNamed(
   try {
     return await fetchWithTimeout(url, init, timeoutMs);
   } catch (e) {
-    const m = e instanceof Error ? `${e.name} ${e.message}` : String(e);
-    if (/abort/i.test(m)) {
-      throw new Error(`${name} timed out after ${timeoutMs}ms (no response)`);
-    }
-    throw e;
+    throw namedFetchError(name, timeoutMs, e);
+  }
+}
+
+/**
+ * The BODY read of a `fetchNamed` response, with the same naming.
+ *
+ * The budget now spans the body (see fetchWithTimeout), so the abort can land
+ * here rather than on the fetch - and a bare platform AbortError at this point
+ * would reach the panels and the rescue gates as "This operation was aborted",
+ * losing the provider name and the budget the whole ladder keys on.
+ */
+async function jsonNamed(name: string, res: Response, timeoutMs: number): Promise<any> {
+  try {
+    return await res.json();
+  } catch (e) {
+    throw namedFetchError(name, timeoutMs, e);
   }
 }
 
@@ -787,7 +819,7 @@ async function callOpenAICompatible(
     }),
   }, timeoutMs);
   if (!res.ok) throw new Error(await errorDetail(res, cfg.name));
-  const data = await res.json();
+  const data = await jsonNamed(cfg.name, res, timeoutMs);
   return {
     text: data.choices?.[0]?.message?.content?.trim() ?? "",
     tokens: data.usage?.total_tokens ?? 0,
@@ -828,7 +860,7 @@ async function callAnthropic(
     }),
   }, timeoutMs);
   if (!res.ok) throw new Error(await errorDetail(res, cfg.name));
-  const data = await res.json();
+  const data = await jsonNamed(cfg.name, res, timeoutMs);
   const text = Array.isArray(data.content)
     ? data.content
         .map((b: { type?: string; text?: string }) => (b?.type === "text" ? b.text ?? "" : ""))
@@ -867,7 +899,7 @@ async function callGemini(
     }),
   }, timeoutMs);
   if (!res.ok) throw new Error(await errorDetail(res, "gemini"));
-  const data = await res.json();
+  const data = await jsonNamed("gemini", res, timeoutMs);
   return {
     text: data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? "",
     tokens: data.usageMetadata?.totalTokenCount ?? 0,

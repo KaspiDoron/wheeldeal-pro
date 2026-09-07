@@ -54,7 +54,16 @@ describe("the sweep's skip predicate is ANSWERED, not STORED", () => {
   });
 
   it("rotates the thread window so a 40-shop batch is fully covered", () => {
-    expect(sync).toMatch(/rotateWindow\(allNumbers, Math\.floor\(Date\.now\(\) \/ 60_000\), MAX_THREADS\)/);
+    // REWRITTEN FOR audit F233: this pinned the literal
+    // `rotateWindow(allNumbers, Math.floor(Date.now()/60_000), MAX_THREADS)`,
+    // and that wall-clock tick is precisely the defect - the cron picks WHICH
+    // travellers to sweep off the same minute, so a traveller only ever saw the
+    // window starts belonging to the minutes that select them (15 of 20 threads
+    // on a 4-user fleet, 5 of 20 on a 60-user one). The cron now passes its
+    // roster pass; the traveller's own poll, which does run on consecutive
+    // ticks, keeps the wall clock as the default. The composition itself is
+    // executed in wa/sweep-composition.test.ts.
+    expect(sync).toMatch(/rotateWindow\(\s*allNumbers,\s*opts\.rotationTick \?\? Math\.floor\(Date\.now\(\) \/ 60_000\),\s*MAX_THREADS/);
   });
 });
 
@@ -65,8 +74,11 @@ describe("an app-closed recovery runner that exists in production", () => {
     // The sweep cap is now PROPORTIONAL to the fleet with a full-window
     // rotation (owner report 4, scale #9) - a fixed 3 that advanced one sender
     // per tick left a 300-user fleet ~100 min between recovery sweeps.
-    expect(ping).toMatch(/rotateWindow\(roster, minute, sweepCapForFleet\(roster\.length\)\)/);
-    expect(ping).toMatch(/syncInboundReplies\(email\)/);
+    expect(ping).toMatch(/sweepCapForFleet\(roster\.length\)/);
+    expect(ping).toMatch(/rotateWindow\(roster, minute, cap\)/);
+    // ...and it hands the per-thread rotation its own tick rather than letting
+    // both rotations read the same minute (audit F233).
+    expect(ping).toMatch(/rotationTick: rosterPassTick\(minute, roster\.length, cap\)/);
     // The response reports it, so the cron logs show recovery working.
     expect(ping).toMatch(/synced/);
   });
