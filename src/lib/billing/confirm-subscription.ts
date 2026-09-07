@@ -138,39 +138,28 @@ export async function confirmPaypalSubscription(input: {
   //   - a failure does not fail the request. The plan is live and the payment
   //     is real; refusing the whole thing over a cleanup step would be the
   //     worse trade.
+  //
+  // AND IT IS BOUNDED, AND IT WRITES ITS RECORD FIRST (audit F043).
+  //
+  // The loop awaited two TIMEOUT-FREE PayPal calls per prior activation on the
+  // traveller's own return-from-checkout request, so a stalled PayPal turned an
+  // upgrade that had ALREADY been granted into a request Cloud Run killed at
+  // 90s - and the superseded row, the one record that names a double-billed
+  // traveller, was written after the cancel and so never written at all.
+  //
+  // Detaching the loop does not save that record either: after-work is raced
+  // against a budget and the container's CPU is throttled the instant the
+  // response flushes, which abandons the in-flight cancel AND its insert
+  // together. So the row is written FIRST with an explicit pending outcome and
+  // updated in place when PayPal answers - and the whole cleanup runs under one
+  // budget, on top of the per-call ceiling paypal.ts now carries.
   if (granted) {
-    try {
-      const { activationsFor, SUPERSEDED_KIND } = await import("./subscription-link");
-      const { cancelPaypalSubscription, fetchPaypalSubscription, subscriptionEntitles } =
-        await import("../paypal");
-      const prior = (await activationsFor(email)).filter((id) => id !== sub.id);
-      for (const oldId of prior) {
-        // Only cancel what is actually still live - a cancelled or expired
-        // subscription needs no action, and asking first keeps the event trail
-        // meaningful rather than full of no-op cancels.
-        const old = await fetchPaypalSubscription(oldId).catch(() => null);
-        if (!old || !subscriptionEntitles(old.status)) continue;
-        const cancelled = await cancelPaypalSubscription(
-          oldId,
-          "Replaced by a new WheelDeal plan"
-        );
-        await sbInsert("agent_events", [
-          {
-            kind: SUPERSEDED_KIND,
-            user_email: email,
-            vendor_id: "",
-            vendor_name: "",
-            detail: JSON.stringify({
-              subscriptionId: oldId,
-              replacedBy: sub.id,
-              cancelled,
-            }).slice(0, 800),
-          },
-        ]).catch(() => {});
-      }
-    } catch {
-      /* cleanup only - the plan is already live and the payment is real */
-    }
+    const { finishBeforeResponse } = await import("../after");
+    await finishBeforeResponse(
+      "paypal-supersede",
+      () => supersedePriorSubscriptions(email, sub.id),
+      SUPERSEDE_BUDGET_MS
+    );
   }
 
   // The subscription IS real and verified - that part is settled and the event
@@ -187,4 +176,86 @@ export async function confirmPaypalSubscription(input: {
   }
 
   return { ok: true, plan: tier, subscriptionId: sub.id };
+}
+
+/**
+ * Ceiling for the whole supersede cleanup. Deliberately shorter than the
+ * per-call PayPal timeout budget: a stalled provider costs the traveller this
+ * much and no more, and every prior the loop did not reach keeps its pending
+ * row rather than disappearing from the ledger.
+ */
+const SUPERSEDE_BUDGET_MS = 8_000;
+
+/**
+ * Cancel the subscriptions this account's new one replaces, recording the
+ * outcome of each - including "we do not know yet".
+ *
+ * Only ids from THIS account's own activation trail are ever cancelled, and the
+ * cancel is issued only for a subscription PayPal still reports as entitling.
+ */
+async function supersedePriorSubscriptions(email: string, newId: string): Promise<void> {
+  const { activationsFor, SUPERSEDED_KIND } = await import("./subscription-link");
+  const { sbInsert, sbInsertReturning, sbUpdateReturning } = await import("../runtime-config");
+  const prior = (await activationsFor(email)).filter((id) => id !== newId);
+  if (prior.length === 0) return;
+
+  const detailFor = (oldId: string, outcome: Record<string, unknown>) =>
+    JSON.stringify({ subscriptionId: oldId, replacedBy: newId, ...outcome }).slice(0, 800);
+  const rowFor = (oldId: string, outcome: Record<string, unknown>) => ({
+    kind: SUPERSEDED_KIND,
+    user_email: email,
+    vendor_id: "",
+    vendor_name: "",
+    detail: detailFor(oldId, outcome),
+  });
+
+  // ONE INSERT, BEFORE THE FIRST CALL THAT MIGHT NEVER ANSWER. `cancelled: null`
+  // is an honest unknown, not a failure - and it is what the owner finds if the
+  // budget runs out mid-cleanup.
+  const pending = await sbInsertReturning<{ id?: number | string }>(
+    "agent_events",
+    prior.map((oldId) => rowFor(oldId, { cancelled: null, outcome: "pending" }))
+  ).catch(() => [] as { id?: number | string }[]);
+
+  const { cancelPaypalSubscription, fetchPaypalSubscription, subscriptionEntitles } =
+    await import("../paypal");
+  const deadline = Date.now() + SUPERSEDE_BUDGET_MS;
+  for (let i = 0; i < prior.length; i++) {
+    // Out of budget: the remaining priors keep their pending rows, which is the
+    // truthful state - we asked for nothing and know nothing.
+    if (Date.now() >= deadline) break;
+    const oldId = prior[i];
+    // Only cancel what is actually still live - a cancelled or expired
+    // subscription needs no action, and asking first keeps the trail free of
+    // no-op cancels.
+    const old = await fetchPaypalSubscription(oldId).catch(() => null);
+    let outcome: Record<string, unknown>;
+    if (!old || !subscriptionEntitles(old.status)) {
+      outcome = {
+        cancelled: false,
+        outcome: old ? "already-inactive" : "unreadable",
+        status: old?.status ?? null,
+      };
+    } else {
+      const cancelled = await cancelPaypalSubscription(
+        oldId,
+        "Replaced by a new WheelDeal plan"
+      );
+      outcome = { cancelled, outcome: cancelled ? "cancelled" : "cancel-failed" };
+    }
+    const rowId = pending[i]?.id;
+    if (rowId === undefined || rowId === null) {
+      // The pending insert did not land (or the store gave nothing back): write
+      // the outcome on its own rather than losing it.
+      await sbInsert("agent_events", [rowFor(oldId, outcome)]).catch(() => {});
+      continue;
+    }
+    // A failed patch leaves the pending row standing - unknown, never a
+    // confident "cancelled".
+    await sbUpdateReturning(
+      "agent_events",
+      `id=eq.${encodeURIComponent(String(rowId))}`,
+      { detail: detailFor(oldId, outcome) }
+    ).catch(() => []);
+  }
 }

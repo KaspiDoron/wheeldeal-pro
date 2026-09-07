@@ -46,8 +46,16 @@ export async function GET() {
   // Flagged testers ride the sandbox and are never gated - otherwise a beta
   // tester could not exercise the paid tiers at all. Same carve-out, same
   // ordering, as the checkout route.
+  //
+  // AND THE SAME CARVE-OUT DECIDES WHAT THIS ROUTE HANDS BACK (audit F199).
+  // `isTestUser` meant "grant the plan free, no charge" in /api/billing/checkout
+  // and only "skip the warm-up gate" here, so the PayPal button rendered under
+  // the very same PlanCard handed a flagged tester a LIVE client id and the live
+  // plan ids and took real money, while the Subscribe button above it answered
+  // "Test mode - no charge". One predicate, resolved once, now decides both.
   const { isTestUser } = await import("@/lib/allowlist");
-  if (!(await isTestUser(session.email).catch(() => false))) {
+  const sandbox = await isTestUser(session.email).catch(() => false);
+  if (!sandbox) {
     const { warmupStatus } = await import("@/lib/warmup");
     const warm = await warmupStatus(session.email);
     if (!warm.warmed) {
@@ -69,13 +77,23 @@ export async function GET() {
     getConfig(PAYPAL_PLANS.ultra.configKey),
   ]);
 
+  // A SANDBOXED TESTER GETS NO PURCHASE SURFACE AT ALL. PayPalProvider renders
+  // its children without loading the SDK when there is no client id, and the
+  // button returns null without a plan id - so the only way left to "buy" while
+  // TEST_MODE is on is the sheet's own Subscribe button, which is the free
+  // grant. Refusing here rather than at paypal-success is deliberate: by then
+  // PayPal has taken the money, and withholding the tier afterwards is worse
+  // than either failure alone.
   const body: PaypalPublicConfig = {
-    clientId: (clientId || process.env.NEXT_PUBLIC_PAYPAL_CLIENT_ID || "").trim() || null,
+    clientId: sandbox
+      ? null
+      : (clientId || process.env.NEXT_PUBLIC_PAYPAL_CLIENT_ID || "").trim() || null,
     planIds: {
-      pro: (proPlan || PAYPAL_PLANS.pro.fallbackPlanId).trim() || null,
-      ultra: (ultraPlan || PAYPAL_PLANS.ultra.fallbackPlanId).trim() || null,
+      pro: sandbox ? null : (proPlan || PAYPAL_PLANS.pro.fallbackPlanId).trim() || null,
+      ultra: sandbox ? null : (ultraPlan || PAYPAL_PLANS.ultra.fallbackPlanId).trim() || null,
     },
     env: (env || "live").trim().toLowerCase(),
+    sandbox,
   };
   return NextResponse.json(body, { headers: { "Cache-Control": "private, no-store" } });
 }

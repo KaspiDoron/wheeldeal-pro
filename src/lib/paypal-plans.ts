@@ -51,4 +51,11 @@ export interface PaypalPublicConfig {
   planIds: Record<PaidPlanId, string | null>;
   /** "live" | "sandbox" - drives nothing client-side but is worth showing in Admin. */
   env: string;
+  /**
+   * True when the signed-in account is a flagged tester riding TEST_MODE: the
+   * client id and every plan id are withheld, because the same account is being
+   * granted its tier free by /api/billing/checkout and must not also be handed a
+   * live PayPal button (audit F199). Absent means an ordinary, real buyer.
+   */
+  sandbox?: boolean;
 }
