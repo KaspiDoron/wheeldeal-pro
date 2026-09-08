@@ -12,6 +12,12 @@ users. Complements `docs/ENTERPRISE-READINESS.md` (the earlier QA pass).
 > one is the runbook. The four ceilings it orders are the four readings on the
 > Keys tab's choke-point card.
 
+> **The September fleet audit:** `docs/AUDIT-2026-09.md` is the record of the
+> full-spectrum adversarial audit - 342 items raised and refuted, 127 P0/P1
+> defects repaired across fifteen gated merges, the 159 P2 survivors reported
+> but deliberately NOT applied, and the owner actions no commit can close.
+> Where this file and that one disagree about a mechanism, that one is newer.
+
 > **READ THIS FIRST IF YOU ARE ABOUT TO CHANGE `wa-guard.ts`, the usage limits
 > or the outbox/wakeup draining.** That instruction (in `CLAUDE.md`) is only
 > worth following while this file is TRUE. Owner report 4 changed all three,

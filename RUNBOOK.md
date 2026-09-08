@@ -305,6 +305,11 @@ pinning the defect rather than the fix.
 Recorded here rather than quietly closed, because a reconciliation table
 that only lists wins is the thing this section exists to stop being.
 
+> The September fleet audit closed most of this list and wrote down what it
+> could not close: `docs/AUDIT-2026-09.md` has the full record - every root
+> cause found, every one refuted and why, the commit that fixed each, and the
+> owner actions no commit can close. Rows below that it closed say so.
+
 - **Enqueue-first outreach (problem 17).** Half done, honestly. The tap now
   writes every parked shop's row BEFORE it dispatches, so the one live send
   can no longer take the rest of the hunt down with it (audit A1; executed in
@@ -317,10 +322,14 @@ that only lists wins is the thing this section exists to stop being.
 - **A promo / discount entity (problem 5).** Native prices read now; a
   "free helmet" or "10% off for a week" is still only an English regex
   behind a two-confirmation gate.
-- **The graph failover has no cite-the-rival or beat-not-match rail.**
-  Its ladder target is clamped below the rival now (W12f), but the rails
-  themselves live only in SPTE, so a failover turn can cite leverage
-  without the composition guarantees the primary engine has.
+- **The graph failover's rails: CLOSED by the September audit (A3).** The
+  cite-the-rival half was already covered by the failover engine's own
+  outbound number check; the beat-not-match half genuinely was not, so a
+  bargain asking a shop to MATCH a real grounded rival passed every guard on
+  that path and on both user-action routes. The rail now runs there too, from
+  the same single definition SPTE uses, repairing to the ladder's clamped
+  target where an honest repair exists and blocking where none does
+  (executed in `src/lib/graph/beat-not-match-rail.test.ts`).
 - **Six Evolution/Baileys subtypes are dropped with no turn**, and the
   "catalog/poll branches" credited under problem 13 are labels in
   `waMediaKind`, not readers in `waMessageText`.
