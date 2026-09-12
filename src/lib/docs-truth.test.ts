@@ -31,12 +31,34 @@ describe("CLAUDE.md describes the product that exists", () => {
     expect(doc).toMatch(/webhooks\/evolution/);
   });
 
-  it("names the CURRENT working branch and the retired ones as retired", () => {
-    expect(doc).toMatch(/claude\/wheeldeal-production-architecture-91hmfq/);
-    // The old names survive only inside the "retired" warning blockquote.
-    const idx = doc.indexOf("claude/rental-agents-legal-setup-o7rgcv");
-    expect(idx).toBeGreaterThan(-1);
-    expect(doc.slice(Math.max(0, idx - 300), idx)).toMatch(/retired|previously|Earlier/i);
+  it("states the branch-per-task convention and marks deleted branches deleted", () => {
+    // WHAT CHANGED (2026-09-12). This used to require the doc to name ONE
+    // current working branch. There is no longer one: the long-lived branch was
+    // fully merged and deleted, and work now happens on a short-lived
+    // `claude/<task>` branch per task. Pinning a specific name here would make
+    // the doc stale the day a task finishes.
+    expect(doc).toMatch(/Develop on a fresh `claude\/<task>` branch per task/);
+    // The old names survive only inside a note that says they are gone, so a
+    // reader who greps one of them learns that rather than going looking.
+    for (const dead of [
+      "claude/rental-agents-legal-setup-o7rgcv",
+      "claude/wheeldeal-audit-fixes-x7uog5",
+      "claude/wheeldeal-production-architecture-91hmfq",
+    ]) {
+      const idx = doc.indexOf(dead);
+      expect(idx, `${dead} should still be documented as deleted`).toBeGreaterThan(-1);
+      // The window spans BOTH sides of the name. The disclaimer reads naturally
+      // either before it ("previously retired branches are gone: X") or after
+      // it ("X ... was fully merged and deleted"), and a backwards-only window
+      // fails the second, correct phrasing.
+      const around = doc.slice(Math.max(0, idx - 400), idx + dead.length + 400);
+      expect(
+        around,
+        `${dead} is named without anything nearby saying it is gone`
+      ).toMatch(/deleted|retired|previous|Earlier|no longer/i);
+    }
+    // ...and the one branch that must NOT be deleted is still flagged.
+    expect(doc).toMatch(/DO NOT DELETE `claude\/rental-negotiation-app-pc33ux`/);
   });
 
   it("deploy instructions name ALL THREE sql files and the Evolution DB rule", () => {
