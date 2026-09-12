@@ -56,6 +56,20 @@ const seedFleet = (rearmedAtMs: number) => {
 
 beforeEach(() => {
   store.reset();
+  // THE IN-PROCESS STAMPEDE GUARD OUTLIVES store.reset(). reassertWebhook's
+  // local clock is a Map on globalThis (`__wd_wh_rearm__`), so it is NOT part
+  // of the Map-backed store and survives into the next test with an entry for
+  // every instance an earlier test re-armed.
+  //
+  // That leak is invisible until it is not. lastRearmAt takes max(local,
+  // shared), and this file executes in about 4ms, so the leaked local clock
+  // and the inForceAt this test writes can land in the SAME millisecond. The
+  // staleness check is `lastAt < mark.inForceAt` - strict - so a tie reads as
+  // "already re-armed under the current token" and the instance is throttled.
+  // Run alone it passes; run after its neighbours it fails, and on a slower
+  // machine (CI) the milliseconds separate and it passes there too. Clearing
+  // the guard makes each test start from the state it actually describes.
+  delete (globalThis as { __wd_wh_rearm__?: Map<string, number> }).__wd_wh_rearm__;
   calls = [];
   store.config.set("EVOLUTION_API_URL", "https://evo.test");
   store.config.set("EVOLUTION_API_KEY", "test-key");

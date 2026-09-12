@@ -51,6 +51,11 @@ const seedOpen = (email: string, rearmedAt: string) =>
 
 beforeEach(() => {
   store.reset();
+  // reassertWebhook's in-process stampede guard is a Map on globalThis, not
+  // part of the Map-backed store, so store.reset() leaves it holding a re-arm
+  // clock for every instance an earlier test in this file touched. See
+  // rearm-fleet-rotation.test.ts for the failure that leak actually produced.
+  delete (globalThis as { __wd_wh_rearm__?: Map<string, number> }).__wd_wh_rearm__;
   calls = [];
   store.config.set("EVOLUTION_API_URL", "https://evo.test");
   store.config.set("EVOLUTION_API_KEY", "test-key");
