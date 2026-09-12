@@ -161,26 +161,61 @@ describe("no config points at a branch that does not exist", () => {
           `git push origin master:refs/heads/${MIRROR_BRANCH}`
       ).toBe(shaFor("master"));
     }
-    // INTENT PRESERVED, MECHANISM MOVED ON. This used to assert that every
-    // branch the workflow LISTS really exists - the right check while the
-    // trigger named branches one by one. It named exactly one, and the one it
-    // named was retired, so the branch actually being worked on was never
-    // gated: the rule caught dead names and could not catch a MISSING one.
+    // INTENT PRESERVED, MECHANISM MOVED ON (twice).
     //
-    // The trigger is a pattern now (`claude/**`), so "does every listed name
-    // exist" is no longer the property that can hurt. The property that can is
-    // the reverse - that the branch CLAUDE.md tells the next session to develop
-    // on is one CI will actually fire for.
+    // First it asserted that every branch the workflow LISTS really exists -
+    // right while the trigger named branches one by one. It named exactly one,
+    // and that one was retired, so the branch actually being worked on was
+    // never gated: the rule caught dead names and could not catch a MISSING
+    // one. The trigger became a pattern (`claude/**`), so that property died.
+    //
+    // Then it asserted that the ONE branch CLAUDE.md says to develop on exists
+    // on the remote. That died too, on 2026-09-12: there is no long-lived
+    // working branch any more. Work happens on a short-lived `claude/<task>`
+    // branch that is deleted at merge, so a doc naming a specific one would be
+    // stale within the day.
+    //
+    // What can still hurt is unchanged in spirit: a name in this section that
+    // a reader would act on, pointing at a ref that is not there. So the check
+    // is now per-name - every CONCRETE claude/<name> the section mentions must
+    // either exist on the remote, or sit in the note that records it as
+    // deleted. Placeholders (`claude/<task>`) and the pattern (`claude/**`)
+    // are conventions, not refs, and are excluded.
     const wf = read(".github/workflows/deploy-gcp.yml");
-    const working = read("CLAUDE.md").match(/Develop on `(claude\/[^`]+)`/)?.[1];
-    expect(working, "CLAUDE.md must name the working branch").toBeTruthy();
-    expect(heads, `CLAUDE.md says to develop on ${working}`).toContain(
-      `refs/heads/${working}`
-    );
-    // ...and the trigger admits it. Every claude/* branch matches the pattern,
-    // so this holds through any future rename - which is the whole point.
+    const md = read("CLAUDE.md");
+    const section = md.slice(md.indexOf("## Working branch"));
+    const deletedNote = section.slice(section.indexOf("Branches deleted on"));
+    expect(deletedNote, "the section must record which branches were deleted").toBeTruthy();
+
+    const mentioned = [...new Set([...section.matchAll(/claude\/[\w.\/-]+/g)].map((m) => m[0]))]
+      .filter((b) => !b.includes("<") && !b.includes("*"));
+    expect(mentioned.length, "the section should still name real branches").toBeGreaterThan(0);
+    for (const b of mentioned) {
+      const live = heads.includes(`refs/heads/${b}`);
+      const recordedDeleted = deletedNote.includes(b);
+      expect(
+        live || recordedDeleted,
+        `CLAUDE.md's working-branch section names ${b}, which is not on the remote ` +
+          `and is not listed in the "Branches deleted" note. Either recreate it, or ` +
+          `record it as deleted so nobody goes looking for it.`
+      ).toBe(true);
+    }
+    // A branch cannot be both live and recorded as deleted - that reads as a
+    // resurrection nobody documented.
+    for (const b of mentioned) {
+      if (deletedNote.includes(b)) {
+        expect(
+          heads.includes(`refs/heads/${b}`),
+          `${b} is listed as deleted but exists on the remote - update the note or delete it again`
+        ).toBe(false);
+      }
+    }
+    // The convention the doc DOES state must be one the trigger admits. Every
+    // claude/* branch matches the pattern, so this holds through any rename.
+    const convention = md.match(/Develop on a fresh `(claude\/[^`]+)` branch per task/)?.[1];
+    expect(convention, "CLAUDE.md must state the branch-per-task convention").toBeTruthy();
+    expect(convention!.startsWith("claude/")).toBe(true);
     expect(wf).toMatch(/^\s+- 'claude\/\*\*'$/m);
-    expect(working!.startsWith("claude/")).toBe(true);
     // Any concrete claude/<name> entry reappearing in the trigger is the
     // original defect coming back.
     const literals = [...wf.matchAll(/^\s*-\s*'?(claude\/[\w./-]+)'?\s*$/gm)]
