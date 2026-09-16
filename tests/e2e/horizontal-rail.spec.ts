@@ -10,7 +10,10 @@ import { dismissTour, assertNoOverflow } from "./fixtures/init";
 test.describe("horizontal vendor rail @allwidths", () => {
   test.beforeEach(async ({ context }) => {
     await dismissTour(context);
-    await signIn(context);
+    // This spec asserts the axis choice PERSISTS across a reload, and memory
+    // of a preference is gated on the `preferences` cookie category
+    // (rememberLocal refuses to write it under "essential only"). Grant it.
+    await signIn(context, undefined, { cookieChoice: "accept-all" });
   });
 
   test("Swipe mode renders the snap rail, the strip scrolls - not the page - and it persists", async ({

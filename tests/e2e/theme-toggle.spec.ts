@@ -11,7 +11,10 @@ import { dismissTour } from "./fixtures/init";
 test.describe("theme toggle", () => {
   test.beforeEach(async ({ context }) => {
     await dismissTour(context);
-    await signIn(context);
+    // "persists across reload" is a claim about the `preferences` cookie
+    // category: rememberLocal refuses to keep the theme under "essential only"
+    // (the flip itself still lands). Grant it, so the spec tests what it says.
+    await signIn(context, undefined, { cookieChoice: "accept-all" });
   });
 
   test("toggling flips the attribute, rewrites theme-color, and persists across reload", async ({
