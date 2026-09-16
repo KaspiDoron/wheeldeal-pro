@@ -66,8 +66,9 @@ inside that server. Your app spreads travellers across a **pool** of these
 servers (Admin -> Keys -> `EVOLUTION_HOSTS`, one `url|apikey` per line - with
 an OPTIONAL third field of calling-code prefixes, `url|apikey|66,84,855`, that
 says which numbers that host is geographically right for, and an OPTIONAL fourth
-giving that host its own cap, `url|apikey|66,84,855|50`) and fails over
-automatically if one goes to sleep.
+giving that host its own cap, `url|apikey|66,84,855|50`). A traveller stays on
+the host they linked on - each lane owns its own store, so the app never moves
+a session; a slow or briefly dark lane keeps its users, who wait for it.
 
 **Placement is geo-first, then least-loaded** - never round-robin. A number
 transmitting from a datacenter on the wrong continent is a separately scored
