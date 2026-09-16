@@ -214,8 +214,40 @@ describe("doc pin: the fleet runbook does not resurrect dead free tiers", () => 
   });
 
   it("the EVOLUTION_HOSTS example still carries its dial prefixes", () => {
-    // The exact shape whose parsing was broken in OR8 (see or8-audit-blockers).
-    expect(read()).toMatch(/\|<the key from \.env>\|66,84,855,856,60,65/);
+    // The exact shape whose parsing was broken in OR8 (see or8-audit-blockers):
+    // a multi-prefix third field, commas and all. The literal key placeholder
+    // this used to pin moved into setup.sh; what has to survive is the SHAPE.
+    expect(read()).toMatch(/\|66,84,855,856,60,65/);
+  });
+
+  it("...and the fourth field, which is what makes 200 reachable", () => {
+    const md = read();
+    // The same comma hazard, one field later - a cap after a multi-prefix list
+    // is precisely the line that used to split into a phantom host.
+    expect(md).toMatch(/\|66,84,855,856,60,65\|\d+/);
+    expect(md).toMatch(/url\|key\|prefixes\|cap|fourth `EVOLUTION_HOSTS` field/i);
+  });
+
+  it("the one-command setup is the documented path, and the script exists", () => {
+    expect(read()).toMatch(/setup\.sh/);
+    expect(() => readFileSync("deploy/fleet/setup.sh", "utf8")).not.toThrow();
+  });
+
+  it("the quick tunnel is NOT offered as the way to carry real numbers", () => {
+    // Its hostname is random and changes on restart, which strands every number
+    // pinned to the old URL. Both the doc and the script have to say so.
+    expect(read()).toMatch(/proving the lane, not for carrying numbers/i);
+    expect(readFileSync("deploy/fleet/setup.sh", "utf8")).toMatch(
+      /NOT FOR CARRYING NUMBERS|changes on every restart/i
+    );
+  });
+
+  it("Oracle's idle reclamation and its PAYG exemption are both recorded", () => {
+    // The likeliest way a lane in this fleet disappears, and it disappears
+    // quietly: a host holding quiet sockets is under 20% on all three metrics.
+    const md = read();
+    expect(md).toMatch(/reclaim/i);
+    expect(md).toMatch(/Pay As You Go|PAYG/);
   });
 });
 

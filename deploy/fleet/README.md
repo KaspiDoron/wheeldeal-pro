@@ -169,30 +169,33 @@ Not the table's order:
 
 ## Standing one up
 
-1. Create the VM in the region that matches its numbers. Open only 443 to the
-   internet.
-2. `git clone` this repo (or copy `deploy/fleet/`), then:
-   ```
-   cd deploy/fleet
-   printf 'AUTHENTICATION_API_KEY=%s\nPOSTGRES_PASSWORD=%s\n' \
-     "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > .env
-   docker compose up -d
-   ```
-   A **unique key per host**, so one leak burns one cohort, not the fleet.
-3. Put HTTPS in front of it. Cloudflare Tunnel is free with unmetered bandwidth
-   and no cap on tunnel count (confirmed Jul 2026), and needs no inbound port at
-   all: `cloudflared tunnel --url http://127.0.0.1:8080`. Caddy with a real DNS
-   name works equally well.
-4. Add the line to **Admin -> Keys -> EVOLUTION_HOSTS**, with its region and
-   its cap:
-   ```
-   https://sg.example.com|<the key from .env>|66,84,855,856,60,65|50
-   ```
-5. Watch **Admin -> Keys -> host occupancy** and **Admin -> Ops -> choke
-   points**. New links prefer a host that claims their number's country; a
-   placement that could not get one leaves a `host-geo-mismatch` entry on the
-   message trail, so a fleet that is out of capacity in the right region says so
-   instead of looking uniformly green.
+Create the VM in the region that matches its numbers, then run **one command on
+it**:
+
+```
+curl -fsSL https://raw.githubusercontent.com/KaspiDoron/wheeldeal-pro/master/deploy/fleet/setup.sh \
+  | bash -s -- --prefixes 66,84,855 --cap 50 --tunnel
+```
+
+`setup.sh` installs Docker if missing, generates a key and DB password **unique
+to that host** (so one leak burns one cohort, not the fleet), brings the lane
+up, waits for it to answer, and prints the exact `EVOLUTION_HOSTS` line to paste
+into **Admin -> Keys**. Re-running it is safe: it never overwrites an existing
+`.env`, because rotating a host's key orphans every session already linked to
+it. Drop `--prefixes` for a region-neutral host and `--cap` to use the fleet
+default.
+
+`--tunnel` starts a free Cloudflare quick tunnel, which needs no inbound port at
+all. **That is for proving the lane, not for carrying numbers** - a quick
+tunnel's hostname is random and changes on restart, which would strand every
+number pinned to the old URL. Before real numbers, give the host a stable name
+(a named Cloudflare tunnel, or Caddy with your own DNS) and pass `--url`.
+
+Then watch **Admin -> Keys -> host occupancy** and **Admin -> Ops -> choke
+points**. New links prefer a host that claims their number's country; a
+placement that could not get one leaves a `host-geo-mismatch` entry on the
+message trail, so a fleet that is out of capacity in the right region says so
+instead of looking uniformly green.
 
 `.env` is gitignored by the repo root rule. Never commit a key.
 

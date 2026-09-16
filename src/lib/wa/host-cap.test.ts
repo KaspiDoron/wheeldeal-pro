@@ -87,6 +87,48 @@ describe("the parser survives a FOURTH field", () => {
   });
 });
 
+describe("the lines deploy/fleet/setup.sh prints actually parse", () => {
+  // setup.sh builds the EVOLUTION_HOSTS line for a freshly stood-up host and
+  // tells the owner to paste it. If the shape it emits and the shape this
+  // parser accepts ever drift, the owner pastes a line that looks right and
+  // silently yields a mis-parsed or phantom host. Pin all three shapes it can
+  // produce - prefixes+cap, cap alone, prefixes alone.
+  it("prefixes AND a cap", () => {
+    const hosts = parseHosts("https://sg.example.com|deadbeef|66,84,855|50");
+    expect(hosts).toHaveLength(1);
+    expect(hosts[0].url).toBe("https://sg.example.com");
+    expect(hosts[0].dialPrefixes).toHaveLength(3);
+    expect(hosts[0].cap).toBe(50);
+  });
+
+  it("a cap with NO prefixes - the empty third field the script emits", () => {
+    const hosts = parseHosts("https://us.example.com|deadbeef||25");
+    expect(hosts).toHaveLength(1);
+    expect(hosts[0].dialPrefixes).toEqual([]);
+    expect(hosts[0].cap).toBe(25);
+  });
+
+  it("prefixes with no cap falls back to the fleet default", () => {
+    const hosts = parseHosts("https://sg.example.com|deadbeef|66,84");
+    expect(hosts).toHaveLength(1);
+    expect(hosts[0].cap).toBeUndefined();
+  });
+
+  it("several hosts, one per line, is still several hosts", () => {
+    const hosts = parseHosts(
+      [
+        "https://arm-sg.example.com|k1|66,84,855,856,60,65|50",
+        "https://micro-sg.example.com|k2|66,84,855|25",
+        "https://us.example.com|k3||25",
+      ].join("\n")
+    );
+    expect(hosts).toHaveLength(3);
+    expect(hosts.map((h) => h.cap)).toEqual([50, 25, 25]);
+    // The whole point: capacity is the SUM, and it is not 3 x the default.
+    expect(hosts.reduce((s, h) => s + (h.cap ?? 25), 0)).toBe(100);
+  });
+});
+
 describe("placement honours the host's own cap", () => {
   const big = { url: "https://arm", dialPrefixes: [] as string[], cap: 60 };
   const small = { url: "https://micro", dialPrefixes: [] as string[], cap: 25 };
