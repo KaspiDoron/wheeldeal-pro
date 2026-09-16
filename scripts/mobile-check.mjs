@@ -48,7 +48,7 @@
 
 import { spawn } from "node:child_process";
 import { createHmac } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { chromium } from "playwright";
 
 // 320 is the narrowest phone still in use (iPhone SE 1st gen); 375 is the
@@ -64,6 +64,30 @@ function chromiumPath() {
   const root = process.env.PLAYWRIGHT_BROWSERS_PATH;
   if (root && existsSync(`${root}/chromium`)) return `${root}/chromium`;
   return undefined; // let Playwright resolve its own download
+}
+
+/**
+ * An "essential only" cookie decision, encoded the way lib/cookies/consent does.
+ *
+ * The policy version is READ FROM THE SOURCE rather than pasted: a bump would
+ * otherwise silently turn this into a stale record, the middleware would hold
+ * every page at the gate, and the failure would look like a layout regression.
+ */
+function consentCookie() {
+  const src = readFileSync("src/lib/cookies/manifest.ts", "utf8");
+  const version = src.match(/COOKIE_POLICY_VERSION\s*=\s*"([^"]+)"/)?.[1];
+  if (!version) throw new Error("COOKIE_POLICY_VERSION not found in manifest.ts");
+  const payload = JSON.stringify({
+    v: version,
+    t: Date.now(),
+    s: "reject-all",
+    g: { preferences: false, analytics: false, marketing: false },
+  });
+  return Buffer.from(payload, "utf8")
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
 }
 
 /** A signed session cookie, minted the same way src/lib/session.ts does. */
@@ -283,6 +307,23 @@ async function run() {
             domain: "127.0.0.1",
             path: "/",
             httpOnly: true,
+          },
+          // THE COOKIE DECISION. Essential cookies are a condition of using the
+          // app, so a signed-in traveller has answered - and middleware.ts now
+          // redirects a gated path to /cookies when they have not. Without this
+          // the whole check measures the cookie policy page, which has no status
+          // panel, and every layout assertion below fails for a reason that has
+          // nothing to do with layout.
+          //
+          // "Essential only" on purpose: it is what a privacy-minded traveller
+          // picks, and the funnel must lay out identically either way. If this
+          // check ever passes on "accept all" and fails on this, that IS the
+          // finding.
+          {
+            name: "wd_cookie_prefs",
+            value: consentCookie(),
+            domain: "127.0.0.1",
+            path: "/",
           },
         ]);
         // Dismiss the first-run onboarding sheet. It is a real, correct overlay

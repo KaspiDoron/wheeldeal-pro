@@ -27,6 +27,7 @@ import {
 } from "@/lib/cookies/manifest";
 import { ANALYTICS_EVENTS } from "@/lib/analytics/events";
 import { CookieSettingsButton } from "@/components/CookieSettingsButton";
+import { CookieGate } from "@/components/CookieGate";
 
 export const metadata: Metadata = {
   title: "Cookie Policy - WheelDeal",
@@ -45,6 +46,11 @@ export default async function CookiesPage() {
       <Link href="/" className="text-[13px] font-bold text-brandblue">
         ← Back
       </Link>
+
+      {/* THE REQUIRED DECISION, when the middleware sent them here. Renders
+          nothing otherwise, so this stays an ordinary public policy page for
+          everyone else - crawlers included. */}
+      <CookieGate />
 
       <header className="mt-4">
         <h1 className="text-lg font-extrabold text-strong">🍪 Cookie Policy</h1>

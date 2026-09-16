@@ -22,7 +22,7 @@
 //          index rows, and reports it under `purged["storage:<bucket>"]`.
 
 import "server-only";
-import { sbDelete, sbSelectStrict } from "../runtime-config";
+import { sbDelete, sbSelectStrict, sbUpdate } from "../runtime-config";
 import { deleteMediaAudit } from "../media/audit";
 import {
   USER_TABLES,
@@ -215,6 +215,36 @@ export async function eraseUserData(emailRaw: string): Promise<EraseResult> {
     }
     const ok = await sbDelete(entry.table, filterFor(entry, email)).catch(() => false);
     purged[entry.table] = (purged[entry.table] ?? true) && ok;
+  }
+
+  // 4b. THE AUDIT TRAIL IS DE-IDENTIFIED, NOT DELETED.
+  //
+  // `admin_audit` records which operator looked at, exported or erased whose
+  // data. Deleting this person's rows along with their data would mean an
+  // operator could erase an account to destroy the record of their own access
+  // to it - the audit trail has to outlive the thing it audits or it is not an
+  // audit trail. So the ROW survives, with its actor and its action intact, and
+  // only the subject identifier is replaced by the same one-way pseudonym the
+  // priced-transcript de-identification uses.
+  //
+  // What that buys, precisely: "who accessed account X" stops being answerable
+  // from an address (the account is gone; nobody can look it up), while "did
+  // this operator access forty accounts last Tuesday" stays answerable, which
+  // is the question the trail exists for. A pseudonym is not anonymisation and
+  // this comment does not claim it is - it is the balance between an erasure
+  // and a legal-obligation record, and EXCLUDED_TABLES names it as such.
+  //
+  // Best-effort by design: it must never be the reason an erasure fails and
+  // strands an account, so it is not folded into `failed`.
+  try {
+    const { pseudonymForEmail } = await import("./pseudonym");
+    await sbUpdate(
+      "admin_audit",
+      `subject_email=eq.${encodeURIComponent(email)}`,
+      { subject_email: pseudonymForEmail(email) }
+    ).catch(() => false);
+  } catch {
+    /* the trail keeps the address until a later pass rewrites it */
   }
 
   const failed = Object.entries(purged)

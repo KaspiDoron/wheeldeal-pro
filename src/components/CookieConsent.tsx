@@ -106,7 +106,17 @@ export function CookieConsent() {
     // `needsCookieChoice` the gates use, rather than re-derived here: the
     // policy version lives in one place and a second copy in the client bundle
     // is a second copy that can be stale by one deploy.
+    // NOT ON THE POLICY PAGE. /cookies already carries the whole disclosure and
+    // its own decision card (CookieGate, when the middleware sent them there),
+    // so a bottom sheet asking the same question over the top of it is two
+    // identical cards on one screen - and the one a person tapped would be
+    // ambiguous in the recording. The page is the better surface; the banner
+    // stands down for it.
+    const onPolicyPage =
+      typeof window !== "undefined" && window.location.pathname === "/cookies";
+
     const id = setTimeout(() => {
+      if (onPolicyPage) return;
       void load().then((d) => {
         if (alive && d?.needsChoice) setShowBanner(true);
       });
@@ -226,7 +236,7 @@ export function CookieConsent() {
       <div className="surface w-full max-w-[420px] rounded-blob border-2 border-line p-4 shadow-2xl">
         <div className="text-[14px] font-extrabold text-strong">🍪 {t("Your data, your call")}</div>
         <p className="mt-1 text-[12px] font-bold leading-snug text-soft">
-          {t("We need a few things to keep you signed in. Everything else - remembering your theme and language, counting how the app is used, and the ads that pay for the free plan - only happens if you say yes.")}
+          {t("Two essential cookies keep you signed in and remember this answer - the app does not work without them. Everything else - your theme and language, counting how the app is used, and the ads that pay for the free plan - only happens if you say yes.")}
         </p>
 
         {/* Rule 1: one row, two buttons, same weight. Nothing here may make one
@@ -237,7 +247,7 @@ export function CookieConsent() {
             disabled={saving}
             className="btn rounded-2xl border-2 border-line bg-card py-3 text-[13px] font-extrabold text-strong disabled:opacity-60"
           >
-            {t("Reject all")}
+            {t("Essential only")}
           </button>
           <button
             onClick={() => save("accept-all", ALLOW_ALL)}
@@ -359,7 +369,7 @@ export function CookieConsent() {
             disabled={saving}
             className="btn rounded-2xl border-2 border-line bg-card py-3 text-[13px] font-extrabold text-strong disabled:opacity-60"
           >
-            {t("Reject all")}
+            {t("Essential only")}
           </button>
           <button
             onClick={() => save("accept-all", ALLOW_ALL)}

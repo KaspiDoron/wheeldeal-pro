@@ -77,7 +77,7 @@ const EngineInspectorPanel = dynamic(
 import type { AnalyticsSnapshot } from "@/lib/types";
 import { providerFailureKind, providerNeedsOwner, providerFailureCopy } from "@/lib/provider-health";
 import { StatTile, DegradedBanner, type StatHelp } from "@/components/admin/primitives";
-import { CookieConsentPanel } from "@/components/admin/CookieConsentPanel";
+import { GovernanceConsole } from "@/components/admin/GovernanceConsole";
 import { InfoTipProvider } from "@/components/InfoTip";
 
 // Every Command KPI carries an "i" that explains it - enforced by StatTile's
@@ -2829,10 +2829,11 @@ export default function AdminPage() {
 
       {loaded && tab === "data" && (
         <div className="space-y-3">
-          {/* The consent layer sits at the TOP of the data tab on purpose: the
+          {/* THE GOVERNANCE CONSOLE SITS ABOVE THE EXPLORER on purpose: the
               first question about a store of personal data is what people
-              agreed to, not what is in it. */}
-          <CookieConsentPanel />
+              agreed to and who has been in it, not what is inside. The
+              explorer below is the raw view; this is the accountable one. */}
+          <GovernanceConsole />
           <DegradedBanner degraded={dataDegraded} />
           <div className="surface rounded-blob p-4">
             <div className="text-[13px] font-extrabold text-strong">🗄 Data explorer</div>

@@ -42,10 +42,12 @@
 // already-running server instead of booting one.
 
 import { spawn } from "node:child_process";
+import { createHmac } from "node:crypto";
 import { existsSync } from "node:fs";
 import { chromium } from "playwright";
 
 const PORT = Number(process.env.COOKIE_CHECK_PORT || 3401);
+const SESSION_SECRET = "cookie-gate-check-secret-not-a-real-one";
 const BASE = process.env.COOKIE_CHECK_URL || `http://127.0.0.1:${PORT}`;
 const AD_HOST = "googlesyndication.com";
 
@@ -71,6 +73,14 @@ async function currentVersion() {
   if (!m) throw new Error("COOKIE_POLICY_VERSION not found in manifest.ts");
   return m[1];
 }
+
+/** A session cookie, minted exactly as src/lib/session.ts does. */
+const SESSION_COOKIE = (() => {
+  const b64 = Buffer.from(
+    JSON.stringify({ email: "gate-check@example.test", issuedAt: Date.now(), firstIssuedAt: Date.now() })
+  ).toString("base64url");
+  return `${b64}.${createHmac("sha256", SESSION_SECRET).update(b64).digest("hex")}`;
+})();
 
 function chromiumPath() {
   if (process.env.COOKIE_CHECK_CHROMIUM) return process.env.COOKIE_CHECK_CHROMIUM;
@@ -153,6 +163,37 @@ async function visit(browser, cookie) {
   return { adRequests: adRequests.length, banner, errors };
 }
 
+/**
+ * Ask the MIDDLEWARE, and nothing else, what it does with a signed-in request
+ * to a gated path.
+ *
+ * A raw fetch with `redirect: "manual"`, not a browser navigation. The two are
+ * not equivalent: following the redirect chain in a browser also runs the page,
+ * which has its own reasons to bounce (the beta allowlist sends an unknown
+ * account to /login), and a check that reports "landed on /login" cannot say
+ * whether the cookie gate opened or the app simply refused for another reason.
+ * The Location header on the FIRST response is the middleware's decision, alone.
+ *
+ * The session is signed with the same secret the server is booted with - the
+ * middleware only checks presence today, but a real cookie keeps this honest if
+ * that ever tightens.
+ */
+async function middlewareVerdict(consentCookie) {
+  const jar = [`wd_session=${SESSION_COOKIE}`];
+  if (consentCookie) jar.push(`wd_cookie_prefs=${consentCookie}`);
+  const res = await fetch(`${BASE}/profile`, {
+    redirect: "manual",
+    headers: { cookie: jar.join("; ") },
+  });
+  const location = res.headers.get("location");
+  if (!location) return { held: false, to: `${res.status} (no redirect - the app rendered)` };
+  const to = new URL(location, BASE);
+  return {
+    held: to.pathname === "/cookies",
+    to: `${to.pathname}${to.search}`,
+  };
+}
+
 const results = [];
 const ok = (name, pass, detail) => results.push({ name, pass, detail });
 
@@ -175,7 +216,7 @@ async function run() {
     server = spawn("npx", ["next", "start", "-p", String(PORT)], {
       stdio: "ignore",
       detached: true,
-      env: { ...process.env, NODE_ENV: "production" },
+      env: { ...process.env, NODE_ENV: "production", SESSION_SECRET },
     });
     if (!(await waitForServer(BASE))) {
       stopServer(server);
@@ -240,6 +281,36 @@ async function run() {
     ok("corrupt cookie: no ad request", corrupt.adRequests === 0, `saw ${corrupt.adRequests}`);
     ok("corrupt cookie: re-asks", corrupt.banner === true);
     ok("corrupt cookie: no page errors", corrupt.errors.length === 0, corrupt.errors[0]);
+
+    // 6. THE MANDATORY-ESSENTIALS GATE, end to end through real middleware.
+    //
+    // A signed-in request to a gated path with no decision must land on
+    // /cookies; the same request WITH a decision must not. Both directions
+    // matter: a gate that never opens is as broken as one that never closes,
+    // and the "essential only" case is the one that proves this is a condition
+    // of service rather than a cookie wall.
+    for (const [label, cookie, expectHeld] of [
+      ["no decision", null, true],
+      ["essential only", COOKIES.denyAll, false],
+      ["accept all", COOKIES.allowAll, false],
+      ["stale policy version", COOKIES.staleYes, true],
+      ["corrupt record", COOKIES.corrupt, true],
+    ]) {
+      const verdict = await middlewareVerdict(cookie);
+      ok(
+        `gate · ${label}: ${expectHeld ? "held" : "passed"}`,
+        verdict.held === expectHeld,
+        verdict.to
+      );
+    }
+    // The redirect carries the required flag AND where they were going, so the
+    // screen can send them back rather than dumping them on the home page.
+    const held = await middlewareVerdict(null);
+    ok(
+      "gate · the redirect asks for a decision and remembers the destination",
+      held.to.includes("required=1") && held.to.includes("next=%2Fprofile"),
+      held.to
+    );
   } finally {
     await browser.close();
     stopServer(server);

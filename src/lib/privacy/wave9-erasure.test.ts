@@ -213,14 +213,28 @@ describe("the routes drive off the registry", () => {
   });
 
   it("the DSAR export walks the SAME registry and names what it could not read", () => {
-    const route = readCode("src/app/api/profile/export/route.ts");
-    expect(route).toMatch(/USER_TABLES/);
-    expect(route).toMatch(/CHILD_TABLES/);
-    expect(route).toMatch(/filterFor/);
-    expect(route).toMatch(/unreadable/);
-    expect(route).toMatch(/rateLimit\("dsar-export"/);
+    // The ASSEMBLY moved to lib/privacy/dsar when the governance console gained
+    // an operator-fulfilled path for people locked out of their account. Both
+    // callers drive off it, so the document a person downloads and the document
+    // an operator hands them are the same document - which is the property this
+    // test has always been about. The registry walk is asserted where it now
+    // lives; the route is asserted to CALL it and to keep its own rate limit.
+    const lib = readCode("src/lib/privacy/dsar.ts");
+    expect(lib).toMatch(/USER_TABLES/);
+    expect(lib).toMatch(/CHILD_TABLES/);
+    expect(lib).toMatch(/filterFor/);
+    expect(lib).toMatch(/unreadable/);
     // The account block withholds the password hash.
-    expect(route).not.toMatch(/passwordHash: rec\.passwordHash/);
+    expect(lib).not.toMatch(/passwordHash: rec\.passwordHash/);
+
+    const route = readCode("src/app/api/profile/export/route.ts");
+    expect(route).toMatch(/buildDsarExport\(session\.email\)/);
+    expect(route).toMatch(/rateLimit\("dsar-export"/);
+
+    // ...and the operator's copy is the SAME assembly, never a second one.
+    const ops = readCode("src/app/api/admin/governance/subject-export/route.ts");
+    expect(ops).toMatch(/buildDsarExport\(email\)/);
+    expect(ops).not.toMatch(/USER_TABLES/);
   });
 
   it("the Profile page offers both halves of the DSAR pair", () => {
