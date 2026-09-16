@@ -341,6 +341,27 @@ export interface Host {
    * strictly additive. See `wa/host-region` for why geo matters here.
    */
   dialPrefixes: string[];
+  /**
+   * How many linked numbers THIS host may carry, from the OPTIONAL fourth
+   * field (`https://sg.example.com|KEY|66,84,855|60`). Undefined = fall back to
+   * the fleet-wide `EVOLUTION_MAX_PER_HOST`.
+   *
+   * WHY A PER-HOST NUMBER AND NOT JUST A BIGGER GLOBAL ONE. The default of 25
+   * is sized for the SMALLEST box in the fleet - a 512MB Render starter, or a
+   * 1GB Oracle AMD micro. The free fleet is deliberately heterogeneous
+   * (deploy/fleet/README.md): an Oracle ARM lane is 1 OCPU / 6GB, twelve times
+   * the memory of the micro sitting next to it. With one global cap the owner
+   * has only two moves, and both are wrong: leave it at 25 and the big lanes
+   * run at a twelfth of their capacity, or raise it and the 1GB micro is now
+   * authorised to accept 60 sockets and OOM - which does not degrade into a
+   * queue, it drops every socket on the box at once and each one is a
+   * traveller's PERSONAL WhatsApp number reconnecting in a storm.
+   *
+   * So the cap belongs to the host, beside the key and the region that already
+   * do. Omitting it is exactly the behaviour of every line written before this
+   * field existed.
+   */
+  cap?: number;
 }
 
 /**
@@ -360,9 +381,29 @@ export interface Host {
  *
  * Newlines are the real separator. The comma stays supported only in the legacy
  * shape it was added for - `url1|key1,url2|key2` - which is recognisable
- * because EVERY fragment carries its own `|`. A line whose fragments are not
- * all hosts is one host, commas and all.
+ * because every fragment is ITSELF A URL FOLLOWED BY A KEY. A line whose
+ * fragments are not all hosts is one host, commas and all.
+ *
+ * "CARRIES A `|`" WAS NOT A STRONG ENOUGH TEST, and the fourth field proved it.
+ * The rule used to be `p.split("|").filter(Boolean).length >= 2` - any fragment
+ * with a pipe in it counted as a host. That held while a line was at most three
+ * fields, and it broke the moment a per-host cap was added as a fourth:
+ *
+ *     https://sg.example.com|KEY|66,84|60
+ *
+ * splits on the comma into `https://sg.example.com|KEY|66` (3 fields) and
+ * `84|60` (2 fields). Both clear the old bar, so the line became TWO hosts -
+ * the real one stripped down to a single prefix, plus a phantom host at url
+ * "84" with "60" as its API key, which `url && key` then waved through. A
+ * phantom host is worse than a dropped one: it is counted in fleet capacity, it
+ * is offered to `placeHost`, and every user placed on it cannot link at all.
+ *
+ * This is the SAME defect the paragraph above records, one field later, so the
+ * fix is the one that does not need re-doing per field: a fragment is a host
+ * only if it starts with a URL. That is what the legacy shape always meant.
  */
+const HOST_URL_RE = /^https?:\/\/\S+$/i;
+
 export function splitHostLines(raw: string): string[] {
   return raw
     .split(/\r?\n/)
@@ -371,11 +412,27 @@ export function splitHostLines(raw: string): string[] {
     .flatMap((line) => {
       if (!line.includes(",")) return [line];
       const parts = line.split(",").map((p) => p.trim()).filter(Boolean);
-      // Legacy comma-separated hosts: every part is itself `url|key`.
+      // Legacy comma-separated hosts: every part is itself `url|key[|...]`,
+      // where `url` is an actual URL - not merely some text with a pipe in it.
       const everyPartIsAHost =
-        parts.length > 1 && parts.every((p) => p.split("|").filter(Boolean).length >= 2);
+        parts.length > 1 &&
+        parts.every((p) => {
+          const fields = p.split("|").map((f) => f.trim());
+          return fields.length >= 2 && HOST_URL_RE.test(fields[0] ?? "") && Boolean(fields[1]);
+        });
       return everyPartIsAHost ? parts : [line];
     });
+}
+
+/**
+ * The optional fourth field: this host's own cap. Junk degrades to undefined
+ * (the fleet default) rather than to zero - a typo must never silently take a
+ * host's capacity to nothing, which would read downstream as "at capacity" and
+ * refuse every new link on it.
+ */
+export function parseHostCap(raw: string | undefined | null): number | undefined {
+  const n = Number(String(raw ?? "").trim());
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
 }
 
 // Exported for `wa/fleet-truth`, which needs the same host list this module
@@ -385,10 +442,15 @@ export function splitHostLines(raw: string): string[] {
 export async function getHosts(): Promise<Host[]> {
   const multi = (await getConfig("EVOLUTION_HOSTS")) ?? "";
   const parsed = splitHostLines(multi)
-    .map((line) => {
-      const [url, key, regions] = line.split("|").map((x) => x?.trim());
+    .map((line): Host | null => {
+      const [url, key, regions, cap] = line.split("|").map((x) => x?.trim());
       return url && key
-        ? { url: url.replace(/\/$/, ""), key, dialPrefixes: parseDialPrefixes(regions) }
+        ? {
+            url: url.replace(/\/$/, ""),
+            key,
+            dialPrefixes: parseDialPrefixes(regions),
+            cap: parseHostCap(cap),
+          }
         : null;
     })
     .filter((h): h is Host => h !== null);
@@ -1072,17 +1134,25 @@ export async function maxPerHost(): Promise<number> {
  */
 export async function hostCapacity(): Promise<{
   cap: number;
-  hosts: { url: string; users: number }[];
+  hosts: { url: string; users: number; cap: number }[];
   users: number;
   capacity: number;
 }> {
   const [hosts, counts, cap] = await Promise.all([getHosts(), hostUserCounts(), maxPerHost()]);
-  const rows = hosts.map((h) => ({ url: h.url, users: counts[h.url] ?? 0 }));
+  const rows = hosts.map((h) => ({
+    url: h.url,
+    users: counts[h.url] ?? 0,
+    // The cap this host is ACTUALLY placed against, not the fleet default it
+    // may have overridden. The panel that reads this is the one an owner sizes
+    // an invite wave from, so it has to report the number the placement rule
+    // uses; `hosts x default` was only ever right for a uniform fleet.
+    cap: h.cap && h.cap > 0 ? h.cap : cap,
+  }));
   return {
     cap,
     hosts: rows,
     users: rows.reduce((s, h) => s + h.users, 0),
-    capacity: rows.length * cap,
+    capacity: rows.reduce((s, h) => s + h.cap, 0),
   };
 }
 
@@ -1222,6 +1292,7 @@ async function resolveHost(
     stored,
     counts,
     cap: await maxPerHost(),
+    capFor: (h) => h.cap,
     healthy,
     digits,
     pref: (h) => hostPref(email, h.url),

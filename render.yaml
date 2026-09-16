@@ -27,8 +27,15 @@
 # (Render -> Settings -> GitHub -> Configure). If the Blueprint's Sync Hook URL
 # fails identically, it is a Render-side fault for a support ticket.
 #
-# The free Evolution fleet (deploy/fleet/README.md) retires Render entirely,
-# and this whole problem with it. Do not over-invest in fixing it.
+# The free Evolution fleet (deploy/fleet/README.md) is what eventually retires
+# Render, and this whole problem with it. Do not over-invest in fixing it.
+#
+# NOT YET, THOUGH, AND THE REASON IS BLAST RADIUS RATHER THAN CAPACITY. At the
+# 200-user size the only always-free providers left (Koyeb closed, Fly.io's free
+# tier is gone) put roughly two thirds of the fleet's slots inside ONE Oracle
+# tenancy, which one suspension takes out at once. Until a non-Oracle lane
+# replaces it, this $13/mo is buying a second failure domain, not sockets. See
+# "Retiring Render" in deploy/fleet/README.md for the condition to check.
 #
 # Render reads this Blueprint, builds the Evolution API image from
 # deploy/evolution/Dockerfile, provisions a Postgres database AND a free Redis
