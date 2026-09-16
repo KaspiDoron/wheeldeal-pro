@@ -316,13 +316,18 @@ export function recordSend(email: string) {
 
 // ---- Multi-host Evolution client -----------------------------------------------
 //
-// Free hosts (Render/Koyeb/etc.) sleep and restart. To stay reliable on 100%
-// free tiers we support a POOL of Evolution servers that all point at the SAME
-// Supabase Postgres database. Because the Baileys credentials live in that
-// shared DB, ANY host can resume a user's session - so if a user's host is
-// asleep/down we transparently fail the user over to a healthy host with NO
-// re-linking. Users are also sharded across hosts to spread the load and stay
-// within each free tier's limits.
+// The app spreads linked numbers across a POOL of Evolution servers, one lane
+// per free host (deploy/fleet). EACH LANE OWNS ITS OWN STORE, so a session
+// lives on exactly one host and the app never moves it: a placed user is
+// served by their stored host whether it is fast, slow or briefly dark
+// (wa/host-placement, the affinity rule). The only thing that releases a
+// host's users is the owner removing that host's line from EVOLUTION_HOSTS.
+//
+// (This used to describe the opposite - "all hosts point at the SAME database,
+// so ANY host can resume a session and we transparently fail the user over" -
+// which was true of one Render box and its one Postgres. On the per-host
+// fleet that failover created a phantom instance on the wrong box and, on
+// re-link, a second live registration for the same number.)
 //
 // Config (Admin -> Keys):
 //   EVOLUTION_HOSTS  (preferred) - one "url|apikey" per line/comma, e.g.
@@ -1270,6 +1275,27 @@ async function resolveHost(
   // guessing is worse than saying no.
   if (storedUnreadable && !forPlacement && hosts.length === 1) return hosts[0];
 
+  // A PLACED USER'S HOST IS KNOWN, SO NOTHING BELOW IS OWED. Every call after
+  // the link is "where is this user", and the answer is the row we just read.
+  // Probing all seven hosts, counting the fleet, reading the user's linked
+  // number for geo ranking and writing a mismatch note were being paid on
+  // EVERY send, presence beat, media fetch and status read - 5-8 `evo()` calls
+  // per outbound message, times 200 users - and none of it could change the
+  // answer, because `placeHost` returns the stored host regardless (see the
+  // affinity rule in wa/host-placement). Worse, the probe fan-out was itself
+  // the load that made hosts time out: 7 unfiltered fetchInstances per resolve
+  // from every Cloud Run instance, ~1.3/s per 1 GB box, forever.
+  //
+  // This is the same answer for a placement call: a user who is still on a
+  // configured host re-links THERE (connectInstance probes that one host
+  // directly, the B1 honesty gate), never on a second box beside a live
+  // registration. Only a host the owner has removed from EVOLUTION_HOSTS
+  // releases its users to the placement below.
+  if (stored) {
+    const own = hosts.find((h) => h.url === stored);
+    if (own) return own;
+  }
+
   // THE PLACEMENT DECISION ITSELF LIVES IN `wa/host-placement`, as a pure
   // function. It has produced three separate defects - the single-host cap
   // escape, the "place them anyway" fallback, and the missing occupant
@@ -1301,7 +1327,14 @@ async function resolveHost(
   // right call - a scored signal beats a user who cannot link at all - but it
   // is invisible from the host panel, which would otherwise show a fleet that
   // is uniformly green while a real risk quietly accumulates on it.
-  if (chosen && digits && affinityFor(chosen, digits) === AFFINITY_MISMATCH) {
+  //
+  // ONE RECORD PER DECISION. The stored-host return above already keeps every
+  // serve call away from here, and this gate makes the intent explicit: the
+  // note documents a PLACEMENT, so it is written on the placement call only.
+  // Unconditional, it was one agent_events row per send, presence beat and
+  // status read for the life of the placement - ~75 rows a minute per
+  // mismatched traveller, flooding the trail it exists to inform.
+  if (forPlacement && chosen && digits && affinityFor(chosen, digits) === AFFINITY_MISMATCH) {
     void noteHostGeoMismatch(email, chosen.url, digits);
   }
   // THE REFUSAL ONLY EXISTS ON THE LINK PATH.
@@ -1850,9 +1883,17 @@ export async function ensureConnected(
   const prior = await storedStatus(email);
   if (prior === null) return { ok: false, state };
 
-  // If we've failed the user over to a different host, the instance may not
-  // exist there yet - creating it makes Evolution load the SHARED creds from
-  // the database and reconnect the session (no re-linking needed).
+  // THE INSTANCE IS MISSING FROM THE USER'S OWN HOST. `resolveHost` never
+  // routes a placed user anywhere else (the affinity rule in wa/host-placement:
+  // a host the fleet still lists owns its users, healthy or not), so a "not
+  // found" here is not a failover - it means THIS host lost the instance: a
+  // wiped volume, a fresh box under the same URL, a store restore. Recreating
+  // it here is the right recovery on the right box; Evolution reloads whatever
+  // credentials this host's own store still holds, and if it holds none the
+  // user is asked to re-link on this same host - never paired on a second one
+  // beside a live registration. (This comment used to say the recreate loads
+  // "the SHARED creds from the database", which was true of the single-Render
+  // database and is false of the per-host fleet.)
   //
   // CRITICAL: this recreate MUST carry the webhook, or a host restart silently
   // recreates a webhook-LESS instance (outbound keeps working, inbound stops).

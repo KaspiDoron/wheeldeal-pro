@@ -415,18 +415,21 @@ Always use freshly rotated keys - never ones that were shared in plain text.
 ## v10: Multi-host WhatsApp pool - Oracle Always Free, no user left behind
 
 WhatsApp is the heart of WheelDeal. A single free host sleeps after ~15 min and
-drops the connection - bad. The fix is a POOL: run the SAME Evolution API server
-on 8+ free services, all pointed at the SAME Supabase Postgres database. Because
-every WhatsApp (Baileys) credential lives in that shared database, ANY host can
-resume ANY user's session. If one host is asleep or slow, the app instantly
-fails the user over to a healthy host - with NO re-scanning, NO re-linking.
+drops the connection - bad. The fix is a POOL: several Evolution lanes, each
+with its OWN database (`deploy/fleet/`), and travellers spread across them.
 
 ### How the app spreads users (built in - nothing to configure)
 
-- On every send/connect the app health-checks all hosts in parallel (cached 15s).
-- Each user "sticks" to one host (saved in `wa_sessions.host_url`) so their
-  session stays warm; if that host is down, they migrate to the least-loaded
-  healthy host automatically.
+- Each user "sticks" to one host (saved in `wa_sessions.host_url`) for good.
+  Their WhatsApp session lives in THAT host's store, so the app never moves
+  them: a host that is slow or briefly down keeps its users, who wait for it.
+  (It used to migrate them to a healthy host - that was right when every host
+  shared one database, and wrong on the fleet: it created an empty instance on
+  the wrong box and, on re-link, a SECOND live registration for the same
+  number, which is a ban signal.) The one way to release a host's users is to
+  remove its line from `EVOLUTION_HOSTS`; they then re-link onto the fleet.
+- Only a NEW link health-checks the hosts (in parallel, cached 15s) to pick a
+  box; sends to an already-placed user go straight to their host.
 - A per-host cap (Admin -> Keys -> `EVOLUTION_MAX_PER_HOST`, default **25**, or
   a host's own fourth `EVOLUTION_HOSTS` field where it declares one)
   stops any one server from being overloaded. At the cap the app **REFUSES** a
@@ -439,8 +442,9 @@ fails the user over to a healthy host - with NO re-scanning, NO re-linking.
 
 ### The ONE shared config every host needs (identical on all 8)
 
-Set these environment variables the SAME on every host. The shared database +
-shared API key is what makes failover seamless:
+Set these environment variables the SAME on every host (except the API key -
+`deploy/fleet/setup.sh` gives each host its OWN key on purpose, so one leak
+burns one cohort, not the fleet):
 
 ```
 AUTHENTICATION_API_KEY   = <pick one long random string, SAME on all hosts>
@@ -554,7 +558,7 @@ Shape choice (smooth WhatsApp, $0): the ARM VM.Standard.A1.Flex (up to 4 OCPU +
 24 GB total, splittable) is the real powerhouse and is free. If it shows "Out of
 host capacity" (common in small regions), either:
 - Bridge now on TWO AMD VM.Standard.E2.1.Micro VMs (1 GB each, always available,
-  both Always Free) with the swap script above - the pool fails over between them.
+  both Always Free) with the swap script above - two lanes, 25 users each.
 - Then land ARM in the background: ask for a SMALL ARM first (1 OCPU / 6 GB - more
   likely to have capacity), retry at off-peak hours, or use "Save as stack" in the
   create form and re-tap Apply in Resource Manager (one-tap retry) until it

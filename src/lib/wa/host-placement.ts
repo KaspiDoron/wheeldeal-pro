@@ -117,22 +117,44 @@ export function placeHost<H extends RegionalHost>(input: PlacementInput<H>): H |
     return (counts[hosts[0].url] ?? 0) < capOf(hosts[0]) ? hosts[0] : null;
   }
 
-  const healthy = input.healthy ?? hosts;
-  // Keep the user on their existing host while it is healthy.
+  // A CONFIGURED HOST THAT HOLDS THE USER IS THE USER'S HOST - HEALTHY OR NOT.
+  //
+  // This used to keep the user on their stored host only while it passed the
+  // probe, and otherwise re-place them on the least-loaded healthy box. That
+  // was written for the single-Render-database era, when every host read the
+  // same Baileys credentials and any box could resume any session. The free
+  // fleet is the opposite by design (deploy/fleet/docker-compose.yml: "HOST
+  // AFFINITY, NOT CROSS-HOST FAILOVER" - each lane owns its own Postgres).
+  // On that fleet a probe blip did three bad things at once:
+  //
+  //   1. A serve call (a send, a media fetch, a status read) was routed to a
+  //      box that has never held this instance. ensureConnected then created
+  //      an EMPTY instance there - a phantom the cap never counts - and the
+  //      send failed anyway, which the send path recorded as the traveller's
+  //      own number going bad.
+  //   2. A re-link was placed and PAIRED on a second box while the first still
+  //      held the old registration in its own store. When the first box came
+  //      back, two live sockets for one number: connectionReplaced, the
+  //      top-weighted ban signal.
+  //   3. A fleet whose every probe timed out at once (the probe itself loads
+  //      the hosts) had `healthy` empty, and ranked all 200 users onto the
+  //      single emptiest box together.
+  //
+  // So: while a host is still in EVOLUTION_HOSTS, its users are its users. The
+  // one thing that releases them is the OWNER removing that line, which is the
+  // documented way to retire a lane (deploy/fleet/README.md) - then `stored`
+  // matches no configured host, and the user is placed afresh below. A lane
+  // that is merely slow or briefly dark keeps its cohort, who wait for it, and
+  // waiting is strictly better than the three outcomes above.
   if (stored) {
-    const h = healthy.find((x) => x.url === stored);
-    if (h) return h;
+    const own = hosts.find((x) => x.url === stored);
+    if (own) return own;
   }
 
+  const healthy = input.healthy ?? hosts;
   const pickFrom = healthy.length ? healthy : hosts;
   const underCap = pickFrom.filter((h) => (counts[h.url] ?? 0) < capOf(h));
-  if (!underCap.length) {
-    // The same exemption as the single-host branch. Its absence here was a real
-    // eviction: a stored user is kept above only while their host passes the
-    // probe, so one transient failure on a full fleet sent a LINKED user down
-    // this path and returned null for every send they had queued.
-    return (stored ? hosts.find((h) => h.url === stored) : undefined) ?? null;
-  }
+  if (!underCap.length) return null;
 
   // GEO FIRST, THEN LOAD. With no declared regions anywhere every host is
   // neutral and the ranking IS the old least-loaded ordering, term for term.
