@@ -25,9 +25,13 @@ vi.mock("./runtime-config", () => ({
 beforeEach(() => setConfig.mockClear());
 
 describe("the tester cap lives in exactly one place", () => {
-  it("BETA_ALLOWLIST_MAX is the ceiling, and it is 100 - not the old 25", async () => {
+  it("BETA_ALLOWLIST_MAX is the ceiling, and it is 200 - not the old 25 or 100", async () => {
+    // The target moved to 200 users. This list is the ceiling that binds FIRST:
+    // a fleet sized for 200 numbers still refuses tester 101 at the door while
+    // the capacity tile on another screen reports room, so the two have to move
+    // together. See deploy/fleet/README.md for the lanes that back the number.
     const { BETA_ALLOWLIST_MAX } = await import("./allowlist");
-    expect(BETA_ALLOWLIST_MAX).toBe(100);
+    expect(BETA_ALLOWLIST_MAX).toBe(200);
   });
 
   it("no bare numeric literal cap survives in the save path", async () => {

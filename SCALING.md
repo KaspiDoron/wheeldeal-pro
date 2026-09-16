@@ -65,7 +65,8 @@ Each traveller who links their WhatsApp gets a "session" - a live connection -
 inside that server. Your app spreads travellers across a **pool** of these
 servers (Admin -> Keys -> `EVOLUTION_HOSTS`, one `url|apikey` per line - with
 an OPTIONAL third field of calling-code prefixes, `url|apikey|66,84,855`, that
-says which numbers that host is geographically right for) and fails over
+says which numbers that host is geographically right for, and an OPTIONAL fourth
+giving that host its own cap, `url|apikey|66,84,855|50`) and fails over
 automatically if one goes to sleep.
 
 **Placement is geo-first, then least-loaded** - never round-robin. A number
@@ -77,8 +78,10 @@ scored signal beats a user who cannot link at all, and it writes a
 field is region-neutral, which is what every line meant before this existed.
 
 ### What is the limit today
-- **25 paired users per host.** That is `EVOLUTION_MAX_PER_HOST`, and 25 is the
-  built-in default when it is unset. **At capacity the app now REFUSES** - it
+- **25 paired users per host**, unless that host declares its own cap in the
+  fourth `EVOLUTION_HOSTS` field. That default is `EVOLUTION_MAX_PER_HOST`, and
+  25 is the built-in value when it is unset. Fleet capacity is therefore the SUM
+  of the hosts' caps, not `hosts x 25`. **At capacity the app now REFUSES** - it
   answers "we are at capacity" rather than placing the traveller anyway.
   It used to do the latter (`underCap.length ? underCap : pickFrom`), which
   meant the cap did nothing at the exact moment it mattered: with a single
@@ -161,6 +164,14 @@ but a single crash takes everyone down at once, and every session shares one IP.
    socket on it drops at once and every one of those numbers starts
    reconnecting together. A bigger host earns a bigger number; a bigger number
    does not earn a bigger host.
+
+   **Which is why the number belongs to the HOST.** `EVOLUTION_MAX_PER_HOST` is
+   one value for the whole fleet, so it can only be sized for the smallest box
+   in it - and a fleet of free lanes runs from a 1 GB micro to a 6 GB ARM
+   instance. Give the bigger lane its own cap in the fourth `EVOLUTION_HOSTS`
+   field (`url|key|66,84|50`) instead of raising the global default, which would
+   hand the same licence to the 512 MB box. Omit the field and nothing changes.
+   Raise a cap only after watching that host hold its current one.
 3. **Add hosts BEFORE the invites go out**, not after. Capacity added after a
    ban does not undo the ban.
 

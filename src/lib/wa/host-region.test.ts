@@ -131,9 +131,10 @@ describe("three tiers, and the third one is deliberate", () => {
 describe("the fleet actually routes on it", () => {
   const evo = read("src/lib/evolution.ts");
 
-  it("EVOLUTION_HOSTS parses the third field", () => {
-    expect(evo).toMatch(/const \[url, key, regions\] = line\.split\("\|"\)/);
+  it("EVOLUTION_HOSTS parses the third field - and the fourth, beside it", () => {
+    expect(evo).toMatch(/const \[url, key, regions, cap\] = line\.split\("\|"\)/);
     expect(evo).toMatch(/dialPrefixes: parseDialPrefixes\(regions\)/);
+    expect(evo).toMatch(/cap: parseHostCap\(cap\)/);
     // The legacy single-host fallback stays region-neutral rather than absent.
     expect(evo).toMatch(/key: key\.trim\(\), dialPrefixes: \[\]/);
   });

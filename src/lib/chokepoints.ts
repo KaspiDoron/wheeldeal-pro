@@ -56,12 +56,18 @@ export interface HostOccupancy {
  * the worst single host, and `hot` names it.
  */
 export function hostOccupancy(
-  hosts: { url: string; users: number }[],
+  hosts: { url: string; users: number; cap?: number }[],
   cap: number
 ): HostOccupancy {
+  // EACH HOST IS MEASURED AGAINST ITS OWN CAP. A fleet of free lanes is not
+  // uniform - a 1GB micro and a 6GB ARM box sit side by side - so a host that
+  // declares its own ceiling (the fourth EVOLUTION_HOSTS field) is judged
+  // against that one. Omitting it falls back to the fleet default, which is
+  // every host in a deployment that has not opted in, so nothing moves there.
+  const capOf = (h: { cap?: number }) => (h.cap && h.cap > 0 ? h.cap : cap);
   const users = hosts.reduce((s, h) => s + h.users, 0);
-  const capacity = hosts.length * cap;
-  if (hosts.length === 0 || cap <= 0) {
+  const capacity = hosts.reduce((s, h) => s + capOf(h), 0);
+  if (hosts.length === 0 || capacity <= 0) {
     return {
       state: "unknown",
       users,
@@ -72,12 +78,25 @@ export function hostOccupancy(
         "No Evolution host is configured, so no traveller can link WhatsApp at all. Paste one url|key per line into EVOLUTION_HOSTS.",
     };
   }
-  const withPct = hosts.map((h) => ({ ...h, pct: Math.round((h.users / cap) * 100) }));
+  const withPct = hosts.map((h) => ({ ...h, pct: Math.round((h.users / capOf(h)) * 100) }));
   const hot = withPct
-    .filter((h) => h.users >= cap * HOST_OCCUPANCY_ALARM)
-    .sort((a, b) => b.users - a.users);
-  const full = withPct.filter((h) => h.users >= cap);
+    .filter((h) => h.users >= capOf(h) * HOST_OCCUPANCY_ALARM)
+    .sort((a, b) => b.pct - a.pct);
+  const full = withPct.filter((h) => h.users >= capOf(h));
   const state: ChokeState = full.length > 0 ? "alarm" : hot.length > 0 ? "alarm" : "ok";
+  // "cap N each" is a lie the moment the caps differ, and it is the sentence an
+  // owner sizes the next invite wave from. Say the per-host number only while
+  // there IS one.
+  const caps = [...new Set(hosts.map(capOf))];
+  const capNote = caps.length === 1 ? `cap ${caps[0]} each` : `mixed caps (${caps.join("/")})`;
+  // Name the actual number whenever there IS one - "the 40-user cap" is the
+  // more useful sentence and stays true for any fleet that shares a cap. Only
+  // a genuinely mixed set of full hosts has to fall back to "their cap".
+  const capsOf = (rows: { cap?: number }[]) => [...new Set(rows.map(capOf))];
+  const named = (rows: { cap?: number }[]) => {
+    const c = capsOf(rows);
+    return c.length === 1 ? `the ${c[0]}-user cap` : "their cap";
+  };
   return {
     state,
     users,
@@ -86,10 +105,10 @@ export function hostOccupancy(
     hot: hot.map((h) => ({ url: h.url, users: h.users, pct: h.pct })),
     detail:
       full.length > 0
-        ? `${full.length} host(s) are AT the ${cap}-user cap. A new traveller has nowhere safe to link - add a host now.`
+        ? `${full.length} host(s) are AT ${named(full)}. A new traveller has nowhere safe to link - add a host now.`
         : hot.length > 0
-          ? `${hot.length} host(s) past ${Math.round(HOST_OCCUPANCY_ALARM * 100)}% of the ${cap}-user cap. Add a host BEFORE the invites land, not after: the failure mode here is a banned number, not a queue.`
-          : `${users}/${capacity} paired users across ${hosts.length} host(s), cap ${cap} each.`,
+          ? `${hot.length} host(s) past ${Math.round(HOST_OCCUPANCY_ALARM * 100)}% of ${named(hot)}. Add a host BEFORE the invites land, not after: the failure mode here is a banned number, not a queue.`
+          : `${users}/${capacity} paired users across ${hosts.length} host(s), ${capNote}.`,
   };
 }
 
@@ -97,7 +116,7 @@ export interface InviteHeadroom {
   state: ChokeState;
   /** Testers on the beta allowlist right now (the owner is not counted). */
   invited: number;
-  /** hosts x per-host cap - how many numbers the fleet can actually hold. */
+  /** The sum of every host's cap - how many numbers the fleet can actually hold. */
   capacity: number;
   /** Invites that could still be sent before the fleet is the binding wall. */
   headroom: number;
@@ -127,11 +146,23 @@ export function inviteHeadroom(
   invited: number,
   hostCount: number,
   cap: number,
-  listMax: number
+  listMax: number,
+  /**
+   * The fleet's REAL capacity, when the caller has it. `hostCount x cap` is
+   * only right while every host shares one cap; once a host declares its own
+   * (the fourth EVOLUTION_HOSTS field) the product understates a fleet with a
+   * big lane in it and overstates one whose lanes were trimmed. The caller
+   * that reads `hostCapacity()` already knows the true sum, so it passes it.
+   * Omitted keeps the original arithmetic exactly.
+   */
+  capacityOverride?: number
 ): InviteHeadroom {
-  const capacity = Math.max(0, hostCount) * Math.max(0, cap);
+  const capacity =
+    Number.isFinite(capacityOverride) && (capacityOverride as number) >= 0
+      ? Math.floor(capacityOverride as number)
+      : Math.max(0, hostCount) * Math.max(0, cap);
   const headroom = capacity - invited;
-  if (hostCount <= 0 || cap <= 0) {
+  if (hostCount <= 0 || capacity <= 0) {
     return {
       state: "unknown",
       invited,
@@ -157,7 +188,19 @@ export function inviteHeadroom(
   // link? - and that question only means something with two or more hosts.
   // At one host, losing it takes the whole fleet down whatever the headroom
   // is, so the useful question becomes proportional: are we nearly full?
-  const nearFull = hostCount >= 2 ? cap : Math.max(2, Math.ceil(capacity * 0.2));
+  //
+  // "ONE HOST'S WORTH" IS THE AVERAGE HOST, NOT THE DEFAULT CAP. On a uniform
+  // fleet those are the same number - capacity/hostCount IS cap - so this is
+  // term-for-term the old rule there. On a mixed fleet the default is the
+  // SMALLEST lane's cap, and warning "less than one host's worth" when the host
+  // you might lose holds twice that warns too late.
+  const perHost = hostCount > 0 ? Math.max(cap, Math.ceil(capacity / hostCount)) : cap;
+  const nearFull = hostCount >= 2 ? perHost : Math.max(2, Math.ceil(capacity * 0.2));
+  // Only claim the multiplication when it is actually the arithmetic used.
+  const capacitySum =
+    hostCount > 0 && capacity === hostCount * cap
+      ? `${hostCount} host(s) x ${cap} = ${capacity}`
+      : `${hostCount} host(s) holding ${capacity}`;
   const state: ChokeState = headroom < 0 ? "alarm" : headroom <= nearFull ? "warn" : "ok";
   const listNote =
     invited >= listMax ? ` The invite list is also at its own ${listMax} ceiling.` : "";
@@ -175,7 +218,7 @@ export function inviteHeadroom(
             ? hostCount >= 2
               ? `Room for ${headroom} more tester(s) before the fleet is full - less than one host's worth. Stand up the next lane now, not after the invites go out.${listNote}`
               : `Room for ${headroom} more tester(s) on your single host (${capacity} linkable). Nearly full: a second host is the only thing that adds slots.${listNote}`
-            : `Room for ${headroom} more tester(s): ${hostCount} host(s) x ${cap} = ${capacity} linkable numbers, ${invited} invited.${listNote}`,
+            : `Room for ${headroom} more tester(s): ${capacitySum} linkable numbers, ${invited} invited.${listNote}`,
   };
 }
 
