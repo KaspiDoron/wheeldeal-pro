@@ -156,15 +156,20 @@ describe("CI runs on the branch people actually work on", () => {
     expect(named).toEqual([]);
   });
 
-  it("the branch CLAUDE.md says to develop on is covered by the pattern", () => {
-    // The coupling that actually matters: the doc names the working branch, and
+  it("the branches CLAUDE.md says to develop on are covered by the pattern", () => {
+    // The coupling that actually matters: the doc says where work happens, and
     // the trigger has to admit it. Executed rather than eyeballed.
+    //
+    // The doc no longer names ONE working branch - since 2026-09-12 it states a
+    // convention, a short-lived `claude/<task>` branch per task. So the check is
+    // on the convention's prefix rather than on a specific ref: any branch the
+    // convention can produce must match the trigger pattern.
     const claudeMd = readFileSync(join(process.cwd(), "CLAUDE.md"), "utf8");
-    const m = claudeMd.match(/Develop on `(claude\/[^`]+)`/);
-    expect(m, "CLAUDE.md must name the working branch").toBeTruthy();
-    const working = m![1];
-    expect(working.startsWith("claude/")).toBe(true);
-    // ...and the pattern in the workflow admits it.
+    const m = claudeMd.match(/Develop on a fresh `(claude\/[^`]+)` branch per task/);
+    expect(m, "CLAUDE.md must state the branch-per-task convention").toBeTruthy();
+    const convention = m![1];
+    expect(convention.startsWith("claude/")).toBe(true);
+    // ...and the pattern in the workflow admits everything under that prefix.
     expect(branchBlock()).toContain("claude/**");
   });
 

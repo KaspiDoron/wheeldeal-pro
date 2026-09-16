@@ -171,15 +171,22 @@ and are NOT dead code.
 
 ## Working branch, and what deploys
 
-Develop on `claude/wheeldeal-production-architecture-91hmfq`. Commit + push
-there, then merge into `master` with `--no-ff`.
+Develop on a fresh `claude/<task>` branch per task - one short-lived branch,
+cut from `master` and named for the work. Commit + push there, let CI gate it,
+then merge into `master` with `--no-ff` and delete the branch.
+
+There is no long-lived development branch any more. The previous one,
+`claude/wheeldeal-production-architecture-91hmfq`, was fully merged and deleted
+on 2026-09-12. A permanent feature branch is exactly how the CI trigger and
+this section drifted apart the last time: the doc named one branch, the work
+happened on another, and nothing was gated.
 
 **`master` is the only thing that deploys, and BOTH deploy paths read it:**
 
-| What | Reads | Triggered by |
-|---|---|---|
-| Cloud Run (the app) | `master` | push, via `.github/workflows/deploy-gcp.yml` |
-| Render (Evolution + crons) | `master` | the Blueprint, on Manual Sync |
+- Cloud Run (the app) reads `master`, on push, via
+  `.github/workflows/deploy-gcp.yml`.
+- Render (Evolution + crons) reads `master`, when a human clicks Manual Sync on
+  the Blueprint.
 
 A change to `render.yaml` does nothing until it reaches `master` AND somebody
 applies it - the Blueprint does not follow a feature branch.
@@ -208,13 +215,22 @@ the `deploy` job admits only `refs/heads/main` and `refs/heads/master`.
 > during the CI cleanup on the reasoning that it was "retired and fully merged";
 > merged is the wrong question - the right one is whether anything READS it.)
 >
-> `claude/rental-agents-legal-setup-o7rgcv` is genuinely retired and carries no
-> commits absent from `master`. `claude/wheeldeal-audit-fixes-x7uog5` carries
-> 341 commits that are NOT in `master` - an abandoned July line `master` has
-> since superseded by ~139k lines - so it is stale rather than merged and
-> discarding it is a deliberate owner decision, not routine cleanup. Neither was
-> deleted from here: this environment's git proxy refuses a delete refspec with
-> HTTP 403 and the available GitHub tooling exposes no delete-branch call.
+> **Branches deleted on 2026-09-12, and why it was safe.** Three previously
+> retired branches are gone: `claude/rental-agents-legal-setup-o7rgcv`,
+> `claude/wheeldeal-audit-fixes-x7uog5` and
+> `claude/wheeldeal-production-architecture-91hmfq`. Each was verified to carry
+> ZERO commits absent from `master` first (`git rev-list --count origin/<b>
+> ^origin/master`), and each tip was confirmed an ancestor of `master`, so every
+> commit remains reachable and nothing was lost. Do not recreate them.
+>
+> This corrects two claims this section used to make. It said
+> `claude/wheeldeal-audit-fixes-x7uog5` carried 341 commits absent from
+> `master`; by the time it was deleted that was false - `master` had absorbed
+> the line entirely and the branch was strictly behind. It also said the
+> branches could not be deleted because "this environment's git proxy refuses a
+> delete refspec with HTTP 403". That was a limit of the remote Claude
+> environment, not of the repo: from a local checkout with an authenticated
+> `gh`, `git push origin --delete` works normally.
 
 ### The Render Blueprint is OPTIONAL - do not treat it as the deploy path
 

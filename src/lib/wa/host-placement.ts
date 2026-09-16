@@ -67,8 +67,21 @@ export interface PlacementInput<H extends RegionalHost = RegionalHost> {
   stored?: string | null;
   /** Paired users per host url. */
   counts: Record<string, number>;
-  /** EVOLUTION_MAX_PER_HOST. */
+  /** EVOLUTION_MAX_PER_HOST - the fleet-wide DEFAULT, used where `capFor` is silent. */
   cap: number;
+  /**
+   * This host's own cap, where it declares one (the fourth `EVOLUTION_HOSTS`
+   * field). Returning undefined means "no opinion" and falls back to `cap`.
+   *
+   * THE FLEET IS NOT UNIFORM, and pretending it is costs capacity in one
+   * direction and sockets in the other. The free lanes range from a 1GB Oracle
+   * AMD micro to a 6GB Oracle ARM instance; one global cap has to be sized for
+   * the smallest of them, so the biggest runs at a fraction of what it holds.
+   * Raising the global number instead authorises the 1GB box to overfill, and
+   * that failure is not a queue - it is every socket on the box dropping at
+   * once, each one a traveller's personal WhatsApp number.
+   */
+  capFor?: (h: H) => number | undefined;
   /**
    * Hosts that answered their health probe. Undefined means "not probed",
    * which is the single-host case - there is nothing to fail over to.
@@ -88,12 +101,20 @@ export function placeHost<H extends RegionalHost>(input: PlacementInput<H>): H |
   const { hosts, stored, counts, cap } = input;
   if (hosts.length === 0) return null;
 
+  // ONE PLACE RESOLVES THE CAP, so the per-host override cannot be honoured on
+  // one branch of this tree and forgotten on another - which is precisely the
+  // shape of all three defects this file's header records.
+  const capOf = (h: H) => {
+    const own = input.capFor?.(h);
+    return Number.isFinite(own) && (own as number) > 0 ? (own as number) : cap;
+  };
+
   // AN OCCUPANT IS NOT AN APPLICANT. The cap governs PLACEMENT; someone already
   // on a host consumes no new slot and creates no new device registration, so
   // refusing them protects nothing and costs them their hunt.
   if (hosts.length === 1) {
     if (stored === hosts[0].url) return hosts[0];
-    return (counts[hosts[0].url] ?? 0) < cap ? hosts[0] : null;
+    return (counts[hosts[0].url] ?? 0) < capOf(hosts[0]) ? hosts[0] : null;
   }
 
   const healthy = input.healthy ?? hosts;
@@ -104,7 +125,7 @@ export function placeHost<H extends RegionalHost>(input: PlacementInput<H>): H |
   }
 
   const pickFrom = healthy.length ? healthy : hosts;
-  const underCap = pickFrom.filter((h) => (counts[h.url] ?? 0) < cap);
+  const underCap = pickFrom.filter((h) => (counts[h.url] ?? 0) < capOf(h));
   if (!underCap.length) {
     // The same exemption as the single-host branch. Its absence here was a real
     // eviction: a stored user is kept above only while their host passes the
@@ -115,8 +136,18 @@ export function placeHost<H extends RegionalHost>(input: PlacementInput<H>): H |
 
   // GEO FIRST, THEN LOAD. With no declared regions anywhere every host is
   // neutral and the ranking IS the old least-loaded ordering, term for term.
-  return (
-    rankHostsForNumber(underCap, input.digits ?? "", (h) => counts[h.url] ?? 0, input.pref)[0] ??
-    null
-  );
+  //
+  // LOAD IS FULLNESS, NOT A HEADCOUNT - which is the same ordering until the
+  // caps differ, and the opposite one afterwards. Dividing by a cap that is
+  // equal everywhere scales every term by one constant, so a fleet that has
+  // declared no per-host caps sorts exactly as it did before this line changed.
+  //
+  // Once the caps DO differ, a raw headcount is actively backwards. Take a 6GB
+  // ARM lane holding 30 of its 60 and a 1GB micro holding 20 of its 25: the
+  // micro has fewer users and is at 80%, the ARM box has more and is at 50%.
+  // "Fewest users" hands the next traveller to the box that is nearly full and
+  // leaves the empty one idle - it would fill the smallest, most fragile lanes
+  // first and then refuse, with the fleet's real capacity still unused.
+  const fullness = (h: H) => (counts[h.url] ?? 0) / Math.max(1, capOf(h));
+  return rankHostsForNumber(underCap, input.digits ?? "", fullness, input.pref)[0] ?? null;
 }

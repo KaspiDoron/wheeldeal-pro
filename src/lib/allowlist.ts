@@ -37,16 +37,21 @@ export interface BetaEntry {
  *
  * It stays a CAP rather than becoming unbounded - an invite list with no
  * ceiling is how a beta stops being a beta, and the ceiling is what keeps the
- * tester count comparable against fleet capacity (hosts x `maxPerHost`). The
- * value is the only place the number lives; the panel renders it and the save
- * path refuses past it out loud.
+ * tester count comparable against fleet capacity (the sum of the hosts' caps).
+ * The value is the only place the number lives; the panel renders it and the
+ * save path refuses past it out loud.
  *
- * 100, not 25: the beta target moved to 100 testers, and the old value made
- * that impossible to even invite regardless of how many Evolution hosts exist.
- * Capacity is enforced separately, at link time, by `resolveHost`'s per-host
- * cap - being on the list has never meant a socket is waiting.
+ * 200, not 100: the target moved to 200 users, and this list - not the fleet -
+ * is the ceiling that binds FIRST. A fleet sized for 200 numbers still refuses
+ * tester 101 here, at the door, and the two ceilings are on different screens,
+ * so the owner would have read "room for 100 more" on the capacity tile while
+ * the save path silently dropped the tail of the paste. Raising it is only
+ * half the job: `deploy/fleet/README.md` sizes the lanes that make the 200
+ * reachable, because capacity is enforced separately, at link time, by
+ * `resolveHost`'s per-host cap - being on the list has never meant a socket is
+ * waiting.
  */
-export const BETA_ALLOWLIST_MAX = 100;
+export const BETA_ALLOWLIST_MAX = 200;
 
 function ownerEmailLocal(): string {
   return (process.env.OWNER_EMAIL || "kaspidoron@gmail.com").trim().toLowerCase();

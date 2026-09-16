@@ -427,7 +427,8 @@ fails the user over to a healthy host - with NO re-scanning, NO re-linking.
 - Each user "sticks" to one host (saved in `wa_sessions.host_url`) so their
   session stays warm; if that host is down, they migrate to the least-loaded
   healthy host automatically.
-- A per-host cap (Admin -> Keys -> `EVOLUTION_MAX_PER_HOST`, default **25**)
+- A per-host cap (Admin -> Keys -> `EVOLUTION_MAX_PER_HOST`, default **25**, or
+  a host's own fourth `EVOLUTION_HOSTS` field where it declares one)
   stops any one server from being overloaded. At the cap the app **REFUSES** a
   new link with an honest "at capacity" message rather than placing the
   traveller on a full box - with several hosts configured, new users land on
@@ -609,10 +610,13 @@ resources if you exceed a limit), and leave the boot volume at the ~47 GB defaul
 2. Run once in Supabase SQL editor:
    `alter table public.wa_sessions add column if not exists host_url text;`
 
-3. (Optional) `EVOLUTION_MAX_PER_HOST` - paired users per host (default
-   **25**). With more than one host, new users spill to the emptiest; with one
-   host, the next link is REFUSED rather than overfilling the box. Do not raise
-   it above 25 on a 512MB Render `starter` - see SCALING.md.
+3. (Optional) `EVOLUTION_MAX_PER_HOST` - the fleet DEFAULT for paired users per
+   host (default **25**). With more than one host, new users spill to the
+   emptiest; with one host, the next link is REFUSED rather than overfilling the
+   box. Do not raise it above 25 on a 512MB Render `starter` - see SCALING.md.
+   To give one BIGGER host a bigger number without granting it to the small
+   boxes too, append a fourth field to that host's line instead
+   (`url|key|66,84|50`); `deploy/fleet/README.md` sizes a whole fleet this way.
 
 4. The **WhatsApp host pool** panel (same Keys screen) shows every VM live:
    green/red dot, user count, and the reason if one is ever down. Add/remove hosts

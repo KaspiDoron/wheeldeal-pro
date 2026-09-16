@@ -250,7 +250,11 @@ pretending they are gone.
 - `clearPause(senderKey)` / Admin lift-pause: manually resume a paused number once
   you've confirmed it's healthy.
 - `EVOLUTION_HOSTS`: one `url|apikey` per line, plus an optional third field of
-  calling-code prefixes for geo-aware placement (`url|apikey|66,84,855`). No
-  third field = region-neutral. `deploy/fleet/` stands one up at $0.
+  calling-code prefixes for geo-aware placement (`url|apikey|66,84,855`) and an
+  optional fourth for that host's own cap (`url|apikey|66,84,855|50`). No third
+  field = region-neutral; no fourth = the fleet-wide `EVOLUTION_MAX_PER_HOST`.
+  The per-host cap is a SAFETY number, not a capacity dial - it exists so a 6 GB
+  lane can hold more without also authorising the 1 GB box beside it to OOM.
+  `deploy/fleet/` stands one up at $0.
 - Per-user proxy: set via the proxy fields; residential + geo-matched strongly
   recommended on cloud hosting.

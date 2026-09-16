@@ -288,15 +288,24 @@ daily limits are the cost guard in both modes.
 **Tester capacity - TWO independent ceilings, and they are not the same one.**
 
 1. **The invite list**: `BETA_ALLOWLIST_MAX` in `src/lib/allowlist.ts`,
-   currently **100** testers + owner, enforced on save (the env-var fallback
+   currently **200** testers + owner, enforced on save (the env-var fallback
    list is uncapped). An over-long paste now REPORTS what it could not store
    instead of silently truncating, which is how the previous ceiling of 25 lost
    the tail of a list without telling anyone.
-2. **The fleet**: `EVOLUTION_MAX_PER_HOST` (default **25** linked numbers per
-   Evolution host) x the number of `EVOLUTION_HOSTS` entries. At the cap the
-   app REFUSES a new link rather than overfilling - on a single-host deployment
-   as well as a pooled one - and says "at capacity" rather than blaming the
-   configuration.
+2. **The fleet**: the SUM of every host's cap, not a product. Each
+   `EVOLUTION_HOSTS` line may declare its own cap as an optional fourth field
+   (`url|key|prefixes|cap`); a line that does not falls back to
+   `EVOLUTION_MAX_PER_HOST` (default **25**). At the cap the app REFUSES a new
+   link rather than overfilling - on a single-host deployment as well as a
+   pooled one - and says "at capacity" rather than blaming the configuration.
+
+   **Why per-host and not one bigger number.** The free fleet is deliberately
+   heterogeneous (`deploy/fleet/README.md`): a 1 GB Oracle AMD micro sits beside
+   a 6 GB Oracle ARM lane. One global cap has to be sized for the smallest box,
+   so the big lane runs at a fraction of what it holds - and raising the global
+   number authorises the micro to overfill and OOM, which drops every socket on
+   it at once. Placement ranks hosts by FULLNESS rather than headcount, which is
+   the identical ordering while the caps are equal and the opposite one after.
 
 **Supabase egress is a THIRD ceiling, and it is the one the audit ranked
 first.** The free tier allows 5 GB/month and a restricted project takes the
@@ -315,8 +324,10 @@ does not. **If it goes amber before an invite wave, decide on Supabase Pro
 perfectly happily and then cannot link WhatsApp, which is the confusing half of
 that failure. Admin -> Ops -> choke points now renders *"Invited testers vs
 fleet capacity"* so the invite decision is a number on a screen rather than
-arithmetic: 100 testers need **4 hosts** at the default per-host cap.
-`deploy/fleet/README.md` is the $0 way to add them.
+arithmetic: 100 testers need **4 hosts** at the default per-host cap, and 200
+need either eight of them or a mix of bigger lanes carrying declared caps.
+`deploy/fleet/README.md` is the $0 way to add them, and it sizes a 200-user
+fleet explicitly.
 
 ## Execution resilience (the "batch stopped after one send" fix)
 
@@ -476,10 +487,14 @@ signature verification and every subscription event is silently discarded.
 
 ### 5. Size the Evolution pool before the invites go out
 
-One host carries **25 users** (`EVOLUTION_MAX_PER_HOST`, and at the cap the
-app refuses rather than overfilling). Add hosts to the pool *before* invites
+One host carries **25 users** by default (`EVOLUTION_MAX_PER_HOST`, and at the
+cap the app refuses rather than overfilling), or whatever its own fourth
+`EVOLUTION_HOSTS` field declares. Add hosts to the pool *before* invites
 outgrow it, not after: the failure mode is not a queue, it is a banned personal
-WhatsApp number, and that is not reversible by adding capacity later.
+WhatsApp number, and that is not reversible by adding capacity later. Raise a
+host's cap only after watching it hold the current one - the suggested caps in
+`deploy/fleet/README.md` are scaled from the one measured box, not measured
+themselves.
 
 ### 6. Turn off TEST_MODE, and check it is actually off
 

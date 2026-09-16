@@ -47,7 +47,12 @@ async function collect() {
       const { hostCapacity } = await import("@/lib/evolution");
       return await hostCapacity();
     } catch {
-      return { cap: 0, hosts: [] as { url: string; users: number }[], users: 0, capacity: 0 };
+      return {
+        cap: 0,
+        hosts: [] as { url: string; users: number; cap: number }[],
+        users: 0,
+        capacity: 0,
+      };
     }
   })();
   const occupancy = hostOccupancy(fleet.hosts, fleet.cap);
@@ -73,11 +78,19 @@ async function collect() {
       //
       // At 24 testers + the owner on a 25-socket fleet the honest answer is
       // "exactly full, the next invite has nowhere to go", not "room for 1".
+      //
+      // THE CAPACITY IS THE SUM, NOT THE PRODUCT. Hosts may declare their own
+      // cap (the fourth EVOLUTION_HOSTS field) because the free fleet is a mix
+      // of 1GB and 6GB boxes, so `hosts x default` is wrong in both directions
+      // - it hides a big lane's slots and invents a trimmed lane's. Pass the
+      // sum `hostCapacity()` already computed from the same rule the placement
+      // path uses, so this tile cannot disagree with who actually gets placed.
       return inviteHeadroom(
         list.length,
         fleet.hosts.length,
         fleet.cap,
-        BETA_ALLOWLIST_MAX
+        BETA_ALLOWLIST_MAX,
+        fleet.capacity
       );
     } catch {
       return inviteHeadroom(0, 0, 0, 0);
