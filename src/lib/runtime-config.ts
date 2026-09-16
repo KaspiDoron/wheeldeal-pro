@@ -522,19 +522,35 @@ export async function sbSelectDark<T = Record<string, unknown>>(
  * A missing table still counts zero: no row can exist in a table that was never
  * migrated, and a fresh install must not paint its dashboard dark.
  */
-export async function sbCountDark(table: string, filter: string): Promise<number | null> {
+export async function sbCountDark(
+  table: string,
+  filter: string,
+  /**
+   * The column to project while counting. Defaults to `id`, which every table
+   * the health panel counts has - but the erasure registry reaches tables keyed
+   * on a composite or a jsonb path with no `id` at all, and PostgREST 400s a
+   * select naming a column that is not there. A 400 reads as `null` here, so
+   * those tables showed as "unreadable" on the subject file when they were
+   * merely differently shaped. Callers that know a column exists (the registry
+   * knows: it is the column being filtered on) can name it.
+   */
+  column: string = "id"
+): Promise<number | null> {
   const conn = supabase();
   if (!conn) return 0; // demo mode: no table, no rows - a real zero.
   try {
-    const res = await timedFetch(`${conn.url}/rest/v1/${table}?select=id&${filter}`, {
-      headers: {
-        apikey: conn.key,
-        Authorization: `Bearer ${conn.key}`,
-        Prefer: "count=exact",
-        Range: "0-0",
-      },
-      cache: "no-store",
-    });
+    const res = await timedFetch(
+      `${conn.url}/rest/v1/${table}?select=${encodeURIComponent(column)}&${filter}`,
+      {
+        headers: {
+          apikey: conn.key,
+          Authorization: `Bearer ${conn.key}`,
+          Prefer: "count=exact",
+          Range: "0-0",
+        },
+        cache: "no-store",
+      }
+    );
     if (!res.ok) {
       if (res.status === 404) return 0;
       if (res.status === 400) {

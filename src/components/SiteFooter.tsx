@@ -8,6 +8,7 @@ import { FOUNDER } from "@/lib/founder";
 import { BrandMark } from "./BrandMark";
 import { Icon } from "./icons";
 import { useI18n } from "@/lib/i18n";
+import { openCookiePanel } from "@/lib/cookies/client";
 
 export function SiteFooter() {
   const { t } = useI18n();
@@ -71,6 +72,19 @@ export function SiteFooter() {
             <a href="/privacy" className="hover:text-soft">
               {t("Privacy")}
             </a>
+            {/* WITHDRAWAL HAS TO BE AS EASY AS CONSENT. A banner you answer
+                once and can never reach again is not a choice, it is a
+                one-way door - so the panel lives behind a permanent link in
+                the one piece of chrome that renders on every screen the
+                footer reaches. A button rather than a link to /cookies: the
+                policy page explains, this REOPENS the actual switches. */}
+            <button
+              type="button"
+              onClick={openCookiePanel}
+              className="font-bold hover:text-soft"
+            >
+              {t("Cookies")}
+            </button>
           </div>
           <span>© {new Date().getFullYear()} WheelDeal</span>
         </div>

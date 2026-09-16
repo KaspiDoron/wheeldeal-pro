@@ -9,6 +9,7 @@ import { useEffect, useRef, useState } from "react";
 import { useI18n } from "@/lib/i18n";
 import { createPortal } from "react-dom";
 import { lockBodyScroll } from "@/lib/scroll-lock";
+import { rememberLocal } from "@/lib/cookies/client";
 
 type Phase = "ready" | "running" | "over";
 
@@ -202,7 +203,7 @@ export function WaitGame({ onClose }: { onClose: () => void }) {
             try {
               const hi = Number(localStorage.getItem("wd_game_high") || 0);
               if (s.score > hi) {
-                localStorage.setItem("wd_game_high", String(s.score));
+                rememberLocal("wd_game_high", String(s.score));
                 setHigh(s.score);
               }
             } catch {

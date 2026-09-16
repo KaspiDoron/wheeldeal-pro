@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Vendor, StructuredRFQ } from "@/lib/types";
 import { vehicleLabel } from "@/lib/labels";
 import { moneyLocal } from "@/lib/currency";
@@ -12,6 +12,7 @@ import { LoadingDots } from "./LoadingDots";
 import { digitsOnly } from "@/lib/phone";
 import { useI18n } from "@/lib/i18n";
 import { localDay, addDays, deviceTimeZone, pickupDefault, resolveWindow } from "@/lib/rental-window";
+import { track } from "@/lib/client/analytics";
 
 type Step = "verify" | "schedule" | "confirmed";
 
@@ -47,6 +48,11 @@ export function BookingSheet({
   onClose: () => void;
 }) {
   const { t } = useI18n();
+  // The consented funnel record: one mount, one event, whoever opened it.
+  // A no-op without analytics consent - see lib/client/analytics.
+  useEffect(() => {
+    track("booking_opened", { plan });
+  }, [plan]);
   const [step, setStep] = useState<Step>("verify");
   // Fulfillment defaults from the request: a hotel-delivery RFQ pre-selects
   // delivery so the booking (and the shop message) match what was negotiated.

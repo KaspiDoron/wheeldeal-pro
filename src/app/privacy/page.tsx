@@ -24,8 +24,12 @@ export default async function PrivacyPage() {
         See also our{" "}
         <Link href="/terms" className="font-bold text-brandblue underline">
           Terms of Use
+        </Link>{" "}
+        and the{" "}
+        <Link href="/cookies" className="font-bold text-brandblue underline">
+          Cookie Policy
         </Link>
-        .
+        , which lists every cookie by name.
       </div>
     </main>
   );

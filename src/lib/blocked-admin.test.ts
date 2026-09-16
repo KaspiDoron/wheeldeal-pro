@@ -132,6 +132,11 @@ async function loadUsersRoute(opts: RouteOpts) {
     sbDelete: async () => true,
     sbSelect: async () => [],
     sbCountDark: async () => 1,
+    // The route now writes an admin_audit row for every role/status change
+    // (see lib/admin/audit). It is best-effort and never changes the answer,
+    // but the module has to exist for the import to resolve.
+    sbInsert: async () => true,
+    sbSelectDark: async () => [],
   }));
 
   const mod = await import("@/app/api/admin/users/route");

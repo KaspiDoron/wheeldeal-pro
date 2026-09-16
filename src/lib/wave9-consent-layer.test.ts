@@ -81,7 +81,16 @@ describe("consentFor is strict opt-in", () => {
   it("the two purposes exist and are marked opt-in", () => {
     expect(CONSENT_KINDS).toContain("analytics");
     expect(CONSENT_KINDS).toContain("commercial_insights");
-    expect([...OPT_IN_KINDS].sort()).toEqual(["analytics", "commercial_insights"]);
+    // The cookie layer added two more opt-in purposes (the banner's
+    // Preferences and Advertising categories). W9's two are still here and
+    // still opt-in, which is what this test guards; the set is no longer
+    // exactly two, and pinning it as exactly two would mean any future opt-in
+    // purpose has to edit a W9 test to ship.
+    expect(OPT_IN_KINDS).toContain("analytics");
+    expect(OPT_IN_KINDS).toContain("commercial_insights");
+    // Every opt-in kind must be a real kind - the profile route uses this list
+    // as its allow-list, so a typo here would open an unknown consent.
+    for (const k of OPT_IN_KINDS) expect(CONSENT_KINDS).toContain(k);
   });
 
   it("no row = NO consent (the default is off, not on)", async () => {
@@ -248,12 +257,13 @@ describe("legal text and plumbing agree", () => {
   const legal = read("src/lib/legal.ts");
 
   it("TERMS_VERSION was bumped so every user re-accepts the rewritten policy", () => {
-    // Bumped again 2026-08-31 (beta-30 wave): section 2 now discloses the
-    // messaging layer's transient copy of messages on the linked number. The
-    // pin follows the CURRENT version - what it guards is that the version
-    // MOVES whenever the policy text does, since needsReacceptance is the
-    // only thing that walks existing users through new terms.
-    expect(legal).toMatch(/TERMS_VERSION = "2026-08-31"/);
+    // Bumped again 2026-09-16 (the cookie layer): a new section 9 names the
+    // four cookie categories and the deny-by-default rule, and section 6 gains
+    // the browser storage the app keeps on the DEVICE. The pin follows the
+    // CURRENT version - what it guards is that the version MOVES whenever the
+    // policy text does, since needsReacceptance is the only thing that walks
+    // existing users through new terms.
+    expect(legal).toMatch(/TERMS_VERSION = "2026-09-16"/);
   });
 
   it("section 8 replaced the blanket 'not sold' with the honest carve-out", () => {

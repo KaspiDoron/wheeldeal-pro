@@ -33,7 +33,9 @@ Router) + TypeScript + Tailwind, deployed on GCP Cloud Run. Runs fully in
 - **Mobile first.** Test at 320-430px. No horizontal overflow. Respect
   safe-area insets (`pt-safe`, `pb-safe`). Form controls >= 16px (iOS zoom).
 - Validate before pushing: `npm run typecheck && npx vitest run` (plus
-  `npm run build && npm run check:mobile` for layout-touching changes).
+  `npm run build && npm run check:mobile` for layout-touching changes, and
+  `npm run check:cookies` for anything touching the cookie layer or the ad
+  script - it is the only check that can see a third-party request).
 - **Every user-visible string goes through `t("...")`** and must be in the
   generated catalogue: run `node scripts/gen-i18n-catalog.js` after adding
   copy. Computed copy is declared in `src/lib/i18n-extras.ts` - never hand-
@@ -78,7 +80,18 @@ src/
     evolution.ts     Evolution API client (sessions, sends, webhook re-arm)
     privacy/         user-tables.ts (THE ERASURE REGISTRY), erase.ts,
                      product-events.ts (consent-gated projection)
-    consent.ts       acceptance ledger + the two opt-in purposes (consentFor)
+    consent.ts       acceptance ledger + the opt-in purposes (consentFor)
+    cookies/         THE COOKIE LAYER. manifest.ts is the one INVENTORY of every
+                     cookie/storage key the app writes; consent.ts the
+                     isomorphic record; client.ts the write gate
+                     (rememberLocal/rememberSession) + purge; server.ts the
+                     per-request read + ledger write; required.ts the
+                     essential-cookies condition of use (middleware + /cookies)
+    analytics/       events.ts: the allow-listed event vocabulary, path
+                     scrubbing and prop bounding behind /api/analytics/collect
+    admin/audit.ts   THE ADMIN AUDIT TRAIL - who looked at whose data
+    admin/subject.ts the subject file: registry-driven row counts + consent
+    privacy/dsar.ts  buildDsarExport - the ONE assembly both export paths use
     ops/             Ops Center: golden gate, insights rollup (k>=20), vitals
     ai.ts ai-rpm.ts  LLM provider ladder + fleet RPM budgets
     runtime-config.ts  Key Vault + the honest PostgREST client family
@@ -123,6 +136,37 @@ supabase/retention.sql     run once; prune + de-identify + heartbeat + the
   table; erase + export walk it, a schema-grep test refuses unregistered
   tables. Retention windows (90/180/360d + priced-transcript de-identify) run
   nightly with a heartbeat the health panel reads.
+- **Cookies are an inventory, not a banner.** `cookies/manifest.ts` declares
+  every browser key with a category, purpose and duration; the banner, the
+  generated `/cookies` page and the write gate all read that one list, and
+  `cookies.test.ts` greps src/ so a raw `localStorage.setItem` or an undeclared
+  key fails the build. Four categories (necessary / preferences / analytics /
+  marketing); the three optional ones deny by default, and reject is as easy as
+  accept (pinned by test). The choice lives in `wd_cookie_prefs` AND, signed in,
+  in the same `consent_events` ledger as every other consent. `analytics` is ONE
+  purpose with two doors - the banner and Profile -> Your data write the same
+  kind. Marketing gates Google's ad SDK in a pre-paint script in the root layout
+  (never fetched without consent; the `google-adsense-account` meta tag still
+  verifies the site unconditionally).
+- **Essential cookies are a CONDITION OF USE, the optional three are not.**
+  `middleware.ts` holds a signed-in request to `/`, `/deals`, `/profile` or
+  `/admin` at `/cookies?required=1` until a current decision exists - server
+  side, so hiding the banner buys nothing. What is mandatory is ANSWERING:
+  "Essential only" is one tap and gets the whole product, and a test pins that
+  it passes the gate exactly as readily as "Accept all". The public surface
+  (/welcome, /login, /pricing, /guides, /terms, /privacy, /cookies) is never
+  gated - a page that demands a cookie decision before it will explain the
+  decision is a cookie wall. `npm run check:cookies` boots the real build,
+  counts requests to googlesyndication.com AND asks the real middleware what it
+  does with each cookie state.
+- **The management console is accountable.** Admin -> Data is a governance
+  console: consent posture (people, not rows), a subject file counted from the
+  ERASURE REGISTRY so "what we hold" and "what we delete" cannot diverge, the
+  consent register as a CSV, and an audit trail. Reads are management; content
+  and destruction are owner-only, typed-to-confirm, and every privileged action
+  - **including every refusal** - writes an `admin_audit` row. That trail
+  SURVIVES an erasure, de-identified, because an audit log an operator can
+  delete by erasing an account is not an audit log.
 
 ## AI Operations Center (Admin -> Ops, owner only)
 

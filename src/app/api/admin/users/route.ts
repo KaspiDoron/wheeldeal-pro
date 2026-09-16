@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireManagement, setAdmin, adminEmails, isOwner } from "@/lib/session";
 import { listUsers, setUserStatus } from "@/lib/access";
+import { recordAdminAction } from "@/lib/admin/audit";
 
 /**
  * THE MANAGEMENT LIST SHIPPED EVERY PASSWORD HASH TO A BROWSER.
@@ -148,6 +149,18 @@ export async function POST(req: Request) {
     // change whose vault write failed must answer 500, not fall through to a
     // success payload that repaints the old role as the new one.
     const roleWrote = await setAdmin(String(email), action === "promote");
+    // AUDITED EITHER WAY. Handing somebody the Key Vault is the single highest-
+    // consequence action in this console, and a failed attempt is as worth
+    // recording as a successful one - see lib/admin/audit. Best-effort, and it
+    // never changes the answer below: bookkeeping must not fail a role change.
+    await recordAdminAction({
+      actorEmail: session.email,
+      actorRole: session.role,
+      action: "user.role",
+      subjectEmail: String(email),
+      outcome: roleWrote ? "ok" : "failed",
+      detail: { change: action },
+    });
     if (!roleWrote) {
       return NextResponse.json(
         { error: "The role change did not persist. Check Supabase and retry." },
@@ -190,7 +203,19 @@ export async function POST(req: Request) {
     // the cache) and report what it actually says.
     const after = await payload();
     const row = after.users.find((u) => u.email === target);
-    if (!row || row.status !== status) {
+    const persisted = Boolean(row && row.status === status);
+    // The audit records what the READ-BACK said, not what was attempted - a
+    // trail that logs intent rather than outcome is a trail that disagrees with
+    // the database it is supposed to explain.
+    await recordAdminAction({
+      actorEmail: session.email,
+      actorRole: session.role,
+      action: "user.status",
+      subjectEmail: target,
+      outcome: persisted ? "ok" : "failed",
+      detail: { status, wasManagement: targetIsManagement },
+    });
+    if (!persisted) {
       return NextResponse.json(
         {
           error: `Could not ${status === "blocked" ? "block" : "unblock"} ${target} - the change did not persist. Check Supabase and retry.`,

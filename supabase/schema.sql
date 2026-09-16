@@ -1950,3 +1950,46 @@ begin
   raise notice 'pgvector present: corpus_embeddings is ready. The app switches itself on within 60s, with no redeploy.';
 end;
 $$;
+
+-- ---------------------------------------------------------------------------
+-- ADMIN AUDIT TRAIL (admin_audit) - who looked at whose data, and when
+-- ---------------------------------------------------------------------------
+--
+-- The management console can read any table, look up any person's consent
+-- history, export their whole file and erase their account. Every one of those
+-- is a legitimate operator action and every one of them is also exactly what an
+-- attacker with a stolen admin cookie would do - and until this table existed
+-- the two were indistinguishable, because neither left a trace.
+--
+-- "The owner is the only admin" is not an answer: the product adds runtime
+-- admins from the Key Vault, a blocked admin keeps a cookie until the horizon
+-- moves, and the whole point of an audit trail is that it is written before you
+-- know you need it.
+--
+-- APPEND-ONLY BY CONSTRUCTION. Nothing in the app updates or deletes a row
+-- here, and the writer never blocks the action it records: an audit write that
+-- could fail an erasure would mean a person's deletion request failing because
+-- of bookkeeping, which is the wrong trade. A failed write is itself visible -
+-- the console reports the table as unreadable rather than showing an empty log.
+--
+-- `subject_email` is the person the action was ABOUT (null for fleet-wide
+-- actions); `actor_email` is who did it. Both are plain addresses on purpose:
+-- this table answers subject-access requests too, and a pseudonymised audit
+-- trail cannot tell someone who looked at their file.
+create table if not exists public.admin_audit (
+  id            bigint generated always as identity primary key,
+  actor_email   text not null,
+  actor_role    text not null,            -- owner | admin, as derived at the time
+  action        text not null,            -- subject.lookup | subject.export | ...
+  subject_email text,                     -- who it was about, when it was about one
+  detail        jsonb,                    -- bounded context (counts, reasons, outcomes)
+  outcome       text not null default 'ok', -- ok | refused | failed
+  created_at    timestamptz not null default now()
+);
+create index if not exists admin_audit_created_idx
+  on public.admin_audit (created_at desc);
+create index if not exists admin_audit_actor_idx
+  on public.admin_audit (actor_email, created_at desc);
+create index if not exists admin_audit_subject_idx
+  on public.admin_audit (subject_email, created_at desc);
+alter table public.admin_audit enable row level security;

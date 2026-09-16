@@ -269,6 +269,16 @@ export const EXCLUDED_TABLES: Record<string, string> = {
   waba_events: "REGISTERED as a child table (via lead_id)",
   whatsapp_messages: "REGISTERED above (raw->>sender and raw->>receiver)",
   graph_wakeups: "REGISTERED above (user_email)",
+  // THE AUDIT TRAIL MUST OUTLIVE THE THING IT AUDITS. admin_audit records which
+  // operator looked at, exported or erased whose data. Deleting a person's rows
+  // with their data would let an operator erase an account to destroy the
+  // record of their own access to it. The row therefore SURVIVES an erasure and
+  // the erase walker de-identifies it instead: `subject_email` is replaced by
+  // the same one-way pseudonym the priced-transcript de-identification uses, so
+  // "who accessed account X" stops being answerable from an address while "what
+  // did this operator do last Tuesday" stays answerable. Retained on a
+  // legal-obligation basis; the Privacy Policy discloses it.
+  admin_audit: "DE-IDENTIFIED in place by the erase walker, not deleted - an audit trail an operator can erase is not an audit trail",
 };
 
 /**

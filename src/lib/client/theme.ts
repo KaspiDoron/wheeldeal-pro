@@ -14,6 +14,7 @@
 // two against each other.
 
 import { useEffect, useState } from "react";
+import { rememberLocal } from "@/lib/cookies/client";
 
 export type Theme = "light" | "dark";
 
@@ -45,12 +46,17 @@ export function readTheme(): Theme {
 
 /** Stamp the attribute (tokens + tailwind `dark:` follow it), persist the
  *  choice, and repaint the browser chrome. Safe when storage is blocked -
- *  the visual change still lands. */
+ *  the visual change still lands.
+ *
+ *  THE VISUAL CHANGE ALWAYS LANDS; ONLY THE MEMORY OF IT IS GATED. A traveller
+ *  who declined preference cookies still gets the dark theme the moment they
+ *  tap the toggle - refusing that would be punishing them for a privacy
+ *  choice. What they do not get is it being remembered on the next visit,
+ *  which is precisely and only what the cookie was for. Same shape as a
+ *  blocked-storage device, which is why the write was already best-effort. */
 export function applyTheme(t: Theme): void {
   document.documentElement.setAttribute("data-theme", t);
-  try {
-    localStorage.setItem(STORAGE_KEY, t);
-  } catch {}
+  rememberLocal(STORAGE_KEY, t);
   // The viewport meta list is resolved at load; rewrite the live tags so the
   // OS chrome follows the toggle without a reload. Both media-scoped tags
   // collapse to the chosen theme's color - an explicit choice overrides the

@@ -13,6 +13,7 @@ import { PolicyPanel } from "./PolicyPanel";
 import { AnalyticsPanel } from "./AnalyticsPanel";
 import { IntegrityPanel } from "./IntegrityPanel";
 import { LaunchKpiCard } from "./LaunchKpiCard";
+import { rememberSession } from "@/lib/cookies/client";
 
 interface ThreadCard {
   threadKey: string;
@@ -65,7 +66,7 @@ export function OpsCenter() {
     try {
       const last = Number(sessionStorage.getItem("wd_ops_detect_at") ?? 0);
       if (Date.now() - last < 10 * 60_000) return;
-      sessionStorage.setItem("wd_ops_detect_at", String(Date.now()));
+      rememberSession("wd_ops_detect_at", String(Date.now()));
     } catch {
       /* storage unavailable - sweep anyway */
     }

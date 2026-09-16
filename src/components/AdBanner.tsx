@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useI18n } from "@/lib/i18n";
 import { loadPublicConfig } from "@/lib/client/public-config";
+import { COOKIE_CONSENT_EVENT, clientAllows } from "@/lib/cookies/client";
 
 declare global {
   interface Window {
@@ -29,7 +30,29 @@ export function AdBanner({
   const [unit, setUnit] = useState<string | null>(null);
   const pushed = useRef(false);
 
+  // ADVERTISING CONSENT - THE SECOND OF TWO GATES, NOT THE ONLY ONE.
+  //
+  // The gate that matters is in the root layout: without consent Google's SDK
+  // is never fetched, so `window.adsbygoogle` does not exist and nothing here
+  // could fill a slot even if it tried. This one exists because a slot that
+  // renders its frame and its "Sponsored" strip over an SDK that will never
+  // arrive is the permanently-empty ad frame W-4 removed - and because the
+  // choice can change mid-session, without a reload, from the footer panel.
+  //
+  // Starts as `null` (unknown) rather than `false`: rendering "no ads" for one
+  // frame and then popping a 100px slot in is a layout shift on the funnel.
+  const [adsAllowed, setAdsAllowed] = useState<boolean | null>(null);
+
   const free = !plan || plan === "free";
+
+  useEffect(() => {
+    const read = () => setAdsAllowed(clientAllows("marketing"));
+    read();
+    // The panel dispatches this when a choice is saved, so turning advertising
+    // off makes the slot disappear immediately instead of on the next reload.
+    window.addEventListener(COOKIE_CONSENT_EVENT, read);
+    return () => window.removeEventListener(COOKIE_CONSENT_EVENT, read);
+  }, []);
 
   useEffect(() => {
     if (!free) return;
@@ -56,12 +79,13 @@ export function AdBanner({
   // Admin -> Keys, and the banners start filling with no redeploy.
   const adSlot = slot ?? unit;
 
-  // The SDK is loaded ONCE, site-wide, by the root layout - it has to be, since
-  // Google's reviewer fetches pages anonymously and looks for the tag. This
+  // The SDK is loaded ONCE, site-wide, by the root layout - and only when the
+  // traveller has allowed advertising cookies (see adConsentScript there). This
   // component used to inject a second copy of the same script; loading the
   // AdSense SDK twice is a policy violation and makes slots fail to fill. All
   // that is left here is claiming the slot.
   useEffect(() => {
+    if (adsAllowed !== true) return;
     if (!client || !adSlot || pushed.current) return;
     try {
       (window.adsbygoogle = window.adsbygoogle || []).push({});
@@ -69,9 +93,13 @@ export function AdBanner({
     } catch {
       /* ad blocked - fine */
     }
-  }, [client, adSlot]);
+  }, [client, adSlot, adsAllowed]);
 
   if (!free) return null;
+
+  // No advertising consent, or not known yet: no frame, no reserved space, no
+  // request. The layout simply does not contain an ad.
+  if (adsAllowed !== true) return null;
 
   // AN EMPTY AD FRAME IS ITSELF A REJECTION SIGNAL (W-4).
   //

@@ -25,6 +25,8 @@ import { OfflineBanner } from "@/components/OfflineBanner";
 import { ADSENSE_PUBLISHER, resolveSiteOrigin } from "@/lib/site";
 import { TestModeBanner } from "@/components/TestModeBanner";
 import { FirstTouchTerms } from "@/components/FirstTouchTerms";
+import { CookieConsent } from "@/components/CookieConsent";
+import { ScreenTracker } from "@/components/ScreenTracker";
 import "./globals.css";
 
 // SELF-HOSTED, NOT FETCHED AT RUNTIME.
@@ -335,6 +337,56 @@ try {
 } catch (e) {}
 `;
 
+// THE ADVERTISING GATE, AND WHY IT RUNS BEFORE PAINT.
+//
+// Google's ad SDK sets Google's cookies the moment it loads - before any ad is
+// requested and whether or not a slot ever renders. So consent cannot be
+// checked in a React effect: by the time a component mounts, the script tag in
+// this <head> has already been fetched and the cookies are already set. The
+// only place the decision can be made is here, in a synchronous script that
+// runs before the browser reaches anything else.
+//
+// The <script src> that used to sit in <head> unconditionally is therefore
+// gone, and this injects it instead - only when `wd_cookie_prefs` grants
+// `marketing`.
+//
+// THIS DOES NOT BREAK ADSENSE REVIEW, AND THE OLD COMMENT'S WORRY WAS ABOUT
+// THE WRONG TAG. Site ownership is verified by <meta name="google-adsense-
+// account">, which generateMetadata emits on every page, unconditionally, and
+// still does. That is the mechanism Google's own docs prescribe, and it is
+// untouched. Loading the SDK for a visitor who has not consented is, in the
+// EEA and the UK, a breach of Google's own EU user consent policy - so the
+// gate is not a trade against monetisation, it is the condition of it.
+//
+// The parse is a hand-rolled copy of decodeCookieConsent because this string
+// runs before any module loads and cannot import one. It is deliberately
+// minimal and fails closed: any throw, any missing field, anything other than
+// marketing === true, and no script is added. cookies.test.ts pins it against
+// the real decoder so the two cannot drift.
+//
+// A STALE POLICY VERSION STILL COUNTS. The version is not checked here, on
+// purpose: a bump re-asks (the banner appears on this very load), and until the
+// person answers, their last word stands in BOTH directions. Silently revoking
+// a yes misrepresents their choice exactly as much as silently honouring a no
+// would - and the re-prompt is already on screen.
+const adConsentScript = `
+(function () {
+  try {
+    var m = document.cookie.match(/(?:^|;\\s*)wd_cookie_prefs=([^;]*)/);
+    if (!m) return;
+    var b = m[1].replace(/-/g, "+").replace(/_/g, "/");
+    b += "====".slice((b.length % 4) || 4);
+    var d = JSON.parse(atob(b));
+    if (!d || !d.g || d.g.marketing !== true) return;
+    var s = document.createElement("script");
+    s.async = true;
+    s.crossOrigin = "anonymous";
+    s.src = "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=${ADSENSE_PUBLISHER}";
+    document.head.appendChild(s);
+  } catch (e) {}
+})();
+`;
+
 export default function RootLayout({
   children,
 }: {
@@ -350,20 +402,17 @@ export default function RootLayout({
     >
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
-        {/* Google AdSense site-level tag. UNCONDITIONAL: Google's reviewer
-            fetches the page anonymously and fails the site if the tag is not
-            already there, so it cannot wait on an env var being set. The
-            publisher id is public by design (it ships in ads.txt and in every
-            ad request), so it is a constant, not a secret.
+        {/* Google AdSense, loaded ONLY with the traveller's advertising
+            consent - see adConsentScript above for why the decision has to be
+            made here rather than in a component, and why site verification
+            (the google-adsense-account meta tag, still unconditional) is
+            unaffected. The publisher id is public by design: it ships in
+            ads.txt and in every ad request, so it is a constant, not a secret.
 
             Individual slots still render only on the free tier via <AdBanner>;
             paid plans stay 100% ad-free. This tag loads the SDK, it does not
             place an ad. */}
-        <script
-          async
-          src={`https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=${ADSENSE_PUBLISHER}`}
-          crossOrigin="anonymous"
-        />
+        <script dangerouslySetInnerHTML={{ __html: adConsentScript }} />
       </head>
       <body className="app-shell">
         <I18nProvider>
@@ -395,6 +444,17 @@ export default function RootLayout({
                 under everyone silently. Signed-out visitors never see it - the
                 gate is decided server-side in /api/auth/me. */}
             <FirstTouchTerms />
+            {/* The cookie choice. Unlike FirstTouchTerms this is NOT a gate: it
+                is a bottom sheet over a fully usable page, and signed-out
+                visitors meet it too (on /welcome, before any account exists).
+                Nothing optional is stored until it is answered, so scrolling
+                past it consents to nothing. It also owns the preferences panel,
+                which the footer and Profile reopen by event - withdrawal has to
+                stay as easy as consent. */}
+            <CookieConsent />
+            {/* The consented screen-view record. Renders nothing and collects
+                nothing unless analytics is granted - see ScreenTracker. */}
+            <ScreenTracker />
           </WillAssistantProvider>
         </I18nProvider>
       </body>

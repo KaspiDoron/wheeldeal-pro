@@ -63,12 +63,28 @@ export const CONSENT_KINDS = [
   // insights_ok at write time; the sellable rollup reads only stamped rows).
   "analytics",
   "commercial_insights",
+  // The cookie banner's two remaining categories. `analytics` is deliberately
+  // NOT duplicated here: the banner's Analytics switch reads and writes the
+  // SAME purpose above, because "is WheelDeal recording how I use it" must not
+  // have two answers depending on which screen you asked from. See
+  // CATEGORY_CONSENT_KIND in lib/cookies/server.ts.
+  //
+  // preferences: whether this device may keep theme/language/currency and the
+  // rest of the wd_* keys. marketing: whether Google's ad script is loaded at
+  // all (it sets the third-party cookies; we set none of them).
+  "cookies_preferences",
+  "cookies_marketing",
 ] as const;
 
 export type ConsentKind = (typeof CONSENT_KINDS)[number];
 
 /** The kinds that are opt-IN purposes rather than mandatory acceptances. */
-export const OPT_IN_KINDS: readonly ConsentKind[] = ["analytics", "commercial_insights"];
+export const OPT_IN_KINDS: readonly ConsentKind[] = [
+  "analytics",
+  "commercial_insights",
+  "cookies_preferences",
+  "cookies_marketing",
+];
 
 /** The breadcrumb kind a lost ledger row falls back to. On `agent_events`,
  *  which exists on every database this app has ever had. */

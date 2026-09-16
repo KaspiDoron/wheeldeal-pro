@@ -22,6 +22,7 @@ export interface PlanView {
 }
 
 import { CURRENCIES, currency, fromIls, savedCurrency, setSavedCurrency } from "@/lib/currency";
+import { track } from "@/lib/client/analytics";
 
 // ONE PRICE, READ FROM THE CATALOGUE.
 //
@@ -296,6 +297,10 @@ function WarmupLock({ warm }: { warm: WarmupView }) {
 
 export function UpgradeSheet({ onClose }: { onClose: () => void }) {
   const { t } = useI18n();
+  // One mount, one event, and nothing at all without analytics consent.
+  useEffect(() => {
+    track("upgrade_viewed");
+  }, []);
   const [plans, setPlans] = useState<PlanView[]>([]);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);

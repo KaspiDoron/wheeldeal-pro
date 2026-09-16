@@ -13,6 +13,10 @@ const PUBLIC_PATHS = [
   { path: "/pricing", priority: 0.8, changeFrequency: "monthly" as const },
   { path: "/terms", priority: 0.3, changeFrequency: "yearly" as const },
   { path: "/privacy", priority: 0.3, changeFrequency: "yearly" as const },
+  // The cookie policy is public, indexable and linked from the banner every
+  // visitor sees - a crawler finding it only through a bottom sheet is a
+  // crawler that does not find it.
+  { path: "/cookies", priority: 0.3, changeFrequency: "yearly" as const },
 ];
 
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {

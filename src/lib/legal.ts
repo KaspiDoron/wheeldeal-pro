@@ -22,7 +22,22 @@
 // store render.yaml has always actually configured. The policy said that
 // store "does not exist"; the fix was to make the policy true, not the code
 // blind (turning the store off silently kills missed-reply recovery).
-export const TERMS_VERSION = "2026-08-31";
+//
+// Bumped 2026-09-16: the cookie layer, and the two disclosures the governance
+// work added to it. Section 9 now states plainly that the ESSENTIAL group is a
+// condition of using the app (and, just as plainly, that the other three are
+// not - "Essential only" is one tap and gets the whole product), and section 6
+// discloses the operator audit log and the one thing about it that is genuinely
+// surprising: it survives an erasure, de-identified, because a log an operator
+// can delete is not an accountability record. Section 9 is new and names the four
+// categories, the deny-by-default rule, and the fact that Google's ad script is
+// not loaded at all without advertising consent. Section 6 gains the browser
+// storage the app keeps on the DEVICE - until now the policy described the
+// server side of the product exhaustively and said nothing about the dozen
+// wd_* keys sitting in every traveller's browser, which is the half of "what do
+// you store about me" a person can actually go and look at. The full, generated
+// inventory lives at /cookies; this is the summary that links to it.
+export const TERMS_VERSION = "2026-09-16";
 export const OPERATOR_NAME = "the Operator"; // TODO: replace with the legal entity name
 export const GOVERNING_LAW = "the State of Israel";
 export const JURISDICTION = "the competent courts of Tel Aviv, Israel";
@@ -288,7 +303,9 @@ export const PRIVACY_SECTIONS: LegalSection[] = [
     title: "Storage, retention & deletion",
     body:
       "Data is stored on cloud infrastructure (Supabase). Retention is time-bounded and enforced by an automatic nightly prune: operational records (message-handling events, processing traces, risk events) are kept about 90 days; conversation context (negotiation threads, shop replies, sign-in history) about 180 days; your own visible history (searches and offers, which power the Trips screen) about 12 months. WhatsApp messages that recorded a price are DE-IDENTIFIED after about 180 days - the message text and the personal identifiers are removed while the pricing record is kept. Your bookings and the record of your consents are kept for the life of your account. " +
-      "You do not have to contact anyone to exercise your rights: Profile -> Your data lets you DOWNLOAD everything we hold about you as one file, and DELETE your account - the deletion walks every table that keys you (conversations, threads, offers, consents, risk records, all of it), tells you honestly if any part could not be removed, and can be retried. Some minimal records may be retained where the law requires it.",
+      "Separately from all of the above, some data is stored in YOUR OWN BROWSER rather than on our servers - the cookie that keeps you signed in, the cookie recording your cookie choices, and, only if you allow them, the keys that remember your theme, language and currency. These live on your device, you can delete them at any time by clearing this site's data in your browser, and section 9 and the Cookie Policy list every one of them. " +
+      "You do not have to contact anyone to exercise your rights: Profile -> Your data lets you DOWNLOAD everything we hold about you as one file, and DELETE your account - the deletion walks every table that keys you (conversations, threads, offers, consents, risk records, all of it), tells you honestly if any part could not be removed, and can be retried. If you have lost access to your account, the operator can produce the same file for you or complete the deletion on your behalf. " +
+      "ONE RECORD DELIBERATELY SURVIVES A DELETION, and you should know why. We keep an internal log of which operator looked at, exported or deleted whose data - the accountability record that lets anyone ask who has been in their file. Erasing an account does not delete that log, because an operator who could erase an account to destroy the record of their own access to it would make the log worthless. Instead your address is replaced in it by a one-way code, so the entries can no longer be traced back to you by name while the record of what each operator did remains.",
   },
   {
     n: "7",
@@ -302,6 +319,26 @@ export const PRIVACY_SECTIONS: LegalSection[] = [
     body:
       "We do NOT sell your personal data - not your messages, your number, your location, your searches, or anything that identifies you. Separately, and only if you switch on 'Market insights' in Profile -> Your data (it is off by default), the outcome of your closed deals may feed ANONYMOUS market statistics: the region, the vehicle type, the price achieved and the negotiation approach - never your name, email, number, or the shop's identity - and only ever published in groups of at least 20 deals, so no individual outcome is recoverable. Deals closed while the switch is off never enter these statistics, and switching off stops new deals entering them. " +
       "This Privacy Policy may be updated; material changes require re-acceptance on your next sign-in.",
+  },
+  {
+    // COOKIES, AND THE TWO CLAIMS THIS SECTION IS CAREFUL NOT TO MAKE.
+    //
+    // It does not say "we use only essential cookies" (untrue the moment an ad
+    // script loads) and it does not list the cookies inline (a list in a legal
+    // constant is a list that goes stale). It names the categories and the
+    // rules, and points at /cookies, which is GENERATED from the app's own
+    // manifest and therefore cannot drift from what the code does.
+    n: "9",
+    title: "Cookies and what is stored in your browser",
+    body:
+      "WheelDeal groups everything it stores in your browser into four categories, and only the first is set without asking. " +
+      "(a) STRICTLY NECESSARY - the signed cookie that keeps you logged in, and the cookie that records your answer to this very question. These cannot be switched off: without them there is no session and nowhere to record a refusal. " +
+      "(b) PREFERENCES - your theme, language, currency, sort order and similar, remembered on this device. " +
+      "(c) ANALYTICS - a first-party random identifier with nothing personal in it, plus a record of which screens you reached, so we can find the parts of the app that quietly fail. It is never sold and never used to advertise to you. " +
+      "(d) ADVERTISING - Google AdSense, which funds the free plan. Google's script sets Google's own cookies under Google's terms; WheelDeal does not load that script at all unless you allow this category, and paid plans never show ads. " +
+      "THE ESSENTIAL GROUP IS A CONDITION OF USING THE APP. There is no version of a signed-in account without a sign-in cookie, and no way to honour a refusal without somewhere to record it, so you are asked to accept those two before the app will open - and until you answer, it does not. This is not a condition on the other three: 'Essential only' is a single tap that gets you the complete product, and choosing it is as quick as accepting everything. " +
+      "Categories (b), (c) and (d) are OFF until you turn them on, a refusal is honoured immediately, and switching a category off deletes what is already stored in it on this device. You can change your answer at any time from the Cookies link in the app's footer or from Profile -> Your data, and withdrawing is exactly as easy as consenting. " +
+      "The complete, per-cookie list - every name, its purpose and how long it lasts - is published at /cookies and is generated from the application's own code, so it is always what the app actually does rather than a description of it.",
   },
 ];
 

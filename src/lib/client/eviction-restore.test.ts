@@ -5,6 +5,11 @@ import { join } from "path";
 vi.mock("server-only", () => ({}));
 
 import { readWaCache, writeWaCache } from "./wa-cache";
+import { ALLOW_ALL, encodeCookieConsent, makeConsent } from "../cookies/consent";
+
+/** A `wd_cookie_prefs` value granting every category, built by the real
+ *  encoder so the fixture cannot drift from the format the gate reads. */
+const grantingConsent = () => encodeCookieConsent(makeConsent(ALLOW_ALL, "accept-all"));
 
 const readCode = (p: string) =>
   readFileSync(join(process.cwd(), p), "utf8")
@@ -102,6 +107,12 @@ describe("the cache is a hint, never authority", () => {
     };
   })();
   vi.stubGlobal("localStorage", store);
+  // THE CACHE IS A `preferences` COOKIE NOW, so writing to it needs consent -
+  // `wd_wa_linked` is declared in COOKIE_MANIFEST and `writeWaCache` goes
+  // through rememberLocal like every other browser-storage write in the app.
+  // These tests are about the cache's own semantics, so they grant the
+  // category and get on with it; the refusal path has its own test below.
+  vi.stubGlobal("document", { cookie: `wd_cookie_prefs=${grantingConsent()}` });
 
   it("a remembered YES is returned, a remembered NO is not", () => {
     // A stale "connected" costs one dimmed line. A stale "disconnected" would
@@ -122,5 +133,17 @@ describe("the cache is a hint, never authority", () => {
     expect(readWaCache()).toBe(null);
     store.removeItem("wd_wa_linked");
     expect(readWaCache()).toBe(null);
+  });
+
+  it("without preference consent nothing is written, and that degrades to a probe", () => {
+    // Exactly the shape a blocked-storage device already produced - which this
+    // cache was built to survive - so a traveller who declined preference
+    // cookies pays one extra probe per load and never a wrong verdict.
+    store.removeItem("wd_wa_linked");
+    vi.stubGlobal("document", { cookie: "" });
+    writeWaCache(true, 1_000);
+    expect(store.getItem("wd_wa_linked")).toBe(null);
+    expect(readWaCache(1_000)).toBe(null);
+    vi.stubGlobal("document", { cookie: `wd_cookie_prefs=${grantingConsent()}` });
   });
 });
