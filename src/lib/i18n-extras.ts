@@ -354,4 +354,52 @@ export const I18N_EXTRAS: string[] = [
   "You cleared this hunt - its shops are no longer messaged.",
   "You booked from this hunt - its shops are no longer messaged.",
   "This hunt went quiet and the agents stood down - re-open it to ask again.",
+
+  // src/lib/cookies/manifest.ts - the cookie inventory. Category titles,
+  // blurbs, consequences, and every entry's purpose and duration. These are
+  // rendered as t(copy.blurb) / t(e.purpose) in CookieConsent.tsx, so no
+  // literal exists for the generator's grep - and a cookie banner that only
+  // speaks English to a Thai traveller is not a disclosure, it is a wall of
+  // text they tap past. Declared here so the whole panel translates.
+  //
+  // KEEP IN SYNC WITH THE MANIFEST. cookies.test.ts pins that the manifest
+  // strings all appear in this list, so editing a purpose there without
+  // regenerating fails the suite rather than silently shipping English.
+  "Strictly necessary",
+  "Signing you in and remembering the choice you make right here. These cannot be switched off - without them there is no session and nowhere to record a 'no'.",
+  "Always on.",
+  "Preferences",
+  "Your theme, language, currency and sort order, remembered on this device so the app opens the way you left it.",
+  "Off: the app still works, it just forgets your theme, language and currency every visit.",
+  "Analytics",
+  "A record of which screens you reach and where a search stalls, so the parts that quietly fail can be found and fixed. It is never sold and never used to advertise to you.",
+  "Off: nothing about how you use the app is recorded, on this device or on our servers.",
+  "Advertising",
+  "Google AdSense, which pays for the free plan. Turning this on loads Google's script, which sets its own cookies under Google's rules.",
+  "Off: Google's ad script is never loaded, and you see no ads.",
+  "Keeps you signed in. It is signed so it cannot be forged, and it is readable only by the server, never by scripts on the page.",
+  "30 days, renewed while you use the app (90 days maximum from first sign-in)",
+  "Remembers the choice you make in this panel, so you are not asked again on every screen. Without it there is nowhere to record that you said no.",
+  "180 days",
+  "Remembers whether you chose the light or dark theme.",
+  "Until you clear your browser data",
+  "Remembers the language you picked, so the app opens in it next time.",
+  "Caches the translated interface text for your language, so switching languages is instant instead of a fresh round trip every visit.",
+  "Remembers that you have already seen the language hint, so it stops appearing.",
+  "Remembers the currency you chose to see prices in.",
+  "Remembers your app preferences (notification and display choices) between visits.",
+  "Remembers whether you sort offers by price or by distance.",
+  "Remembers whether your agents should write to shops in the shop's own local language.",
+  "Remembers that you have finished the intro, so it is not shown again.",
+  "Remembers that you turned on push notifications on this device, so the button shows the right state.",
+  "Caches, for a few minutes, whether your WhatsApp is linked - so the screen does not flash a lock while it checks.",
+  "Your high score in the small game that runs while your agents wait on shops.",
+  "Keeps your conversation with Will (the in-app assistant) alive while you move between screens in this visit.",
+  "Session - cleared when you close the tab",
+  "Remembers which of Will's tips you dismissed during this visit.",
+  "Carries the 'your WhatsApp is now linked' confirmation across the one page hop after linking.",
+  "Operator-only: marks where you were last reading in the internal review console. Never set for travellers.",
+  "A random id with no name, email or number in it, so the screens you visit in one session can be counted as one session rather than as strangers. Set only if you turn Analytics on, deleted the moment you turn it off.",
+  "Set by Google AdSense to choose and cap the ads shown on the free plan, and to detect ad fraud. WheelDeal does not load Google's ad script at all unless you turn this on, and paid plans never show ads.",
+  "Up to 13 months, set and controlled by Google",
 ];

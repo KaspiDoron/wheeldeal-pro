@@ -5,6 +5,7 @@
 // the Profile "Alerts" section. The funnel keeps its own inline opt-in flow.
 
 import { useCallback, useEffect, useState } from "react";
+import { rememberLocal } from "@/lib/cookies/client";
 
 export type PushState =
   | "loading"
@@ -163,9 +164,9 @@ export function usePushAlerts(): UsePushAlerts {
         setNote("Couldn't save your alert subscription - try again.");
         return;
       }
-      try {
-        localStorage.setItem("wd_push_on", "1");
-      } catch {}
+      // `preferences` category. The SUBSCRIPTION is server-side and unaffected
+      // - this only mirrors it so the button shows the right state instantly.
+      rememberLocal("wd_push_on", "1");
       await refresh();
     } catch {
       setState("error");

@@ -50,7 +50,12 @@ describe("both axes render the identical card", () => {
 
   it("the choice is remembered like the language is", () => {
     expect(page).toMatch(/localStorage\.getItem\("wd_list_axis"\)/);
-    expect(page).toMatch(/localStorage\.setItem\("wd_list_axis", a\)/);
+    // The WRITE goes through the cookie-consent gate now (rememberLocal), like
+    // every other browser-storage write in the app - `wd_list_axis` is a
+    // declared `preferences` key, so a traveller who declined that category
+    // still gets the axis they tapped, it just is not kept for next time. The
+    // READ is deliberately ungated: see the note in lib/cookies/client.ts.
+    expect(page).toMatch(/rememberLocal\("wd_list_axis", a\)/);
     // Default stays the vertical feed - the axis only flips on an explicit
     // stored choice.
     expect(page).toMatch(/useState<"vertical" \| "horizontal">\("vertical"\)/);

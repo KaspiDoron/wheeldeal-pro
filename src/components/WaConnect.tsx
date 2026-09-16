@@ -13,6 +13,7 @@ import { readWaCache, writeWaCache } from "@/lib/client/wa-cache";
 import { useWillAssistant } from "./will/WillAssistantProvider";
 import { WillGuideOverlay } from "./will/WillGuideOverlay";
 import { WILL_SLOW_AUTH_MS } from "@/lib/will-assistant";
+import { rememberSession } from "@/lib/cookies/client";
 
 // Once the shown code lapses the user is most likely still typing it, so we do
 // NOT swap it out immediately - we wait this long, and only then quietly ask
@@ -268,7 +269,7 @@ export function WaConnect({
             // Tell Find Deals to celebrate the handoff ("Boom, linked!") the
             // moment the user lands back on the search.
             try {
-              sessionStorage.setItem("wd_wa_just_linked", "1");
+              rememberSession("wd_wa_just_linked", "1");
             } catch {}
             onConnected?.();
           }

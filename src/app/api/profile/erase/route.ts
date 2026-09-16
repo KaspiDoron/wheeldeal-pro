@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSession, clearSessionCookie, isOwner } from "@/lib/session";
+import { clearCookieConsentCookies } from "@/lib/cookies/server";
 
 // Self-serve account erasure (the DSAR "right to be forgotten" half of
 // /api/profile/export). Same walker as the admin Users action - the registry
@@ -48,5 +49,13 @@ export async function POST(req: Request) {
   }
 
   clearSessionCookie();
+  // THE COOKIES GO TOO. Erasure walks every table that keys the person, and
+  // then the browser they are sitting in front of still carries their analytics
+  // id and their recorded cookie choices - a fragment of a person we just said
+  // we had deleted, ready to stamp the next rows if they sign up again. The
+  // ledger ROWS are already gone with consent_events; these are their echo on
+  // the device, and clearing them is the difference between "we deleted your
+  // data" and "we deleted the copy you cannot see".
+  clearCookieConsentCookies();
   return NextResponse.json({ ok: true });
 }

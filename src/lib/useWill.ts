@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { WillCommand, WillContext } from "./will-commands";
 import { pickVariant } from "./will-variants";
+import { rememberSession } from "@/lib/cookies/client";
 
 export interface WillMsg {
   role: "user" | "will";
@@ -72,9 +73,9 @@ export function useWill(bridge: WillBridge) {
   }, []);
 
   useEffect(() => {
-    try {
-      sessionStorage.setItem(STORE_KEY, JSON.stringify({ messages: messages.slice(-40), notes }));
-    } catch {}
+    // `preferences` category. Without it Will still answers - the thread just
+    // does not survive a page hop within the visit.
+    rememberSession(STORE_KEY, JSON.stringify({ messages: messages.slice(-40), notes }));
   }, [messages, notes]);
 
   const receiptFor = (cmd: WillCommand): string | undefined => {

@@ -102,6 +102,7 @@ import { translateOutcome, unavailableNote, retriable, retirementsFrom } from ".
 // in its own module because this one is "use client" and the rule it enforces -
 // no user text in the globally shared I18N_<lang> row - has to be executable in
 // a plain test, not merely read.
+import { rememberLocal } from "./cookies/client";
 import {
   pending,
   failed,
@@ -124,9 +125,11 @@ function cacheGet(lang: string): Dict {
 }
 
 function cacheSet(lang: string, dict: Dict) {
-  try {
-    localStorage.setItem(`wd_i18n_${lang}`, JSON.stringify(dict));
-  } catch {}
+  // Gated on the `preferences` cookie category (lib/cookies/manifest lists
+  // `wd_i18n_*` as a declared family). Declining it does not make the app
+  // English - the sweep still translates this session live - it only stops the
+  // result being kept on the device between visits.
+  rememberLocal(`wd_i18n_${lang}`, JSON.stringify(dict));
 }
 
 export function I18nProvider({ children }: { children: React.ReactNode }) {
@@ -265,9 +268,9 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
   const setLang = useCallback(
     (code: string) => {
       setLangState(code);
-      try {
-        localStorage.setItem("wd_lang", code);
-      } catch {}
+      // The switch itself always happens; only remembering it for next time is
+      // gated - see the note in lib/client/theme.ts applyTheme.
+      rememberLocal("wd_lang", code);
       applyDirection(code);
       // A NEW LANGUAGE IS A NEW QUESTION. Whatever the server declined for the
       // previous one says nothing about this one, and a terminal stop must not

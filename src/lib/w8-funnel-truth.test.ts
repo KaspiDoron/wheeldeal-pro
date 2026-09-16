@@ -32,8 +32,25 @@ describe("W8 #28: the booking screen shows what the SHOP confirmed", () => {
     expect(code).not.toMatch(/Agent spec verification/);
     expect(code).not.toMatch(/Requesting confirmation from the vendor/);
     expect(code).not.toMatch(/setVerification/);
-    // ...and with it, the only effect this component had.
-    expect(code).not.toMatch(/useEffect/);
+    // NO EFFECT IN THIS COMPONENT MAY FETCH.
+    //
+    // This used to read `expect(code).not.toMatch(/useEffect/)`, on the note
+    // that the self-echo request was "the only effect this component had" -
+    // true when it was written, and a fact about the file rather than a rule
+    // about it. A blanket ban on effects then failed the first time a
+    // legitimate one arrived (the consented `booking_opened` funnel event,
+    // which has to live here because five different call sites open this
+    // sheet). What the removed defect actually WAS is an effect that fetched
+    // on mount and rendered the answer as if a shop had sent it, so that is
+    // what is banned: the four assertions above name the request itself, and
+    // this one stops any other on-mount fetch taking its place.
+    const effects = code.match(/useEffect\(\s*\(\)\s*=>\s*\{[\s\S]*?\n  \}, \[/g) ?? [];
+    for (const body of effects) {
+      expect(body, "an effect in BookingSheet is fetching on mount").not.toMatch(/fetch\(/);
+    }
+    // The two fetches that remain are both inside user-triggered handlers.
+    expect(code).toMatch(/fetch\("\/api\/bookings"/);
+    expect(code).toMatch(/fetch\("\/api\/negotiate\/close-deal"/);
   });
 
   it("what it shows instead is derived from the shop's own offer", () => {

@@ -104,11 +104,19 @@ describe("every acceptance surface now writes a record", () => {
     // W9 adds `analytics` and `commercial_insights` - the two kinds that are
     // NOT mandatory acceptances but opt-in processing purposes, default OFF,
     // toggled from Profile with withdrawals recorded as rows.
+    //
+    // The cookie layer adds `cookies_preferences` and `cookies_marketing`, the
+    // two banner categories with no pre-existing purpose behind them. There is
+    // deliberately NO `cookies_analytics`: the banner's Analytics switch reads
+    // and writes the `analytics` purpose above, so "is WheelDeal recording how
+    // I use it" cannot have two answers depending on which screen asked.
     expect([...CONSENT_KINDS].sort()).toEqual(
       [
         "ai_responsibility",
         "analytics",
         "commercial_insights",
+        "cookies_marketing",
+        "cookies_preferences",
         "deal_terms",
         "number_sharing",
         "terms",

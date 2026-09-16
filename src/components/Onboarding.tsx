@@ -29,6 +29,7 @@ const overlay = (node: React.ReactNode) =>
   typeof document === "undefined" ? null : createPortal(node, document.body);
 import { BrandMark } from "./BrandMark";
 import { lockBodyScroll } from "@/lib/scroll-lock";
+import { rememberLocal } from "@/lib/cookies/client";
 
 interface Step {
   emoji: string;
@@ -193,7 +194,7 @@ export function Onboarding({ onClose }: { onClose: () => void }) {
 
   function finish() {
     try {
-      localStorage.setItem("wd_onboarded", "1");
+      rememberLocal("wd_onboarded", "1");
     } catch {}
     onClose();
   }

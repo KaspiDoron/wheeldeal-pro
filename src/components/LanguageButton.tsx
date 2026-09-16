@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Modal } from "./Modal";
 import { LoadingDots } from "./LoadingDots";
 import { LANGS, useI18n } from "@/lib/i18n";
+import { rememberLocal } from "@/lib/cookies/client";
 
 // Global translate control - lives in the top-right of every screen,
 // including the login page. Flashy on first sight so travellers immediately
@@ -30,7 +31,7 @@ export function LanguageButton({ flashy = false }: { flashy?: boolean }) {
             setOpen(true);
             setShowHint(false);
             try {
-              localStorage.setItem("wd_translate_seen", "1");
+              rememberLocal("wd_translate_seen", "1");
             } catch {}
           }}
           aria-label="Change language"

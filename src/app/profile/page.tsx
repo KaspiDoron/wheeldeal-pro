@@ -26,6 +26,8 @@ import { UpgradeSheet } from "@/components/UpgradeSheet";
 import { CURRENCIES, savedCurrency, setSavedCurrency, moneyLocal } from "@/lib/currency";
 import { formatShopWallClock } from "@/lib/clock";
 import { useI18n } from "@/lib/i18n";
+import { rememberLocal } from "@/lib/cookies/client";
+import { CookieSettingsButton } from "@/components/CookieSettingsButton";
 
 interface Booking {
   id?: number;
@@ -240,9 +242,9 @@ export default function ProfilePage() {
 
   function savePrefs(next: typeof prefs) {
     setPrefs(next);
-    try {
-      localStorage.setItem("wd_prefs", JSON.stringify(next));
-    } catch {}
+    // `preferences` cookie category - the choice applies now either way; the
+    // gate only decides whether it survives to the next visit.
+    rememberLocal("wd_prefs", JSON.stringify(next));
   }
 
   async function signOut() {
@@ -879,9 +881,10 @@ export default function ProfilePage() {
           <p className="mt-1 text-[12px] text-soft">
             {t("WheelDeal finds independent rental shops and negotiates on your behalf. Every rental is directly between you and the shop - the full Terms and Privacy Policy you accepted live here.")}
           </p>
-          <div className="mt-2 flex gap-3 text-[13px] font-bold text-brandblue">
+          <div className="mt-2 flex flex-wrap gap-3 text-[13px] font-bold text-brandblue">
             <a href="/terms" className="underline">{t("Terms of Use")}</a>
             <a href="/privacy" className="underline">{t("Privacy Policy")}</a>
+            <a href="/cookies" className="underline">{t("Cookie Policy")}</a>
           </div>
         </section>
 
@@ -899,7 +902,7 @@ export default function ProfilePage() {
                 {
                   kind: "analytics" as const,
                   label: t("Product analytics"),
-                  hint: t("Allow WheelDeal to keep a structured record of your funnel steps (searches, replies, bookings) to understand how the product is used."),
+                  hint: t("Allow WheelDeal to keep a structured record of your funnel steps (searches, replies, bookings) to understand how the product is used. This is the same switch as Analytics in the cookie panel - one purpose, two places to find it."),
                 },
                 {
                   kind: "commercial_insights" as const,
@@ -915,9 +918,13 @@ export default function ProfilePage() {
                     onClick={() => flipConsent(c.kind)}
                     disabled={!consents || consentBusy === c.kind}
                     aria-pressed={Boolean(consents?.[c.kind])}
+                    // `brandgreen` is not a token in tailwind.config.ts, so the
+                    // "on" pill has been compiling to nothing and rendering
+                    // identically to "off" - the two states looked the same.
+                    // `savings` is the green that exists.
                     className={`btn btn-sm rounded-full px-3 py-1 text-[11px] font-extrabold ${
                       consents?.[c.kind]
-                        ? "bg-brandgreen-soft text-brandgreen"
+                        ? "bg-savings-soft text-savings"
                         : "bg-card text-faint"
                     }`}
                   >
@@ -938,6 +945,22 @@ export default function ProfilePage() {
                 {consentMsg}
               </p>
             )}
+            {/* THE SECOND DOOR TO THE SAME ROOM. Preferences and advertising
+                have no toggle of their own here on purpose - they are cookie
+                categories, they live in the panel with the actual list of keys
+                beside them, and a third copy of the switches would be a third
+                thing to keep honest. Analytics appears in both because it is
+                one purpose the app has always had two names for; the routes
+                keep them in step (see CATEGORY_CONSENT_KIND). */}
+            <div className="rounded-2xl bg-card2 p-3">
+              <div className="text-[12px] font-extrabold text-strong">
+                {t("Cookies and browser storage")}
+              </div>
+              <p className="mt-1 text-[11px] leading-snug text-soft">
+                {t("Theme and language memory, analytics, and the ads that fund the free plan. Every cookie is listed by name with what it is for - change your answer any time.")}
+              </p>
+              <CookieSettingsButton className="btn btn-ghost mt-2 w-full rounded-2xl py-2 text-[12px] font-extrabold" />
+            </div>
           </div>
           <a
             href="/api/profile/export"

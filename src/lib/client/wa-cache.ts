@@ -12,6 +12,8 @@
 // user a pointless re-link, so a MISSING entry renders a shimmer, never a
 // negative.
 
+import { rememberLocal } from "@/lib/cookies/client";
+
 const KEY = "wd_wa_linked";
 /** Older than this and the memory is not worth having. */
 const MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
@@ -34,9 +36,8 @@ export function readWaCache(now = Date.now()): boolean | null {
 
 /** Record what the probe just said. Quota/private-mode failures are ignored. */
 export function writeWaCache(connected: boolean, now = Date.now()): void {
-  try {
-    localStorage.setItem(KEY, JSON.stringify({ connected, at: now }));
-  } catch {
-    /* storage full or blocked - the cache is an optimisation, never required */
-  }
+  // `preferences` category. Refused consent behaves exactly like blocked
+  // storage, which this cache was already built to survive: the probe simply
+  // runs on every load instead of once every few minutes.
+  rememberLocal(KEY, JSON.stringify({ connected, at: now }));
 }

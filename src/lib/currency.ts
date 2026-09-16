@@ -2,6 +2,8 @@
 // plans exactly); everything else is a display conversion. USD is the
 // professional default. A hidden 0.2% is applied to non-ILS conversions.
 
+import { rememberLocal } from "@/lib/cookies/client";
+
 export interface Currency {
   code: string;
   symbol: string;
@@ -178,7 +180,7 @@ export function savedCurrency(): string {
 }
 
 export function setSavedCurrency(code: string) {
-  try {
-    localStorage.setItem("wd_currency", code);
-  } catch {}
+  // `preferences` category - the price still renders in the chosen currency
+  // this session; declining only stops it being remembered next visit.
+  rememberLocal("wd_currency", code);
 }

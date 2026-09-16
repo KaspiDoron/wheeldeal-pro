@@ -114,6 +114,7 @@ import { useWillAssistant } from "@/components/will/WillAssistantProvider";
 import { deriveWillStep } from "@/lib/will-assistant";
 import { CompareSheet } from "@/components/will/CompareSheet";
 import { ReviewsSheet } from "@/components/ReviewsSheet";
+import { rememberLocal, rememberSession } from "@/lib/cookies/client";
 const UpgradeSheet = dynamic(
   () => import("@/components/UpgradeSheet").then((m) => m.UpgradeSheet),
   { ssr: false }
@@ -127,6 +128,7 @@ const Onboarding = dynamic(
   { ssr: false }
 );
 import { AdBanner } from "@/components/AdBanner";
+import { track } from "@/lib/client/analytics";
 import { LoadingDots } from "@/components/LoadingDots";
 import { AgentKillSwitch } from "@/components/AgentKillSwitch";
 import { AlertsChip } from "@/components/AlertsChip";
@@ -244,9 +246,7 @@ export default function Home() {
   }, []);
   const setListAxis = (a: "vertical" | "horizontal") => {
     setListAxisState(a);
-    try {
-      localStorage.setItem("wd_list_axis", a);
-    } catch {}
+    rememberLocal("wd_list_axis", a);
   };
   const [filters, setFilters] = useState<FilterState>(DEFAULT_FILTERS);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -427,9 +427,7 @@ export default function Home() {
   const dismissWillStage = useCallbackRef((stage: string) => {
     setDismissedStages((prev) => {
       const next = new Set(prev).add(stage);
-      try {
-        sessionStorage.setItem("wd_will_dismissed", JSON.stringify([...next]));
-      } catch {}
+      rememberSession("wd_will_dismissed", JSON.stringify([...next]));
       return next;
     });
   });
@@ -2303,6 +2301,9 @@ export default function Home() {
     // through profiling + discovery. Every exit below lowers it; a thrown
     // fetch is caught by AmbientGlow's own timeout escape.
     raiseAmbient();
+    // The consented funnel record. `track` is a no-op - not even a buffer
+    // write - unless analytics is granted on this device (lib/client/analytics).
+    track("search_started", { axis: listAxis });
     setPhase("profiling");
     setVendors([]);
     setRfq(null);
@@ -2512,6 +2513,9 @@ export default function Home() {
     setSource(vData.source ?? "demo");
     setSourceError(vData.sourceError ?? null);
     setVendors(list);
+    // HOW MANY, never WHICH. The count is what says "the search worked"; the
+    // shop names would make this row a record of where a person was looking.
+    track("search_results", { shops: list.length, source: String(vData.source ?? "demo") });
 
     // NOW the close matters: nothing may be SENT until the previous session's
     // queue and wakeups are gone. By this point it has had the whole discovery
@@ -2588,7 +2592,10 @@ export default function Home() {
   // hands it to a memo'd child - which is the same memo break as passing a
   // rebuilt object, just harder to see.
   const onLocationRequest = useCallbackRef((v: Vendor) => setLocationAskFor(v));
-  const onOpenThread = useCallbackRef((v: Vendor) => setDashboardFor(v));
+  const onOpenThread = useCallbackRef((v: Vendor) => {
+    track("offer_opened", { stage: String(v.stage ?? "") });
+    setDashboardFor(v);
+  });
 
   const customMessage = useCallbackRef(async (
     vendorId: string,
@@ -2882,6 +2889,7 @@ export default function Home() {
           // Google "open now" - so an open shop is never queued as closed.
           openNow: v.openNow,
         }));
+      track("outreach_started", { shops: targets.length });
       const res = await fetch("/api/outreach/mass", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -4406,9 +4414,7 @@ export default function Home() {
               }
               const next = !localLang;
               setLocalLang(next);
-              try {
-                localStorage.setItem("wd_local_lang", next ? "1" : "0");
-              } catch {}
+              rememberLocal("wd_local_lang", next ? "1" : "0");
             }}
             className={`mt-3 flex w-full items-center justify-between rounded-2xl border-2 px-4 py-2.5 text-[13px] font-extrabold transition ${
               languageLocked ? "cursor-not-allowed opacity-60 " : ""

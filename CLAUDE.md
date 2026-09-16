@@ -33,7 +33,9 @@ Router) + TypeScript + Tailwind, deployed on GCP Cloud Run. Runs fully in
 - **Mobile first.** Test at 320-430px. No horizontal overflow. Respect
   safe-area insets (`pt-safe`, `pb-safe`). Form controls >= 16px (iOS zoom).
 - Validate before pushing: `npm run typecheck && npx vitest run` (plus
-  `npm run build && npm run check:mobile` for layout-touching changes).
+  `npm run build && npm run check:mobile` for layout-touching changes, and
+  `npm run check:cookies` for anything touching the cookie layer or the ad
+  script - it is the only check that can see a third-party request).
 - **Every user-visible string goes through `t("...")`** and must be in the
   generated catalogue: run `node scripts/gen-i18n-catalog.js` after adding
   copy. Computed copy is declared in `src/lib/i18n-extras.ts` - never hand-
@@ -78,7 +80,16 @@ src/
     evolution.ts     Evolution API client (sessions, sends, webhook re-arm)
     privacy/         user-tables.ts (THE ERASURE REGISTRY), erase.ts,
                      product-events.ts (consent-gated projection)
-    consent.ts       acceptance ledger + the two opt-in purposes (consentFor)
+    consent.ts       acceptance ledger + the opt-in purposes (consentFor)
+    cookies/         THE COOKIE LAYER: manifest.ts is the one INVENTORY of
+                     every cookie/storage key the app writes (the banner, the
+                     /cookies page and the storage gate all render from it, and
+                     cookies.test.ts greps src/ so an undeclared key fails the
+                     build); consent.ts is the isomorphic record; client.ts the
+                     write gate (rememberLocal/rememberSession) + purge;
+                     server.ts the per-request read + ledger write
+    analytics/       events.ts: the allow-listed event vocabulary, path
+                     scrubbing and prop bounding behind /api/analytics/collect
     ops/             Ops Center: golden gate, insights rollup (k>=20), vitals
     ai.ts ai-rpm.ts  LLM provider ladder + fleet RPM budgets
     runtime-config.ts  Key Vault + the honest PostgREST client family
@@ -123,6 +134,19 @@ supabase/retention.sql     run once; prune + de-identify + heartbeat + the
   table; erase + export walk it, a schema-grep test refuses unregistered
   tables. Retention windows (90/180/360d + priced-transcript de-identify) run
   nightly with a heartbeat the health panel reads.
+- **Cookies are an inventory, not a banner.** `cookies/manifest.ts` declares
+  every browser key with a category, purpose and duration; the banner, the
+  generated `/cookies` policy page and the write gate all read that one list,
+  and `cookies.test.ts` greps src/ so a raw `localStorage.setItem` or an
+  undeclared key fails the build. Four categories (necessary / preferences /
+  analytics / marketing), deny by default, reject as easy as accept (pinned by
+  test). The choice lives in `wd_cookie_prefs` AND, when signed in, in the same
+  `consent_events` ledger as every other consent. `analytics` is deliberately
+  ONE purpose with two doors - the banner and Profile -> Your data read and
+  write the same kind. Marketing gates Google's ad SDK in a pre-paint script in
+  the root layout (the SDK is never fetched without consent; the
+  `google-adsense-account` meta tag still verifies the site unconditionally) -
+  `npm run check:cookies` boots the real build and counts the requests.
 
 ## AI Operations Center (Admin -> Ops, owner only)
 
