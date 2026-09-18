@@ -49,13 +49,25 @@ describe("a dial may not promise what the engine will override", () => {
 });
 
 describe("the human delay got shorter, never shorter than the fleet gap", () => {
-  it("the LIVE engine's thinking pause is bounded and budget-aware", () => {
+  it("the LIVE engine's thinking pause is bounded, budget-aware and SLA-aware", () => {
     // The legacy orchestrator's 6-15s / 10-25s think constants died with the
-    // legacy block (deleted - see "the legacy pipeline is gone" below). The
-    // live pause is SPTE's: bounded to 10s, and always leaving >=20s of the
-    // serverless budget so a pause can never cost the reply itself.
+    // legacy block (deleted - see "the legacy pipeline is gone" below).
+    //
+    // The live pause used to be `Math.min(10_000, remaining - 20_000)`: bounded
+    // and budget-aware, but blind to how long the turn had already taken, so on
+    // a 45s budget it was a flat ten seconds on EVERY reply. Measured on a live
+    // hunt that produced composeMs of 17-20s with no pacing delay at all.
+    // It is still bounded and still leaves the turn's tail reserve; it now also
+    // measures from the shop's own message and keeps the ten-second promise.
     const live = readCode("src/lib/spte/live.ts");
-    expect(live).toMatch(/Math\.min\(10_000, remaining - 20_000\)/);
+    expect(live).toMatch(/humanPauseMs/);
+    expect(live).toMatch(/inboundAt: input\.inboundAt/);
+    expect(live).not.toMatch(/Math\.min\(10_000, remaining - 20_000\)/);
+    // The bound itself lives in the pure module, where it can be executed
+    // rather than merely matched.
+    const sla = readCode("src/lib/wa/reply-sla.ts");
+    expect(sla).toMatch(/export const REPLY_SLA_MS = 10_000/);
+    expect(sla).toMatch(/export const TURN_TAIL_RESERVE_MS = 20_000/);
   });
 
   it("a model-proposed WAIT is still clamped so it cannot blow the ceiling", () => {

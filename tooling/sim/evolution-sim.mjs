@@ -432,6 +432,13 @@ const server = http.createServer(async (req, res) => {
     const body = await readBody(req);
     const digits = String(body.number ?? "").replace(/\D/g, "");
     const text = String(body.text ?? body?.textMessage?.text ?? "");
+    // A "message" that is only digits is almost certainly not a message. Show
+    // the raw body so it can be identified rather than guessed at - and do not
+    // let it stop the reply stopwatch below, which would flatter the latency.
+    const looksLikeAMessage = !/^\d{6,}$/.test(text.trim());
+    if (!looksLikeAMessage) {
+      log({ note: `non-message sendText body: ${JSON.stringify(body).slice(0, 220)}` });
+    }
     ensureInstance(name);
     const thread = threadFor(name, digits);
 

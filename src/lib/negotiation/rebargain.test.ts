@@ -159,11 +159,23 @@ describe("...and it is NOT a spam engine", () => {
 });
 
 describe("the promise in the docstring is now wired", () => {
-  it("materialDrop reaches the planner, not only telemetry", () => {
+  it("a new cheapest quote reaches the planner, not only telemetry", () => {
     const live = read("src/lib/spte/live.ts");
-    expect(live).toMatch(/if \(outcome\.materialDrop && input\.ctx\.sender\)/);
     expect(live).toMatch(/planSiblingRebargain/);
     expect(live).toMatch(/swarm-rebargain/);
+    // THE GATE MOVED, AND WHY IT HAD TO. This used to pin
+    // `if (outcome.materialDrop && input.ctx.sender)`. `materialDrop` compares
+    // the arriving quote against `session.lowest`, which deliberately includes
+    // THIS shop's own row - and the offers row is written before the engine
+    // runs, so a shop arriving as the cheapest in the hunt was already inside
+    // the number it was compared with and could never register as an
+    // improvement. The dearer shops were told nothing, which is exactly the
+    // failure this whole module was written for.
+    expect(live).toMatch(/isNewSessionLow/);
+    // The comparison must be against the OTHER shops, or the defect returns
+    // wearing a new name.
+    expect(live).toMatch(/rows\.filter\(\(r\) => !r\.isThisShop\)/);
+    expect(live).not.toMatch(/if \(outcome\.materialDrop && input\.ctx\.sender\)/);
   });
 
   it("a priced thread schedules its own return, past the 3-minute pause band", () => {

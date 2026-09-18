@@ -267,7 +267,17 @@ export function voiceClarifyExtraction(): import("./agents").ExtractedOffer {
 function stampTurnLatency(
   email: string | undefined,
   toDigits: string,
-  detail: { composeMs: number; plannedDelayS: number; outcome: string }
+  detail: {
+    composeMs: number;
+    plannedDelayS: number;
+    outcome: string;
+    /**
+     * The number the promise is actually made of: the shop's message to our
+     * answer on the wire. `composeMs` measures OUR work; this measures THEIR
+     * wait, which is the only one a shop experiences.
+     */
+    inboundToWireMs?: number;
+  }
 ): void {
   if (!email) return;
   void sbInsert("agent_events", [
@@ -410,6 +420,9 @@ export async function processVendorReply(opts: {
   // answering within seconds (instant replies are the biggest bot tell).
   // Only for senders whose own session can deliver from the queue.
   humanDelay?: boolean;
+  /** When the shop's message arrived (epoch ms) - the clock the reply promise
+   *  is measured against. Defaults to the start of this turn. */
+  inboundAt?: number;
   // Module 3 (vision offload): a pre-computed extraction from the isolated
   // vision worker. When set, the in-turn extractOffer call is skipped - the
   // LLM-heavy OCR already ran at the vision queue's strict concurrency, and
@@ -2696,6 +2709,9 @@ export async function processVendorReply(opts: {
       close: autoCloses,
     },
     humanDelay: Boolean(opts.humanDelay && ctx.sender),
+    // The shop's own clock, so the pause before the answer is measured from
+    // when THEY wrote rather than from when we finished thinking.
+    inboundAt: opts.inboundAt ?? turnStartedAt,
     transcript: opts.transcript ?? null,
     // The SPTE turn gets what the media and extraction stages LEFT, never a
     // fresh 45s on top of them. A floor of 12s so a turn that arrives late
@@ -2728,6 +2744,7 @@ export async function processVendorReply(opts: {
         stampTurnLatency(ctx.sender, from, {
           composeMs: Date.now() - turnStartedAt,
           plannedDelayS: 0,
+          inboundToWireMs: Date.now() - (opts.inboundAt ?? turnStartedAt),
           outcome:
             d === "sent" ? "sent" : d === "queued" || d === "held" ? "parked" : "send-failed",
         });

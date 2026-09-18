@@ -25,6 +25,9 @@ import { fnv1a32, mulberry32 } from "../copy/hash";
 import { voiceProfileFor, voiceDirectives } from "../voice";
 import { compileStyleDirectives } from "../copy/promptCompiler";
 import { askVariantDirective, askVariantFor } from "../negotiation/ask-variant";
+// Two distinct shops must hold a price before a competitor's number is named -
+// the owner's rule, in one place, shared with the swarm trigger.
+import { canCiteRivalOnSilentThread } from "../negotiation/rival-gate";
 import { disclosureBlock } from "../negotiation/traveller-disclosure";
 import { describeActs } from "../wa/dialogue-acts";
 // The ONE place the day plural is decided (owner report 5 #7: shops were told
@@ -524,8 +527,13 @@ function buildPrompt(ctx: TurnContext): { system: string; user: string } {
   // the rails policed it as a price move. `cheapestCheaperRival` cannot help
   // here (it needs a quote to be cheaper THAN, and momentum is only legal with
   // no quote), so the card is the session's own live rival board.
+  // ...AND ONLY ONCE TWO SHOPS HAVE ACTUALLY PRICED. A thread with no quote of
+  // its own holds no pair to compare, so a single priced row in the hunt is not
+  // "another shop is cheaper" - it is the only price we have. The owner's rule
+  // is two distinct shops before a competitor's number is named to anyone.
+  const pricedRivals = s.rivals.filter((r) => r.pricePerDay > 0).length;
   const momentumPlay =
-    ctx.legalMoves.includes("momentum") && s.rivals.length > 0 && s.rivals[0].pricePerDay > 0
+    ctx.legalMoves.includes("momentum") && canCiteRivalOnSilentThread(pricedRivals)
       ? `THIS THREAD HAS GONE QUIET AND YOU HOLD A REAL CARD: another shop in this same search has quoted ${s.rivals[0].pricePerDay} ${
           s.rivals[0].currency ?? s.currency
         }/day. Name that figure to restart the conversation and ask for their best price - never name the other shop.\n`
