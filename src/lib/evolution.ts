@@ -3265,6 +3265,30 @@ export async function sendFromUser(
   const instance = instanceNameFor(email);
   const number = digitsOnly(to);
 
+  // A SEND WITH NO RECIPIENT IS A BUG, NOT A MESSAGE.
+  //
+  // Seen on a live local run against the shop simulator: the app posted
+  // `{"number":"","text":"<a phone number>"}` to /message/sendText - a caller
+  // holding a destination where its text should be. A real Evolution host
+  // answers 400 and the send is lost; the simulator, being permissive, invented
+  // a whole shop around it. Either way nothing recorded that it happened, which
+  // is the part worth fixing: the send is refused here, and the first frames of
+  // the caller are written down so the next occurrence names its own source
+  // instead of being reconstructed from a wire log.
+  if (!number) {
+    void sbInsert("agent_events", [
+      {
+        kind: "send-no-recipient",
+        user_email: email,
+        detail: JSON.stringify({
+          textStart: String(message ?? "").slice(0, 60),
+          stack: (new Error().stack ?? "").split("\n").slice(1, 6).join(" | ").slice(0, 500),
+        }).slice(0, 800),
+      },
+    ])?.catch?.(() => {});
+    return { ok: false, error: "no recipient" };
+  }
+
   // Resume the session if it dropped, instead of failing outright.
   const conn = await ensureConnected(email, 6000);
   if (!conn.ok) {

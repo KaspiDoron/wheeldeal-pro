@@ -435,9 +435,21 @@ const server = http.createServer(async (req, res) => {
     // A "message" that is only digits is almost certainly not a message. Show
     // the raw body so it can be identified rather than guessed at - and do not
     // let it stop the reply stopwatch below, which would flatter the latency.
-    const looksLikeAMessage = !/^\d{6,}$/.test(text.trim());
-    if (!looksLikeAMessage) {
-      log({ note: `non-message sendText body: ${JSON.stringify(body).slice(0, 220)}` });
+    // A SEND WITH NO RECIPIENT IS NOT A CONVERSATION.
+    //
+    // The app posts `{"number":"","text":"<a phone number>"}` on some path, and
+    // the simulator used to treat it like any other send: it created a thread
+    // keyed on the empty string, gave that phantom a persona, and let it reply
+    // into the app - inventing a shop that was never messaged, and stopping a
+    // reply stopwatch nobody had started. Refused here, loudly, so the defect
+    // is visible rather than dressed up as a negotiation.
+    if (!digits || /^\d{6,}$/.test(text.trim())) {
+      log({ note: `REFUSED a send with no recipient: ${JSON.stringify(body).slice(0, 200)}` });
+      return json(res, {
+        status: "ERROR",
+        error: true,
+        response: { message: ["number is required"] },
+      }, 400);
     }
     ensureInstance(name);
     const thread = threadFor(name, digits);
