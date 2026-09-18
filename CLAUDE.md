@@ -305,6 +305,22 @@ ticket, not in this repo.
 `AUTHENTICATION_API_KEY` is `sync: false` and is unaffected by any of this -
 that is exactly what `sync: false` protects.
 
+## Local dev mode (the whole funnel, on a laptop)
+
+`./tooling/dev/local-db.sh` then `npm run dev:sim`. That is a real Postgres +
+PostgREST (demo mode records NOTHING, so the funnel cannot be exercised without
+one), the app, a drain ticker standing in for the production cron, and a fake
+Evolution host playing 10-40 rental shops with their own prices, floors,
+languages and tempers.
+
+The simulator impersonates the Evolution API rather than patching the app, so
+every send still crosses the real guard, pacing, claims, outbox and webhook
+auth - there is no "if simulating" branch in `src/` to drift. It is also the
+reply-speed stopwatch: `/sim/sla` measures shop-message-to-our-answer from
+OUTSIDE the app, which is the only measurement the 10s target can be judged on.
+Details and the two traps (`APP_DOMAIN` must be local; local schemas need the
+`service_role` grants) are in `tooling/sim/README.md`.
+
 ## MCP servers (tooling for AI-assisted development)
 
 `.mcp.json` wires the official remote MCP servers for the external services
