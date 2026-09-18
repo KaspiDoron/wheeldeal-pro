@@ -2164,6 +2164,32 @@ export function liveGraphIO(send: LiveSend): GraphIO {
       await parkOutboxOnce({ senderKey, toNumber, body, notBeforeMs, meta: meta ?? undefined });
     },
     async guardAndSend({ senderKey, toNumber, text, meta, shopOpenNow }) {
+      // A TURN WITH NO RECIPIENT IS A BUG, AND IT USED TO REACH THE WIRE.
+      //
+      // Seen against the shop simulator: `{"number":"","text":"<a phone
+      // number>"}` posted to /message/sendText - the engine held an empty
+      // destination and a composed text that was itself a number. The send
+      // chokepoint refuses that now (evolution.ts), but by the time it does,
+      // everything that would explain WHY is gone: only here do we still have
+      // the move's meta. Refused with that context attached, so the next
+      // occurrence names its own cause instead of being reconstructed from a
+      // wire log outside the app.
+      if (!String(toNumber ?? "").trim()) {
+        await sbInsert("agent_events", [
+          {
+            kind: "send-no-recipient",
+            user_email: senderKey,
+            detail: JSON.stringify({
+              where: "engine.guardAndSend",
+              textStart: String(text ?? "").slice(0, 60),
+              kind: (meta as { kind?: string } | undefined)?.kind ?? null,
+              vendorId: (meta as { vendorId?: string } | undefined)?.vendorId ?? null,
+              vendorName: (meta as { vendorName?: string } | undefined)?.vendorName ?? null,
+            }).slice(0, 800),
+          },
+        ]).catch(() => {});
+        return { delivered: "blocked", detail: "no recipient - refused before the wire" };
+      }
       const { guardOutbound, afterSend } = await import("../wa-guard");
       const { parkOutboxOnce } = await import("../wa/park");
       const verdict = await guardOutbound({

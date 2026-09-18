@@ -19,4 +19,20 @@ describe("a send with no recipient never reaches the provider", () => {
     expect(evo).toMatch(/kind: "send-no-recipient"/);
     expect(evo).toMatch(/stack:/);
   });
+
+  it("the engine refuses it first, while it still knows which move produced it", () => {
+    const engine = read("src/lib/graph/engine.ts");
+    const entry = engine.indexOf("async guardAndSend({ senderKey, toNumber, text, meta, shopOpenNow })");
+    const guard = engine.indexOf('if (!String(toNumber ?? "").trim())', entry);
+    const firstGuardOutbound = engine.indexOf("guardOutbound({", entry);
+    expect(entry).toBeGreaterThan(0);
+    expect(guard).toBeGreaterThan(entry);
+    // Before anything else runs: a send with nowhere to go must not consume a
+    // pacing slot, a claim, or an outbox row on its way to being refused.
+    expect(firstGuardOutbound).toBeGreaterThan(guard);
+    // The context is the point - `kind` names the move that produced it.
+    const detail = engine.slice(guard, guard + 900);
+    expect(detail).toMatch(/where: "engine\.guardAndSend"/);
+    expect(detail).toMatch(/kind: \(meta/);
+  });
 });

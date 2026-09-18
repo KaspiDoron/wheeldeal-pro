@@ -1993,3 +1993,150 @@ create index if not exists admin_audit_actor_idx
 create index if not exists admin_audit_subject_idx
   on public.admin_audit (subject_email, created_at desc);
 alter table public.admin_audit enable row level security;
+
+-- ---------------------------------------------------------------------------
+-- THE SHOP FEE (partner_shops, rental_claims, commission_ledger,
+-- shop_statements) - the first way this product charges anybody
+-- ---------------------------------------------------------------------------
+--
+-- The business plan fixes the commercial rules and they are unusual enough to
+-- restate here, because the schema only makes sense against them:
+--
+--   The SHOP pays, and only for a rental that actually happened - a flat fee
+--   per completed rental, not a share of the price. The traveller pays nothing
+--   per rental. WheelDeal is not in the payment: the money changes hands on the
+--   ground, so a fee can only ever rest on EVIDENCE, and the evidence is three
+--   answers that must agree - what the agent recorded at the close, what the
+--   traveller said when asked once, and what the shop marked on its monthly
+--   list. Silence is not a charge. "No" is not a charge, and is not argued
+--   with. Anything unmarked is not billed.
+--
+-- THE RULE THAT SHAPES EVERY TABLE HERE: the AI never moves money. It reads,
+-- it proposes, and it decides when to ask a person - a wrong guess must cost a
+-- badly-timed question, never a wrong charge. That is why the confirmations are
+-- columns holding a human's answer rather than a model's confidence.
+--
+-- SHADOW FIRST. `commission_ledger.mode` ships as 'shadow': every claim, every
+-- confirmation and every fee is computed and recorded, and nothing is charged.
+-- That log is the evidence any saving or fee claim has to rest on before it is
+-- made to a shop, a traveller or an investor, and it answers the one question
+-- the whole model turns on - what share of negotiated offers become rentals.
+
+-- The durable shop record. Keyed by the same canonical phone key the rest of
+-- the app threads on (wa/phone-key), so a shop is one row however its number
+-- was spelled. A shop that has not accepted terms can never be billed: that is
+-- what `terms_accepted_at` is for, and the billing path reads it rather than
+-- assuming a fee was ever agreed.
+create table if not exists public.partner_shops (
+  shop_key          text primary key,        -- canonical phone key (outboxKey)
+  phone_digits      text,
+  name              text,
+  market            text,                    -- bali | thailand | ... (pricing + language)
+  status            text not null default 'prospect', -- prospect | partner | paused | blocked
+  terms_version     text,
+  terms_accepted_at timestamptz,
+  terms_accepted_by text,                    -- how it was accepted (page | whatsapp)
+  -- Prepaid credit comes first: a new shop buys a small block of introductions,
+  -- so there is no invoice and no risk to it. Minor units of `currency`.
+  credit_minor      bigint not null default 0,
+  currency          text not null default 'USD',
+  -- The plan's flat fees, per vehicle class, overridable per shop.
+  fee_scooter_minor integer,
+  fee_car_minor     integer,
+  -- What the shop's behaviour has earned: answered rate, honoured rate, and how
+  -- often it marks its monthly list. A shop that stops confirming stops being
+  -- sent travellers, which is the only enforcement that matters.
+  confirm_rate      numeric,
+  created_at        timestamptz not null default now(),
+  updated_at        timestamptz not null default now()
+);
+create index if not exists partner_shops_status_idx on public.partner_shops (status, updated_at desc);
+alter table public.partner_shops enable row level security;
+
+-- One row per deal the agent closed. The three-answer evidence trail lives
+-- here: what was agreed, what the traveller said, what the shop said.
+create table if not exists public.rental_claims (
+  id                bigint generated always as identity primary key,
+  user_email        text not null,
+  shop_key          text not null,
+  vendor_id         text,
+  vendor_name       text,
+  thread_key        text,
+  vehicle_class     text,                    -- scooter | car | motorbike
+  agreed_price      numeric,                 -- per day, as agreed in the thread
+  currency          text,
+  duration_days     integer,
+  pickup_at         timestamptz,
+  pickup_place      text,
+  -- recorded -> traveller_confirmed | traveller_denied | unanswered
+  --          -> shop_confirmed | shop_denied | expired
+  state             text not null default 'recorded',
+  asked_traveller_at    timestamptz,
+  traveller_answer      text,                -- yes | no  (a person's answer, never a model's)
+  traveller_answered_at timestamptz,
+  shop_answer           text,                -- rented | not_rented
+  shop_answered_at      timestamptz,
+  statement_id      bigint,
+  -- What the agent read this from: message ids, the recap it sent, the quote it
+  -- closed on. A fee is only ever as good as this.
+  evidence          jsonb,
+  created_at        timestamptz not null default now(),
+  updated_at        timestamptz not null default now()
+);
+create index if not exists rental_claims_user_idx on public.rental_claims (user_email, created_at desc);
+create index if not exists rental_claims_shop_idx on public.rental_claims (shop_key, created_at desc);
+create index if not exists rental_claims_state_idx on public.rental_claims (state, pickup_at);
+alter table public.rental_claims enable row level security;
+
+-- The money view of a claim. DELIBERATELY CARRIES NO TRAVELLER KEY: a shop's
+-- billing history must survive a traveller's erasure (the same reasoning that
+-- keeps admin_audit and de-identifies it rather than deleting it), while the
+-- person's own row - the claim, with the thread and the evidence - is deleted
+-- with them. `claim_id` is then a dangling reference by design, and the ledger
+-- keeps only what a bill is made of: a shop, a period, a fee and a state.
+create table if not exists public.commission_ledger (
+  id            bigint generated always as identity primary key,
+  claim_id      bigint,
+  shop_key      text not null,
+  fee_minor     integer not null,
+  currency      text not null default 'USD',
+  vehicle_class text,
+  -- shadow = computed and recorded, never charged. The default, on purpose.
+  mode          text not null default 'shadow',
+  -- accrued -> invoiced -> collected | waived | disputed
+  state         text not null default 'accrued',
+  statement_id  bigint,
+  note          text,
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now()
+);
+create index if not exists commission_ledger_shop_idx on public.commission_ledger (shop_key, created_at desc);
+create index if not exists commission_ledger_state_idx on public.commission_ledger (state, mode);
+alter table public.commission_ledger enable row level security;
+
+-- A month of claims for one shop, and the token that opens its own page. The
+-- token is the whole authentication story on purpose: a shop owner will not
+-- make an account to answer four questions, and the page shows only that
+-- shop's own rows.
+create table if not exists public.shop_statements (
+  id            bigint generated always as identity primary key,
+  shop_key      text not null,
+  period_start  date not null,
+  period_end    date not null,
+  claim_count   integer not null default 0,
+  total_minor   bigint not null default 0,
+  currency      text not null default 'USD',
+  -- draft -> sent -> answered -> paid | void
+  state         text not null default 'draft',
+  token         text unique,
+  sent_at       timestamptz,
+  answered_at   timestamptz,
+  paid_at       timestamptz,
+  paid_method   text,                       -- card | transfer | credit
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now()
+);
+create index if not exists shop_statements_shop_idx on public.shop_statements (shop_key, period_start desc);
+create unique index if not exists shop_statements_period_idx
+  on public.shop_statements (shop_key, period_start, period_end);
+alter table public.shop_statements enable row level security;
