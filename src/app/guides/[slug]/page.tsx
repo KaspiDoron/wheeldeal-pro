@@ -2,6 +2,8 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { GUIDES, guideBySlug, GUIDE_CATEGORY_LABELS, type GuideBlock } from "@/lib/guides";
 import { resolveSiteOrigin } from "@/lib/site";
+import { TrafficPlacement } from "@/components/traffic/TrafficPlacement";
+import { guideTargeting } from "@/lib/traffic/targeting";
 
 // Statically generated from the same array the hub and the sitemap read, so a
 // guide cannot be listed without existing or exist without being listed.
@@ -116,6 +118,8 @@ export default async function GuidePage({ params }: { params: Promise<{ slug: st
   const related = guide.related
     .map((s) => guideBySlug(s))
     .filter((g): g is NonNullable<typeof g> => Boolean(g));
+  // What this article is about, in the two dimensions traffic is reported by.
+  const targeting = guideTargeting(guide.slug);
 
   return (
     <main className="mx-auto max-w-2xl px-4 py-6 pb-safe">
@@ -164,13 +168,25 @@ export default async function GuidePage({ params }: { params: Promise<{ slug: st
         .
       </p>
 
+      {/* THE ONE MONETISED PLACEMENT, AFTER THE ARTICLE - never inside it and
+          never above it. The ads policy wants the unit "complementary, not the
+          focus", and a reader who came for the price table should reach the
+          price table first. It renders nothing at all without advertising
+          consent, so for most readers this line is simply not on the page. */}
+      <TrafficPlacement placement="guide-inline" market={targeting.market} category={targeting.category} />
+
       {related.length > 0 && (
         <section className="mt-8">
           <h2 className="text-[15px] font-extrabold text-strong">Related guides</h2>
           <ul className="mt-3 space-y-2">
             {related.map((r) => (
               <li key={r.slug}>
-                <Link
+                {/* A plain anchor, deliberately not next/link. Each guide makes
+                    its own search-ads request and Google allows ONE per
+                    document; a soft navigation would keep this document alive
+                    and make the next guide's request a second one on the same
+                    page. These pages are static, so a real load is cheap. */}
+                <a
                   href={`/guides/${r.slug}`}
                   className="block rounded-2xl border-2 border-line bg-card p-3 transition hover:border-brandblue/50"
                 >
@@ -178,7 +194,7 @@ export default async function GuidePage({ params }: { params: Promise<{ slug: st
                   <span className="mt-0.5 block text-[12px] leading-relaxed text-soft">
                     {r.summary}
                   </span>
-                </Link>
+                </a>
               </li>
             ))}
           </ul>

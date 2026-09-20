@@ -60,8 +60,14 @@ describe("REPRODUCTION: a lost ledger row left no trace at all", () => {
     expect(crumb, "a failed ledger write must leave a breadcrumb").toBeTruthy();
     const row = (crumb!.body as Record<string, unknown>[])[0];
     expect(row.kind).toBe(UNRECORDED_KIND);
+    // Keyed by the COLUMN, normalized, so the read-back - and the erasure
+    // registry, which matches agent_events on user_email - can find it. This
+    // used to assert `detail.email`, which pinned the defect: an address that
+    // lives only in free text is a row no erase and no export ever reaches.
+    expect(row.user_email).toBe("a@b.co");
     const detail = JSON.parse(String(row.detail)) as Record<string, unknown>;
-    expect(detail.email).toBe("a@b.co"); // normalized, so the read-back can match
+    expect(detail.email).toBeUndefined();
+    expect(String(row.detail).toLowerCase()).not.toContain("a@b.co");
     expect(detail.consentKind).toBe("wa_link");
     expect(detail.version).toBe("2026-07-15");
   });
@@ -99,20 +105,42 @@ describe("the fallback is not write-only", () => {
           { status: 200, headers: { "content-type": "application/json" } }
         );
       }
+      // A deliberately DUMB store: it answers every agent_events read with the
+      // same four rows, ignoring the filter. The ledger reads breadcrumbs twice
+      // (keyed by user_email, and the legacy address-in-detail shape), so this
+      // also proves a row is never counted twice and that attribution is
+      // re-checked in memory rather than trusted to the query string.
       return new Response(
         JSON.stringify([
           {
             created_at: "2026-07-20T00:00:00.000Z",
+            user_email: "a@b.co",
             detail: JSON.stringify({
-              email: "a@b.co",
               consentKind: "wa_link",
               version: "v1",
               at: "2026-07-20T00:00:00.000Z",
             }),
           },
-          // Somebody else's breadcrumb must not appear in this user's proof view.
+          // Written before the column was stamped - still this person's.
+          {
+            created_at: "2026-07-10T00:00:00.000Z",
+            user_email: null,
+            detail: JSON.stringify({
+              email: "a@b.co",
+              consentKind: "deal_terms",
+              version: "v1",
+              at: "2026-07-10T00:00:00.000Z",
+            }),
+          },
+          // Somebody else's breadcrumb must not appear in this user's proof
+          // view - in either shape.
           {
             created_at: "2026-07-21T00:00:00.000Z",
+            user_email: "other@x.co",
+            detail: JSON.stringify({ consentKind: "terms", version: "v1" }),
+          },
+          {
+            created_at: "2026-07-22T00:00:00.000Z",
             detail: JSON.stringify({ email: "other@x.co", consentKind: "terms", version: "v1" }),
           },
         ]),
@@ -121,9 +149,10 @@ describe("the fallback is not write-only", () => {
     }) as unknown as typeof fetch;
 
     const rows = await consentLedger("A@B.co");
-    expect(rows.map((r) => r.kind)).toEqual(["wa_link", "terms"]); // newest first
+    expect(rows.map((r) => r.kind)).toEqual(["wa_link", "deal_terms", "terms"]); // newest first
+    expect(rows[1].degraded).toBe(true);
+    expect(rows[2].degraded).toBeUndefined();
     expect(rows[0].degraded).toBe(true);
-    expect(rows[1].degraded).toBeUndefined();
     expect(rows.some((r) => r.kind === "terms" && r.degraded)).toBe(false);
   });
 });

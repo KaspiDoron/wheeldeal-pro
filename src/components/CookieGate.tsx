@@ -31,9 +31,11 @@ import {
 import { safeNext } from "@/lib/cookies/required";
 import {
   announceConsent,
+  consentProofContext,
   dropAnalyticsId,
   openCookiePanel,
   purgeDenied,
+  receiptIdForSave,
   writeConsentCookie,
 } from "@/lib/cookies/client";
 
@@ -66,7 +68,7 @@ export function CookieGate() {
       // succeeds even if the durable ledger write is still in flight or the
       // connection is dead. A person held at a gate by a spinner on hotel wifi
       // will not wait patiently, they will leave.
-      const consent = makeConsent(grants, choice);
+      const consent = makeConsent(grants, choice, Date.now(), receiptIdForSave());
       writeConsentCookie(encodeCookieConsent(consent));
       purgeDenied(consent);
       if (!consent.grants.analytics) dropAnalyticsId();
@@ -76,7 +78,7 @@ export function CookieGate() {
         await fetch("/api/cookies/consent", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ choice, grants }),
+          body: JSON.stringify({ choice, grants, ...consentProofContext() }),
         });
       } catch {
         /* the cookie stands; the ledger row is re-attempted on the next save */

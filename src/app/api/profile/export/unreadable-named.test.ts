@@ -41,7 +41,14 @@ vi.mock("@/lib/runtime-config", () => ({
     // PostgREST answers 400 + 42703, which the strict read maps to "missing".
     // The table itself reads fine with select=*.
     if (mode === "stale-select" && !/select=\*/.test(query)) return { error: "missing" as const };
-    return { rows: state.rows.get(table) ?? [] };
+    // The export PAGES now (order + limit + offset, until an empty page), so
+    // the stand-in has to honour the window. A store that answers the same
+    // rows at every offset is a table that never ends - the assembly would
+    // read it to the ceiling and report every row twenty times over.
+    const all = state.rows.get(table) ?? [];
+    const offset = Number(/(?:^|&)offset=(\d+)/.exec(query)?.[1] ?? 0);
+    const limit = Number(/(?:^|&)limit=(\d+)/.exec(query)?.[1] ?? all.length);
+    return { rows: all.slice(offset, offset + limit) };
   },
 }));
 

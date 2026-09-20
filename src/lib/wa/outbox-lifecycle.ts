@@ -209,7 +209,6 @@ export async function recordOutboundAnchor(
       vendor_id: String(who.vendorId ?? ""),
       vendor_name: String(who.vendorName ?? who.toNumber),
       detail: JSON.stringify({
-        email: who.senderKey,
         channel: who.channel ?? "personal-wa",
         waMessageId: row.wa_message_id ?? null,
         kind: typeof raw.kind === "string" ? raw.kind : null,

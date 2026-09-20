@@ -24,7 +24,7 @@ import "server-only";
 // the durable record did not land. That is the house rule for writes here:
 // report what PERSISTED, never optimistic success.
 
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { recordConsent, resetConsentCache, type ConsentKind } from "../consent";
 import {
   ANALYTICS_COOKIE,
@@ -65,9 +65,34 @@ export function readCookieConsent(): CookieConsent | null {
   }
 }
 
+/**
+ * Is this request carrying a Global Privacy Control signal (`Sec-GPC: 1`)?
+ *
+ * The header is the server-visible half of `navigator.globalPrivacyControl`.
+ * Unreadable headers answer false - GPC only ever REMOVES a permission, so a
+ * request we cannot inspect is simply governed by the cookie, which already
+ * defaults to no.
+ */
+export function requestHasGpc(): boolean {
+  try {
+    return headers().get("sec-gpc") === "1";
+  } catch {
+    return false;
+  }
+}
+
 /** Is this category granted on this request? Defaults to no. */
 function serverAllows(category: CookieCategory): boolean {
+  // The same rule as the pre-paint gate and `clientAllows`: a GPC signal beats
+  // a stored yes for advertising, and touches nothing else.
+  if (category === "marketing" && requestHasGpc()) return false;
   return allows(readCookieConsent(), category);
+}
+
+/** May advertising - and the search-traffic monetisation that rides on the same
+ *  consent - run for this request? The cookie AND no GPC signal. */
+export function marketingAllowed(): boolean {
+  return serverAllows("marketing");
 }
 
 /**

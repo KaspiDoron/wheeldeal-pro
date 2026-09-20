@@ -267,6 +267,13 @@ export const EXCLUDED_TABLES: Record<string, string> = {
   commission_ledger: "the shop's billing record - carries no traveller key by design; the pointer lives on rental_claims and is erased with it",
   shop_statements: "shop-side monthly statement, keyed by the shop and opened by its own token",
   market_floor_prices: "market aggregates, no user key",
+  // THE THREE ANONYMOUS-VISITOR TABLES. None can be walked by an email because
+  // none holds one - by construction, not by omission (see the schema block).
+  // An account erasure therefore has nothing to find in them, and saying so
+  // here is the registry decision the completeness test demands.
+  visitor_consent_events: "signed-OUT visitors only, keyed by sha256 of the random receipt id in their own cookie - no email, phone, IP or user agent; pruned at 730 days",
+  traffic_events: "anonymous search-traffic log - closed-vocabulary columns and an 8-hex session hash that rotates daily; no user key; pruned on the long window",
+  traffic_revenue: "the partner's payment report by day and sub-id - money history with no visitor in it; imported_by is an OPERATOR, not a data subject",
   waba_agencies: "shop-side WABA partners",
   wa_suppressions: "shop-side opt-outs - deleting them on user erasure would RE-CONTACT the shop",
   agent_tactics: "owner-authored playbook content",

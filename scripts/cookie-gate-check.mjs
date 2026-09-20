@@ -19,7 +19,8 @@
 //     because both copies moved together.
 //
 // So this boots the real production build, drives real Chromium, and COUNTS
-// REQUESTS TO googlesyndication.com under four cookie states. It is the same
+// REQUESTS TO GOOGLE'S AD HOSTS - the display SDK on /welcome, and the search-
+// ads script on a real guide - under each cookie state, region and GPC signal. It is the same
 // discipline as scripts/mobile-check.mjs, applied to the one behaviour in this
 // app that is a promise to a regulator rather than to a user's eyes.
 //
@@ -50,6 +51,23 @@ const PORT = Number(process.env.COOKIE_CHECK_PORT || 3401);
 const SESSION_SECRET = "cookie-gate-check-secret-not-a-real-one";
 const BASE = process.env.COOKIE_CHECK_URL || `http://127.0.0.1:${PORT}`;
 const AD_HOST = "googlesyndication.com";
+
+// THE SECOND GOOGLE PRODUCT. Sponsored search (lib/traffic) loads a DIFFERENT
+// script from a different host - google.com/adsense/search/ads.js, rendering
+// through syndicatedsearch.goog - and only on content pages. A check that
+// watched googlesyndication.com on /welcome alone would have reported "no ad
+// requests without consent" while a guide page fetched Google's search script
+// for every visitor. The same promise, so the same proof.
+const SEARCH_AD_MARKERS = ["google.com/adsense/search", "syndicatedsearch.goog", "adsensecustomsearchads.com"];
+const GUIDE_PATH = "/guides/thailand-scooter-rental-prices";
+// A syntactically valid, obviously fake AFS partner, in TEST mode - Google's
+// `adtest: on`, which can never count an impression. The requests are aborted
+// before they leave anyway; what is measured is whether the browser TRIED.
+const TRAFFIC_ENV = {
+  TRAFFIC_MODE: "test",
+  TRAFFIC_PARTNERS: "gatecheck|afs|Gate check|on|pub-0000000000000000:1234567890||1",
+};
+const isSearchAd = (url) => SEARCH_AD_MARKERS.some((m) => url.includes(m));
 
 // The cookie VALUES are built here with the same encoding lib/cookies/consent
 // uses, rather than pasted as literals: a fixture that drifts from the encoder
@@ -133,8 +151,18 @@ function stopServer(server) {
  * the browser TRIED - which `page.on("request")` sees before the route handler
  * runs.
  */
-async function visit(browser, cookie) {
-  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
+async function visit(browser, cookie, opts = {}) {
+  const { path = "/welcome", timezoneId = "Asia/Bangkok", gpc = false } = opts;
+  // The time zone is what the sponsored-search unit reads to decide whether
+  // Google will serve at all (lib/traffic/region.ts), so it is part of the
+  // fixture rather than whatever the CI box happens to be set to.
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, timezoneId });
+  if (gpc) {
+    await ctx.addInitScript(() => {
+      Object.defineProperty(navigator, "globalPrivacyControl", { value: true, configurable: true });
+    });
+    await ctx.setExtraHTTPHeaders({ "Sec-GPC": "1" });
+  }
   if (cookie) {
     await ctx.addCookies([
       { name: "wd_cookie_prefs", value: cookie, domain: "127.0.0.1", path: "/" },
@@ -142,17 +170,21 @@ async function visit(browser, cookie) {
   }
   const page = await ctx.newPage();
   const adRequests = [];
+  const searchRequests = [];
   page.on("request", (r) => {
     if (r.url().includes(AD_HOST)) adRequests.push(r.url());
+    if (isSearchAd(r.url())) searchRequests.push(r.url());
   });
   await page.route(`**${AD_HOST}**`, (r) => r.abort());
+  await page.route((url) => isSearchAd(url.href), (r) => r.abort());
 
   const errors = [];
   page.on("pageerror", (e) => errors.push(String(e)));
 
-  await page.goto(`${BASE}/welcome`, { waitUntil: "domcontentloaded" });
-  // The banner mounts on a 400ms timer; give the injected script time too.
-  await page.waitForTimeout(1_600);
+  await page.goto(`${BASE}${path}`, { waitUntil: "domcontentloaded" });
+  // The banner mounts on a 400ms timer; give the injected script time too. A
+  // guide also has a config round trip before its unit may request anything.
+  await page.waitForTimeout(path === "/welcome" ? 1_600 : 2_600);
 
   const banner = await page
     .getByRole("region", { name: /cookie choices/i })
@@ -160,7 +192,7 @@ async function visit(browser, cookie) {
     .catch(() => false);
 
   await ctx.close();
-  return { adRequests: adRequests.length, banner, errors };
+  return { adRequests: adRequests.length, searchRequests: searchRequests.length, banner, errors };
 }
 
 /**
@@ -216,7 +248,7 @@ async function run() {
     server = spawn("npx", ["next", "start", "-p", String(PORT)], {
       stdio: "ignore",
       detached: true,
-      env: { ...process.env, NODE_ENV: "production", SESSION_SECRET },
+      env: { ...process.env, NODE_ENV: "production", SESSION_SECRET, ...TRAFFIC_ENV },
     });
     if (!(await waitForServer(BASE))) {
       stopServer(server);
@@ -249,8 +281,14 @@ async function run() {
     corrupt: "not-a-real-consent-value",
   };
 
-  const browser = await chromium.launch({ executablePath: chromiumPath() });
+  // LAUNCHED INSIDE THE TRY. It used to sit one line above it, so a launch
+  // failure (no Chromium installed - the first thing that happens on a fresh
+  // laptop) threw past the `finally` and left the server this script booted
+  // running on the port forever. The next run then refused to start because
+  // "something is already listening", and blamed the wrong thing.
+  let browser = null;
   try {
+    browser = await chromium.launch({ executablePath: chromiumPath() });
     // 1. NEVER ASKED. The case that decides whether this feature is worth
     //    anything: a first-time visitor must cost Google nothing.
     const fresh = await visit(browser, null);
@@ -282,6 +320,35 @@ async function run() {
     ok("corrupt cookie: re-asks", corrupt.banner === true);
     ok("corrupt cookie: no page errors", corrupt.errors.length === 0, corrupt.errors[0]);
 
+    // 5b. SPONSORED SEARCH, on a real guide. Same promise, second product.
+    const guideFresh = await visit(browser, null, { path: GUIDE_PATH });
+    ok("guide · no cookie: no search-ads request", guideFresh.searchRequests === 0, `saw ${guideFresh.searchRequests}`);
+    ok("guide · no cookie: no display-ads request", guideFresh.adRequests === 0, `saw ${guideFresh.adRequests}`);
+    ok("guide · no cookie: no page errors", guideFresh.errors.length === 0, guideFresh.errors[0]);
+
+    const guideRejected = await visit(browser, COOKIES.denyAll, { path: GUIDE_PATH });
+    ok("guide · reject-all: no search-ads request", guideRejected.searchRequests === 0, `saw ${guideRejected.searchRequests}`);
+
+    // Accepting must actually TURN IT ON, or the feature is a permanent zero.
+    // Only provable against the server this script booted, where the partner
+    // config is known; an external COOKIE_CHECK_URL has whatever it has.
+    if (!process.env.COOKIE_CHECK_URL) {
+      const guideAccepted = await visit(browser, COOKIES.allowAll, { path: GUIDE_PATH });
+      ok("guide · accept-all, outside the TCF regions: the search script IS requested", guideAccepted.searchRequests > 0, `saw ${guideAccepted.searchRequests}`);
+      ok("guide · accept-all: no page errors", guideAccepted.errors.length === 0, guideAccepted.errors[0]);
+
+      // Google serves no search ads in the EEA/UK/CH without a certified CMP,
+      // and none is installed - so a consenting visitor in Berlin must cost
+      // Google nothing either. Consent is necessary here, not sufficient.
+      const guideBerlin = await visit(browser, COOKIES.allowAll, { path: GUIDE_PATH, timezoneId: "Europe/Berlin" });
+      ok("guide · accept-all, in a TCF region with no certified CMP: no search-ads request", guideBerlin.searchRequests === 0, `saw ${guideBerlin.searchRequests}`);
+    }
+
+    // A Global Privacy Control signal beats a stored yes - for BOTH products.
+    const guideGpc = await visit(browser, COOKIES.allowAll, { path: GUIDE_PATH, gpc: true });
+    ok("guide · accept-all + GPC: no search-ads request", guideGpc.searchRequests === 0, `saw ${guideGpc.searchRequests}`);
+    ok("guide · accept-all + GPC: no display-ads request", guideGpc.adRequests === 0, `saw ${guideGpc.adRequests}`);
+
     // 6. THE MANDATORY-ESSENTIALS GATE, end to end through real middleware.
     //
     // A signed-in request to a gated path with no decision must land on
@@ -312,7 +379,7 @@ async function run() {
       held.to
     );
   } finally {
-    await browser.close();
+    await browser?.close().catch(() => undefined);
     stopServer(server);
   }
 

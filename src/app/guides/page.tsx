@@ -31,8 +31,10 @@ export default function GuidesPage() {
       <p className="mt-2 text-[14px] leading-relaxed text-soft">
         Everything below is the same ground our agents negotiate on every day -
         real price bands, the deposits that are normal, and the handful of things
-        genuinely worth checking before you ride away. No affiliate links, no
-        &ldquo;top 10 shops&rdquo;.
+        genuinely worth checking before you ride away. No paid rankings and no
+        &ldquo;top 10 shops&rdquo; - nobody pays to be mentioned here. Some pages
+        end with sponsored search suggestions; they are labelled, and they only
+        appear if you allowed advertising cookies.
       </p>
       {CATEGORY_ORDER.map((cat) => {
         const inCat = GUIDES.filter((g) => g.category === cat);

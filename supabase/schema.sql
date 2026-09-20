@@ -1119,6 +1119,38 @@ create index if not exists agent_events_to_number_idx
 create index if not exists agent_events_user_idx
   on public.agent_events (user_email, kind, created_at desc);
 
+-- BACKFILL: agent_events rows that NAMED A PERSON IN THE PAYLOAD, NOT THE KEY.
+--
+-- Four writers (consent-unrecorded, localize-fallback, outbound-log-failed,
+-- send-failed) put the traveller's address inside the JSON `detail` text. Two
+-- of them left `user_email` NULL as well - and the erasure registry finds this
+-- table's rows by `user_email` alone, so those rows outlived the account they
+-- named. The writers are fixed (agent-events-keyed.test.ts guards the class);
+-- this repairs the rows written before the fix, so they become erasable and
+-- exportable like every other row about a person.
+--
+-- REGEX, NOT A ::jsonb CAST, AND THAT IS NOT A STYLE CHOICE. Every one of these
+-- writers truncates `detail` at 800 characters, so some rows hold JSON cut off
+-- mid-string. A cast raises on the first such row and takes the whole schema
+-- run down with it. A regex cannot fail: it moves what it finds and leaves the
+-- rest alone.
+--
+-- Idempotent: once a row is repaired its detail no longer matches, so re-running
+-- this file is a no-op. Both key positions are handled so the JSON that remains
+-- stays valid - `{"email":"x","a":1}` and `{"a":1,"email":"x"}` both end as
+-- `{"a":1}`.
+update public.agent_events
+   set user_email = coalesce(
+         nullif(user_email, ''),
+         lower(substring(detail from '"email"\s*:\s*"([^"]+)"'))
+       ),
+       detail = regexp_replace(
+                  regexp_replace(detail, '"email"\s*:\s*"[^"]*"\s*,\s*', ''),
+                  ',?\s*"email"\s*:\s*"[^"]*"', ''
+                )
+ where kind in ('consent-unrecorded', 'localize-fallback', 'outbound-log-failed', 'send-failed')
+   and detail ~ '"email"\s*:\s*"';
+
 -- Session attribution on offers (exact rival grouping per search session).
 alter table public.offers add column if not exists search_id bigint;
 create index if not exists offers_search_idx on public.offers (search_id);
@@ -2140,3 +2172,99 @@ create index if not exists shop_statements_shop_idx on public.shop_statements (s
 create unique index if not exists shop_statements_period_idx
   on public.shop_statements (shop_key, period_start, period_end);
 alter table public.shop_statements enable row level security;
+
+-- ---------------------------------------------------------------------------
+-- SEARCH-TRAFFIC MONETISATION (visitor_consent_events, traffic_events,
+-- traffic_revenue) - the first tables in this schema about people who have
+-- NOT signed in
+-- ---------------------------------------------------------------------------
+--
+-- Every other user-keyed table here hangs off an email. The visitors these
+-- describe have none: they arrive on a guide from a search engine, answer the
+-- cookie banner, maybe follow a search suggestion, and leave. So nothing below
+-- can hold an email, a phone number, an IP address or a user agent string, and
+-- none of it does - the columns are closed vocabularies, booleans, hashes and
+-- dates.
+
+-- PROOF OF AN ANONYMOUS VISITOR'S COOKIE CHOICE.
+--
+-- consent_events.email is NOT NULL, so until this table existed a signed-out
+-- visitor's choice lived only in their own cookie - and signed-out visitors are
+-- exactly the population search advertising is shown to. Google's EU user
+-- consent policy requires RECORDS of consent; "it was in their browser" is not
+-- one.
+--
+-- visitor_key is sha256 of the random receipt id carried inside the (strictly
+-- necessary) wd_cookie_prefs cookie. The raw id never reaches the database, so
+-- a row can be FOUND by a visitor presenting their own cookie and cannot be
+-- turned back into one. One row per save, never an update: the same
+-- append-only shape as consent_events, for the same reason.
+create table if not exists public.visitor_consent_events (
+  id              bigint generated always as identity primary key,
+  visitor_key     text not null,              -- sha256(receipt id), hex
+  policy_version  text not null,              -- COOKIE_POLICY_VERSION they saw
+  source          text not null,              -- accept-all | reject-all | custom
+  preferences     boolean not null,
+  analytics       boolean not null,
+  marketing       boolean not null,
+  gpc             boolean not null default false, -- the request carried Sec-GPC: 1
+  region          text not null default 'unknown', -- tcf | other | unknown
+  lang            text,                        -- interface language shown, 2-8 chars
+  copy_hash       text,                        -- sha256 of the category copy shown
+  created_at      timestamptz not null default now()
+);
+create index if not exists visitor_consent_events_key_idx
+  on public.visitor_consent_events (visitor_key, created_at desc);
+create index if not exists visitor_consent_events_created_idx
+  on public.visitor_consent_events (created_at desc);
+alter table public.visitor_consent_events enable row level security;
+
+-- THE FIRST-PARTY TRAFFIC LOG. What this site can see for itself: a search
+-- unit loaded, a visitor arrived on /search from one, a partner link was
+-- followed. Written only while advertising consent is in force.
+--
+-- It cannot see clicks INSIDE Google's unit - that is a cross-origin iframe,
+-- and tracking clicks in it is a Restricted Access Feature this account does
+-- not hold. `session` is the 8-hex hash from lib/traffic/subid.ts: it rotates
+-- every UTC day, so a row cannot be joined to the same visitor tomorrow.
+create table if not exists public.traffic_events (
+  id          bigint generated always as identity primary key,
+  day         date not null,
+  kind        text not null,                  -- unit_loaded | unit_empty | serp_view | link_click
+  placement   text not null,                  -- a key of PLACEMENTS
+  market      text not null default 'xx',     -- ISO alpha-2, or xx
+  category    text not null default 'other',
+  partner     text not null,                  -- a TRAFFIC_PARTNERS id
+  sub_id      text not null,
+  session     text not null,                  -- 8 hex, rotates daily
+  -- ONLY ever a term Google issued (a serp_view carrying Google's own click
+  -- token). A query a person typed is never stored: that is free text from a
+  -- human and can be anything, including somebody's name.
+  term        text,
+  created_at  timestamptz not null default now()
+);
+create index if not exists traffic_events_day_idx
+  on public.traffic_events (day desc, placement, market);
+create index if not exists traffic_events_created_idx
+  on public.traffic_events (created_at);
+alter table public.traffic_events enable row level security;
+
+-- WHAT THE PARTNER SAYS IT PAID FOR. Imported from the partner's report by an
+-- owner; reconciled against traffic_events by lib/traffic/revenue.ts. The
+-- unique index makes a re-import of the same report a no-op instead of
+-- doubling a month's revenue.
+create table if not exists public.traffic_revenue (
+  id           bigint generated always as identity primary key,
+  partner      text not null,
+  day          date not null,
+  sub_id       text not null,
+  clicks       integer not null default 0,
+  revenue      numeric(12,4) not null default 0,
+  currency     text not null default 'USD',
+  imported_by  text not null,                 -- the OPERATOR who imported it
+  created_at   timestamptz not null default now()
+);
+create unique index if not exists traffic_revenue_row_idx
+  on public.traffic_revenue (partner, day, sub_id);
+create index if not exists traffic_revenue_day_idx on public.traffic_revenue (day desc);
+alter table public.traffic_revenue enable row level security;

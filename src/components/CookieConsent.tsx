@@ -46,10 +46,14 @@ import type { CookieCategory, CookieEntry } from "@/lib/cookies/manifest";
 import {
   COOKIE_PANEL_EVENT,
   announceConsent,
+  clientAllows,
+  consentProofContext,
   dropAnalyticsId,
   purgeDenied,
+  receiptIdForSave,
   writeConsentCookie,
 } from "@/lib/cookies/client";
+import { syncAdConsent } from "@/lib/cookies/ad-sdk";
 
 interface ConsentPayload {
   needsChoice: boolean;
@@ -163,10 +167,18 @@ export function CookieConsent() {
       // route then writes the identical cookie server-side and adds the ledger
       // row; if that fails, the note below says so, and the choice is still in
       // force because the cookie is what every gate reads.
-      const consent = makeConsent(grants, choice);
+      // Read BEFORE the new cookie lands: whether advertising was in force up
+      // to this tap is what decides if a running SDK has to be got rid of.
+      const wasMarketing = clientAllows("marketing");
+      const consent = makeConsent(grants, choice, Date.now(), receiptIdForSave());
       writeConsentCookie(encodeCookieConsent(consent));
       purgeDenied(consent);
       if (!consent.grants.analytics) dropAnalyticsId();
+      // THE PAGE FOLLOWS THE CHOICE, NOT THE NEXT PAGE LOAD. Granting loads
+      // Google's SDK now (the landing pageview is the one that counts);
+      // withdrawing asks for a reload, because nothing else removes a running
+      // third-party script and its iframes - see lib/cookies/ad-sdk.ts.
+      const pageAction = syncAdConsent(consent, wasMarketing);
       announceConsent(consent);
       setShowBanner(false);
       setShowPanel(false);
@@ -175,7 +187,7 @@ export function CookieConsent() {
         const res = await fetch("/api/cookies/consent", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ choice, grants }),
+          body: JSON.stringify({ choice, grants, ...consentProofContext() }),
         });
         const d = (await res.json().catch(() => null)) as
           | { ok?: boolean; error?: string; note?: string; grants?: CookieGrants }
@@ -198,6 +210,10 @@ export function CookieConsent() {
         );
       } finally {
         setSaving(false);
+        // AFTER the request settles, never before: a reload mid-flight aborts
+        // the ledger write, and a withdrawal is the one choice that most needs
+        // its proof.
+        if (pageAction === "reload") window.location.reload();
       }
     },
     [t]

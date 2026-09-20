@@ -101,13 +101,23 @@ describe("AdSense is verifiable on a cold, anonymous fetch", () => {
   });
 
   it("the site tag is unconditional", () => {
-    // Read raw here - the comment stripper would eat the `//` in the URL.
+    // "Unconditional" here means: not hostage to an ENV VAR. The tag is built
+    // from the ADSENSE_PUBLISHER constant, so a deploy with no ADSENSE_CLIENT
+    // set still carries the right account. (Whether it LOADS is the visitor's
+    // consent, which is a different question and lib/cookies/prepaint.ts's.)
+    //
+    // The gate moved out of the layout into that module so it could be run
+    // under test, so this pin follows it: the layout hands the constant over,
+    // and the module owns the URL. Read raw - the comment stripper would eat
+    // the `//` in the URL.
     const l = read("src/app/layout.tsx");
-    expect(l).toMatch(
-      /pagead2\.googlesyndication\.com\/pagead\/js\/adsbygoogle\.js\?client=\$\{ADSENSE_PUBLISHER\}/
-    );
+    expect(l).toMatch(/buildAdConsentScript\(ADSENSE_PUBLISHER\)/);
+    const gate = read("src/lib/cookies/prepaint.ts");
+    expect(gate).toMatch(/pagead2\.googlesyndication\.com\/pagead\/js\/adsbygoogle\.js/);
+    expect(gate).toMatch(/\?client=\$\{client\}/);
     // The old shape: `{process.env.ADSENSE_CLIENT && <script .../>}`.
     expect(l).not.toMatch(/process\.env\.ADSENSE_CLIENT\s*&&/);
+    expect(gate).not.toMatch(/process\.env/);
   });
 
   it("the account meta tag is on every page", () => {

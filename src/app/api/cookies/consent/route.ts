@@ -2,16 +2,18 @@
 //
 // The banner is the first thing a visitor meets, on /welcome, before any
 // account exists - so this route cannot be session-gated. What it does with a
-// session is add to the record, never gate it: signed in, the choice ALSO lands
-// in the consent ledger (provable, follows the account to every device, shows
-// up in the DSAR export); signed out, the cookie is the whole record, which is
-// the most any system can honestly hold about someone who has not identified
-// themselves.
+// session is choose WHICH ledger the proof lands in, never whether there is
+// one: signed in, the choice goes to the account's consent ledger (follows the
+// account to every device, shows up in the DSAR export); signed out, it goes to
+// the visitor ledger, keyed by a hash of the random receipt id in the visitor's
+// own cookie (lib/cookies/visitor-ledger.ts). Signed-out used to mean "the
+// cookie is the whole record" - which left the very visitors advertising is
+// shown to as the only ones whose consent could not be proven.
 //
 // WHAT "SAVED" MEANS HERE, EXACTLY:
 //   ok:true, durable:true   - cookie set, and the ledger rows landed.
-//   ok:true, durable:false  - cookie set; the ledger is unreachable or the
-//                             visitor is signed out. THE CHOICE IS IN FORCE -
+//   ok:true, durable:false  - cookie set; the ledger is unreachable. THE
+//                             CHOICE IS IN FORCE -
 //                             the cookie is what every gate in the app reads -
 //                             but we cannot prove it later, and the response
 //                             says so rather than pretending.
@@ -32,6 +34,7 @@ import {
   encodeCookieConsent,
   makeConsent,
   needsCookieChoice,
+  newReceiptId,
   normalizeGrants,
   type CookieConsent,
 } from "@/lib/cookies/consent";
@@ -46,9 +49,12 @@ import {
   readAnalyticsId,
   readCookieConsent,
   recordCookieConsent,
+  requestHasGpc,
   setConsentCookie,
   syncAnalyticsCookie,
 } from "@/lib/cookies/server";
+import { recordVisitorConsent } from "@/lib/cookies/visitor-ledger";
+import { consentRegion } from "@/lib/traffic/region";
 
 export const dynamic = "force-dynamic";
 
@@ -101,6 +107,8 @@ export async function POST(req: Request) {
   const body = (await req.json().catch(() => null)) as {
     choice?: unknown;
     grants?: unknown;
+    timeZone?: unknown;
+    lang?: unknown;
   } | null;
   if (!body) return NextResponse.json({ error: "Malformed request." }, { status: 400 });
 
@@ -119,7 +127,12 @@ export async function POST(req: Request) {
         ? { ...DENY_ALL }
         : normalizeGrants(body.grants);
 
-  const consent = makeConsent(grants, choice);
+  // THE RECEIPT ID IS KEPT, NOT RE-MINTED. The client writes the cookie before
+  // it calls this route, so the request already carries the id this browser
+  // uses; reusing it keeps every choice made on this browser in ONE chain in the
+  // visitor ledger. A fresh id per save would make a withdrawal look like a
+  // stranger's first visit, and the history is the whole point of a ledger.
+  const consent = makeConsent(grants, choice, Date.now(), readCookieConsent()?.id ?? newReceiptId());
   const encoded = encodeCookieConsent(consent);
 
   // THE COOKIE FIRST. Whatever happens below, the choice is in force from here.
@@ -143,6 +156,17 @@ export async function POST(req: Request) {
   let durable = false;
   if (session?.email) {
     durable = await recordCookieConsent(session.email, consent).catch(() => false);
+  } else {
+    // One ledger or the other, never both: filing a signed-in person's choice
+    // under a receipt hash as well would create a second record of them that
+    // no erasure walks.
+    const country =
+      req.headers.get("cf-ipcountry") ?? req.headers.get("x-vercel-ip-country") ?? req.headers.get("x-appengine-country");
+    durable = await recordVisitorConsent(consent, {
+      gpc: requestHasGpc(),
+      region: consentRegion({ country, timeZone: typeof body.timeZone === "string" ? body.timeZone : null }),
+      lang: typeof body.lang === "string" ? body.lang : null,
+    }).catch(() => false);
   }
 
   return NextResponse.json({

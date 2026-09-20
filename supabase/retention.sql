@@ -269,11 +269,26 @@ begin
   delete from public.searches where created_at < cutoff_long;
   get diagnostics n = row_count; others := others || jsonb_build_object('searches', n);
 
+  -- THE ANONYMOUS TRAFFIC LOG, on the long window. A year is one full season
+  -- to compare against, which is the longest question placement reporting asks.
+  delete from public.traffic_events where created_at < cutoff_long;
+  get diagnostics n = row_count; others := others || jsonb_build_object('traffic_events', n);
+
+  -- ANONYMOUS CONSENT PROOF: two years, fixed - NOT a multiple of retain_days.
+  -- The cookie a row proves lives 180 days, so every row is long dead as a
+  -- live record well before this; two years is the window in which a
+  -- regulator or an ad partner could still ask what a visitor was shown and
+  -- what they chose. Tying it to retain_days would let somebody shorten the
+  -- message retention and silently shorten the consent proof with it.
+  delete from public.visitor_consent_events where created_at < now() - interval '730 days';
+  get diagnostics n = row_count; others := others || jsonb_build_object('visitor_consent_events', n);
+
   -- DELIBERATELY NOT PRUNED: bookings (the traveller's own record of real
   -- rentals), consent_events (proof of consent for the life of the account -
   -- erased with the account by the erasure registry), deal_memory (already
   -- de-identified), wa_sessions / push_subscriptions / wa_recipient_state /
-  -- whatsapp_number_reputation (live operational state), game_scores (tiny).
+  -- whatsapp_number_reputation (live operational state), game_scores (tiny),
+  -- traffic_revenue (the partner's payment record - money history, no visitor).
 
   -- HEARTBEAT: one agent_events row per run, so the app can OBSERVE that
   -- retention is actually scheduled and running (pg_cron degrades to a NOTICE

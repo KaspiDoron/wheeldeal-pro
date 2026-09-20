@@ -263,7 +263,7 @@ describe("legal text and plumbing agree", () => {
     // CURRENT version - what it guards is that the version MOVES whenever the
     // policy text does, since needsReacceptance is the only thing that walks
     // existing users through new terms.
-    expect(legal).toMatch(/TERMS_VERSION = "2026-09-16"/);
+    expect(legal).toMatch(/TERMS_VERSION = "2026-09-20"/);
   });
 
   it("section 8 replaced the blanket 'not sold' with the honest carve-out", () => {

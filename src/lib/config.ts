@@ -112,6 +112,8 @@ const DOC_URLS: Record<string, string> = {
   PAYPAL_ENV: "https://developer.paypal.com/dashboard/applications/live",
   ADSENSE_CLIENT: "https://www.google.com/adsense/",
   ADSENSE_SLOT: "https://www.google.com/adsense/new/u/0/pub/ads/myads/units",
+  TRAFFIC_PARTNERS: "https://www.google.com/adsense/new/u/0/pub/afs",
+  TRAFFIC_TCF_CMP: "https://support.google.com/adsense/answer/14325056",
   TWITTER_HANDLE: "https://x.com/settings/profile",
 };
 
@@ -322,6 +324,13 @@ const KEYS: {
   // data-ad-slot only when a caller passed one and none ever did, so the free
   // tier reserved its ad space, showed its placeholder, and earned nothing.
   { name: "ADSENSE_SLOT", label: "Google AdSense Ad Unit ID (numeric, from a Display unit)", scope: "billing", editable: true, secret: false },
+  // SEARCH-TRAFFIC MONETISATION (lib/traffic). Three values, all public by
+  // construction - a publisher id and a style id ship in the page source the
+  // moment a unit renders - so they are secret:false and an owner can read
+  // back what is set. OFF unless TRAFFIC_MODE says otherwise.
+  { name: "TRAFFIC_MODE", label: "Search traffic mode ('off' | 'test' | 'live'; blank = off. 'test' serves Google test ads that earn nothing)", scope: "billing", editable: true, secret: false },
+  { name: "TRAFFIC_PARTNERS", label: "Search traffic partners, one per line: id|afs|label|on|pub-XXXXXXXXXXXXXXXX:styleId[:channel]|markets|share  or  id|link|label|on|https://...?q={q}&subid={subid}|markets|share", scope: "billing", editable: true, secret: false },
+  { name: "TRAFFIC_TCF_CMP", label: "Google-certified TCF consent platform installed ('none' | 'google'; blank = none. Until 'google', search ads are not requested in the EEA, UK or Switzerland)", scope: "billing", editable: true, secret: false },
   { name: "TWITTER_HANDLE", label: "X (Twitter) handle (@wheeldeal)", scope: "auth", editable: true, secret: false },
   // The legal entity the Terms, the Privacy Policy and every indemnity clause
   // protect. It was a placeholder constant with a TODO on it, so registering a
