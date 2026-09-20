@@ -41,6 +41,24 @@ describe("guide search - the organic results behind /search", () => {
     expect([...hits].sort((a, b) => b.score - a.score)).toEqual(hits);
   });
 
+  // Seen in a screenshot, not in an assertion: a title has no full stop, so
+  // "title summary sentence" split as one sentence and every excerpt opened
+  // with its own title repeated.
+  it("never quotes the title back as the excerpt", () => {
+    for (const q of ["thailand scooter rental price", "scooter rental deposit", "international driving permit", "negotiate"]) {
+      for (const h of searchGuides(q)) {
+        expect(h.excerpt.startsWith(h.title), `${q} -> ${h.slug}`).toBe(false);
+        expect(h.excerpt.includes(`${h.title} ${h.title}`), `${q} -> ${h.slug}`).toBe(false);
+      }
+    }
+  });
+
+  it("quotes prose, not a label - an excerpt is a sentence, never an FAQ question", () => {
+    for (const h of searchGuides("how to negotiate a scooter rental")) {
+      expect(h.excerpt.trimEnd().endsWith("?"), h.slug).toBe(false);
+    }
+  });
+
   it("cleans a raw query parameter", () => {
     expect(cleanQuery("  scooter\n\trental  ")).toBe("scooter rental");
     expect(cleanQuery("x".repeat(500)).length).toBe(120);

@@ -52,10 +52,31 @@ interface Indexed {
   summary: string[];
   headings: string[];
   body: string[];
-  text: string;
+  /** Real prose sentences an excerpt may quote - see `proseOf`. */
+  sentences: string[];
 }
 
 let index: Indexed[] | null = null;
+
+/**
+ * The sentences an excerpt may quote: paragraphs, callouts and FAQ ANSWERS.
+ *
+ * Not `guideText()`. That is every visible word joined with spaces, which is
+ * right for counting and wrong for quoting: a title has no full stop, so
+ * "title summary first-sentence" split as ONE sentence, and every result's
+ * excerpt opened with its own title said twice. (Found by looking at a
+ * screenshot - no assertion about length or overflow could have seen it.)
+ * Headings, table cells, list fragments and FAQ questions are left out for the
+ * same reason: they are labels, not sentences that explain a match.
+ */
+function proseOf(guide: Guide): string[] {
+  const blocks: string[] = [];
+  for (const section of guide.sections) {
+    for (const b of section.blocks) if (b.kind === "p" || b.kind === "callout") blocks.push(b.text);
+  }
+  for (const f of guide.faq ?? []) blocks.push(f.a);
+  return blocks.flatMap((text) => text.split(/(?<=[.!?])\s+/)).filter((x) => x.length >= 40 && x.length <= 320);
+}
 
 function build(): Indexed[] {
   return GUIDES.map((guide) => ({
@@ -64,7 +85,7 @@ function build(): Indexed[] {
     summary: tokens(guide.summary),
     headings: tokens(guide.sections.map((s) => s.heading).join(" ")),
     body: tokens(guideText(guide)),
-    text: guideText(guide),
+    sentences: proseOf(guide),
   }));
 }
 
@@ -74,13 +95,11 @@ function count(haystack: string[], needle: string): number {
   return n;
 }
 
-/** The sentence that best shows WHY this guide matched. */
+/** The sentence that best shows WHY this guide matched; the summary if none does. */
 function excerptFor(doc: Indexed, terms: string[]): string {
-  const sentences = doc.text.split(/(?<=[.!?])\s+/);
   let best = doc.guide.summary;
   let bestHits = 0;
-  for (const s of sentences) {
-    if (s.length < 40 || s.length > 320) continue;
+  for (const s of doc.sentences) {
     const words = new Set(tokens(s));
     const hits = terms.filter((t) => words.has(t)).length;
     if (hits > bestHits) {

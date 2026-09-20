@@ -167,6 +167,30 @@ Not the table's order:
    known, then take all four instances in one go - and upgrade to PAYG the same
    day (see the reclamation note above).
 
+## A GCP lane, from your laptop, in one command
+
+`gcp-lane.sh` builds a whole lane on Google Cloud without logging into a box:
+a reserved static IP, `<ip>.sslip.io` as the public name (it exists the moment
+the IP does - no DNS record, no registrar), Caddy for TLS, and the same
+`setup.sh` every other lane runs.
+
+```
+./deploy/fleet/gcp-lane.sh --name wd-evo-sg1 --zone asia-southeast1-b \
+    --machine e2-medium --prefixes 66,84,855,856,60,65 --cap 50
+```
+
+**That is a DRY RUN.** It prints what would be created and the monthly cost and
+creates nothing. Add `--create` to provision. It is billable: GCP's one Always
+Free `e2-micro` is already spent on the gateway box (`infra/gcp`), so a second
+VM is money - roughly $34/mo for an `e2-medium` lane holding 50 numbers, $61/mo
+for an `e2-standard-2` holding 100. Not a spot VM, on purpose: a preemption
+drops every linked socket at once.
+
+It fixes the one real weakness of `setup.sh --tunnel`: a quick tunnel's hostname
+changes on restart and strands every number pinned to it. A reserved IP does
+not. The printed `EVOLUTION_HOSTS` line carries the host's API key, so it is
+written to a root-only file on the VM and never to the startup log.
+
 ## Standing one up
 
 Create the VM in the region that matches its numbers, then run **one command on

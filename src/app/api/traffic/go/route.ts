@@ -27,8 +27,19 @@ export const dynamic = "force-dynamic";
 
 const NOINDEX = { "X-Robots-Tag": "noindex, nofollow", "Cache-Control": "no-store" };
 
-function home(req: Request, path: string) {
-  return NextResponse.redirect(new URL(path, req.url), { status: 303, headers: NOINDEX });
+/**
+ * Send the visitor back into this site, with a RELATIVE Location.
+ *
+ * Not `NextResponse.redirect(new URL(path, req.url))`. Behind a proxy (Cloud
+ * Run, and `next start` itself) `req.url` is built from the server's own
+ * listening host, not the public one - the browser check caught this route
+ * answering `http://localhost:3402/guides` to a request made to 127.0.0.1. In
+ * production that is a redirect to an internal hostname. A relative Location is
+ * valid (RFC 7231 7.1.2), is resolved by the browser against the URL it actually
+ * asked for, and cannot be wrong about the host because it does not name one.
+ */
+function home(_req: Request, path: string) {
+  return new NextResponse(null, { status: 303, headers: { ...NOINDEX, Location: path } });
 }
 
 export async function GET(req: Request) {

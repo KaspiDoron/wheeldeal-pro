@@ -45,6 +45,9 @@ export const ADMIN_ACTIONS = {
   "data.browse": "Browsed a data table",
   "user.status": "Changed an account's status",
   "user.role": "Changed an account's role",
+  // Money history. An import overwrites what a partner's report said for a
+  // day, so who did it, for which partner and how many rows is on the record.
+  "traffic.revenue-import": "Imported a search partner's revenue report",
 } as const;
 
 export type AdminAction = keyof typeof ADMIN_ACTIONS;

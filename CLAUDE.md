@@ -33,9 +33,11 @@ Router) + TypeScript + Tailwind, deployed on GCP Cloud Run. Runs fully in
 - **Mobile first.** Test at 320-430px. No horizontal overflow. Respect
   safe-area insets (`pt-safe`, `pb-safe`). Form controls >= 16px (iOS zoom).
 - Validate before pushing: `npm run typecheck && npx vitest run` (plus
-  `npm run build && npm run check:mobile` for layout-touching changes, and
-  `npm run check:cookies` for anything touching the cookie layer or the ad
-  script - it is the only check that can see a third-party request).
+  `npm run build && npm run check:mobile` for layout-touching changes,
+  `npm run check:cookies` for anything touching the cookie layer or an ad
+  script - it is the only check that can see a third-party request - and
+  `npm run check:traffic` for anything touching `lib/traffic`, `/search` or a
+  guide page: it records exactly what is sent to Google).
 - **Every user-visible string goes through `t("...")`** and must be in the
   generated catalogue: run `node scripts/gen-i18n-catalog.js` after adding
   copy. Computed copy is declared in `src/lib/i18n-extras.ts` - never hand-
@@ -89,6 +91,13 @@ src/
                      essential-cookies condition of use (middleware + /cookies)
     analytics/       events.ts: the allow-listed event vocabulary, path
                      scrubbing and prop bounding behind /api/analytics/collect
+    traffic/         SPONSORED SEARCH. subid.ts (the ONLY value about a visitor
+                     that leaves the building - closed vocabularies + a daily-
+                     rotating hash), partners.ts (the registry + the only code
+                     that builds a partner URL), region.ts (the TCF gate),
+                     log.ts (the anonymous first-party log), revenue.ts
+                     (import + reconciliation), client.ts (the one-request-per-
+                     document guard). docs/SPONSORED-SEARCH.md is the runbook
     admin/audit.ts   THE ADMIN AUDIT TRAIL - who looked at whose data
     admin/subject.ts the subject file: registry-driven row counts + consent
     privacy/dsar.ts  buildDsarExport - the ONE assembly both export paths use
@@ -148,6 +157,20 @@ supabase/retention.sql     run once; prune + de-identify + heartbeat + the
   kind. Marketing gates Google's ad SDK in a pre-paint script in the root layout
   (never fetched without consent; the `google-adsense-account` meta tag still
   verifies the site unconditionally).
+- **Sponsored search is built to the non-RAF rules, and they are DO-NOT-TOUCH.**
+  A guide ends with at most ONE related-search unit, Google writes the terms
+  (never pass `terms`), nothing tracks clicks inside the unit, and there is ONE
+  `_googCsa` request per document - guides link to each other with plain `<a>`
+  so each is a real load, and `requestSearchAds` refuses a second. `/search` is
+  a genuine search of the guides whose result count caps the ads; zero results
+  means zero ads. Breaking any of these does not fail a test run, it gets the
+  AdSense account struck weeks later, so `npm run check:traffic` replaces
+  Google's script with a recorder and asserts on exactly what was sent. The
+  whole module sits behind the `marketing` cookie category AND a Global Privacy
+  Control check, on the server as well as in the browser; Google's unit is not
+  requested in the EEA/UK/CH until `TRAFFIC_TCF_CMP=google`, because this
+  app's banner is not a Google-certified CMP. The log stores a search term
+  only when Google issued it - a typed query is free text and can be a name.
 - **Essential cookies are a CONDITION OF USE, the optional three are not.**
   `middleware.ts` holds a signed-in request to `/`, `/deals`, `/profile` or
   `/admin` at `/cookies?required=1` until a current decision exists - server
@@ -350,6 +373,12 @@ Google AdSense, Web Push/VAPID.
   first-contact routing (per-thread stamps always win). Flipped from the
   Architecture card (Admin -> WABA), which also holds `WABA_ENABLED`,
   `WABA_DRY_RUN`, `CLOUD_API_ENABLED` and `WABA_KILL`.
+- `TRAFFIC_MODE` - `off` (default) | `test` | `live`. `test` serves Google's
+  `adtest` ads, which earn nothing and are never logged - the only safe way to
+  look at a live unit. `TRAFFIC_PARTNERS` is the registry (one partner per
+  line; a rejected line is shown in red on Admin -> Traffic) and
+  `TRAFFIC_TCF_CMP` (`none` | `google`) opens the EEA/UK/CH once a certified
+  consent platform is installed. Runbook: `docs/SPONSORED-SEARCH.md`.
 - `APP_DOMAIN` - the public domain; drives SEO/share metadata, geocoder
   identity and push sender identity with no redeploy.
 - `HUMAN_TAKEOVER` - "off" disables user-typed-message takeover detection.

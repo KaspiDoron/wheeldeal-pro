@@ -91,6 +91,16 @@ reading rather than less.
 
 ## 2. Traffic monetization, done so it survives a review
 
+> **Status 2026-09-20: BUILT**, behind `TRAFFIC_MODE` (off by default). The
+> runbook is `docs/SPONSORED-SEARCH.md`. Two things changed from the sketch
+> below once Google's current policy was read: the related-search unit takes
+> Google's own terms rather than ours (supplying terms became a Restricted
+> Access Feature on 25 Aug 2025), and Google's unit is not requested in the
+> EEA, the UK or Switzerland until a certified consent platform is installed.
+> Still to build from this section: consented first-touch attribution, and the
+> no-coverage / hunt-ended / free-limit placements inside the app - only the
+> guide and `/search` placements exist today.
+
 Non-converting traffic - no coverage in this area, a hunt that ended with no
 deal, the free limit reached, a visitor leaving - is sent to partners
 (search-feed partners such as Tonic, parking for domains the company owns such
