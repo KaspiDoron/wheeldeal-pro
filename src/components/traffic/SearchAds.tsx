@@ -12,7 +12,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useI18n } from "@/lib/i18n";
-import { COOKIE_CONSENT_EVENT, clientAllows } from "@/lib/cookies/client";
+import { COOKIE_CONSENT_EVENT, clientAllowsSponsoredSearch } from "@/lib/cookies/client";
 import { loadTrafficConfig, requestSearchAds, trackTraffic } from "@/lib/traffic/client";
 import { PUBLIC_TRAFFIC_OFF, type PublicTrafficConfig } from "@/lib/traffic/public";
 import { browserTimeZone, consentRegion, searchAdsPermitted } from "@/lib/traffic/region";
@@ -43,7 +43,7 @@ export function SearchAds({
   const viewed = useRef(false);
 
   useEffect(() => {
-    const read = () => setAllowed(clientAllows("marketing"));
+    const read = () => setAllowed(clientAllowsSponsoredSearch());
     read();
     window.addEventListener(COOKIE_CONSENT_EVENT, read);
     return () => window.removeEventListener(COOKIE_CONSENT_EVENT, read);

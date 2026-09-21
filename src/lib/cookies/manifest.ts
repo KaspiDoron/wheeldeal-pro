@@ -64,6 +64,21 @@ export const OPTIONAL_CATEGORIES: readonly CookieCategory[] = [
  */
 export const COOKIE_POLICY_VERSION = "2026-09-20";
 
+/**
+ * The policy version that FIRST told a visitor about sponsored search.
+ *
+ * A stale-version choice is normally honoured until the person re-answers -
+ * their last word stands. That rule assumes the purpose has not changed. This
+ * one did: sponsored search did not exist before this version, so a yes made
+ * against an earlier one was never a yes to it. `allowsSponsoredSearch` compares
+ * against this, so the new unit stays off for a returning visitor until they
+ * have answered the banner that actually describes it.
+ *
+ * It does NOT move when COOKIE_POLICY_VERSION is bumped for some other reason:
+ * it records when THIS purpose was disclosed, not what today's version is.
+ */
+export const SPONSORED_SEARCH_SINCE = "2026-09-20";
+
 /** Where a stored value actually lives. Said plainly, because "cookies" in the
  *  legal sense covers all three and travellers reasonably read it as none. */
 export type StorageMedium = "cookie" | "localStorage" | "sessionStorage";

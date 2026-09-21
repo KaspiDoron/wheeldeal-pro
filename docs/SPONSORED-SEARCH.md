@@ -22,6 +22,10 @@ weeks later.
   given to display ads was not a yes to this.
 - **A Global Privacy Control signal is a no**, whatever was chosen before, for
   both Google products, in the browser and on the server.
+- **An old yes does not cover it.** A visitor who accepted advertising under the
+  earlier policy keeps seeing display ads while the re-prompt is up (their last
+  word stands), but gets NO sponsored search until they have answered the banner
+  that actually describes it. Sponsored search did not exist when they said yes.
 - **One unit per page, Google's own terms, no click tracking in the unit.**
   Since 25 Aug 2025 Google treats these as Restricted Access Features (they
   need account-manager approval and over $10,000 a month): more than one
@@ -156,21 +160,30 @@ pins the file's exact contents, so it is a code change, not a paste.
 ## If you buy traffic to a guide
 
 Organic visitors need nothing extra. If you run paid ads to a guide, Google has
-required since 1 Nov 2025 that the ad's creative text is passed verbatim. Add
-it to the landing URL as `rac`:
+required since 1 Nov 2025 that the ad's creative text is passed verbatim as
+`referrerAdCreative`, and an inaccurate one is a named strike category. Two
+steps, and BOTH are needed:
 
-```
-/guides/thailand-scooter-rental-prices?rac=Compare%20scooter%20rental%20prices%20in%20Thailand
-```
+1. **Declare the creative.** Admin -> **keys** -> **Ad creatives you run to the
+   guides** (`TRAFFIC_AD_CREATIVES`) -> paste the ad's exact text, one creative
+   per line -> **Save**.
+2. **Put the same text on the landing URL** as `rac`:
 
-The unit forwards it as `referrerAdCreative`. An inaccurate value is a policy
-violation, so it must be the literal text of the ad.
+   ```
+   /guides/thailand-scooter-rental-prices?rac=Compare%20scooter%20rental%20prices%20in%20Thailand
+   ```
+
+The unit declares a creative to Google ONLY when the URL's `rac` is exactly one
+of the lines you declared (case-sensitive; extra spaces are forgiven). This is
+deliberate: anyone can link to a guide with `?rac=anything`, and without the
+list this site would tell Google that a stranger's text was its own ad. With
+nothing declared - the normal organic case - `rac` is ignored entirely.
 
 ## Checks
 
 ```
-npm run build && npm run check:cookies   # nothing loads without consent (27 checks)
-npm run build && npm run check:traffic   # what loads is correct (54 checks)
+npm run build && npm run check:cookies   # nothing loads without consent
+npm run build && npm run check:traffic   # what loads is correct
 ```
 
 `check:traffic` replaces Google's script with a recorder, so it never touches

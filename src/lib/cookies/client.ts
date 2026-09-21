@@ -39,6 +39,7 @@ import {
   CONSENT_COOKIE,
   CONSENT_MAX_AGE,
   allows,
+  allowsSponsoredSearch,
   cookieValueFrom,
   decodeCookieConsent,
   deniedCategories,
@@ -85,6 +86,17 @@ export function clientAllows(category: CookieCategory): boolean {
   // says nothing about first-party preferences or analytics.
   if (category === "marketing" && gpcSignal()) return false;
   return allows(readCookieConsent(), category);
+}
+
+/**
+ * May the sponsored-search module run on this device right now? The marketing
+ * grant, no Global Privacy Control signal, AND a consent recent enough to have
+ * been told about it - see `allowsSponsoredSearch`. Everything under lib/traffic
+ * asks this, never `clientAllows("marketing")`; a test greps for the difference.
+ */
+export function clientAllowsSponsoredSearch(): boolean {
+  if (gpcSignal()) return false;
+  return allowsSponsoredSearch(readCookieConsent());
 }
 
 /**

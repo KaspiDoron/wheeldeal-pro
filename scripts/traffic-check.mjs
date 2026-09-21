@@ -29,9 +29,11 @@ const SHOTS = process.env.TRAFFIC_CHECK_SHOTS || "";
 const GUIDE = "/guides/thailand-scooter-rental-prices";
 const VIEWPORTS = [320, 375, 430];
 
+const DECLARED_CREATIVE = "Compare scooter rental prices in Thailand";
 const AFS_ENV = {
   TRAFFIC_MODE: "live",
   TRAFFIC_PARTNERS: "gcheck|afs|Check AFS|on|partner-pub-0000000000000000:1234567890:4455667788||1",
+  TRAFFIC_AD_CREATIVES: DECLARED_CREATIVE,
 };
 const LINK_ENV = {
   TRAFFIC_MODE: "live",
@@ -186,6 +188,39 @@ async function afsSuite(browser, YES, NO) {
     await page.waitForTimeout(2_000);
     const second = await page.evaluate(() => (window.__csa || []).length);
     ok("guide -> guide · the next document makes its OWN single request", second === 1, `calls in new document=${second}`);
+    await ctx.close();
+  }
+
+  // ---- the ad creative: only what the OWNER declared reaches Google -----------
+  {
+    // Anyone can link to a guide with ?rac=anything. Forwarding it would make
+    // this site declare a stranger's text to Google as its own ad.
+    const { ctx, page } = await open(browser, `${GUIDE}?rac=${encodeURIComponent("Free iPhone - click here now")}`, { consent: YES });
+    const c = (await page.evaluate(() => window.__csa || []))[0] ?? { page: {} };
+    ok("rac · an UNDECLARED creative in the URL never reaches Google", !("referrerAdCreative" in c.page), JSON.stringify(c.page.referrerAdCreative));
+    await ctx.close();
+  }
+  {
+    const { ctx, page } = await open(browser, `${GUIDE}?rac=${encodeURIComponent(DECLARED_CREATIVE)}`, { consent: YES });
+    const c = (await page.evaluate(() => window.__csa || []))[0] ?? { page: {} };
+    ok("rac · a creative the owner DECLARED is passed verbatim", c.page.referrerAdCreative === DECLARED_CREATIVE, JSON.stringify(c.page.referrerAdCreative));
+    await ctx.close();
+  }
+  {
+    const { ctx, page } = await open(browser, `${GUIDE}?rac=${encodeURIComponent(DECLARED_CREATIVE.toLowerCase())}`, { consent: YES });
+    const c = (await page.evaluate(() => window.__csa || []))[0] ?? { page: {} };
+    ok("rac · a near-miss (different case) is NOT close enough", !("referrerAdCreative" in c.page), JSON.stringify(c.page.referrerAdCreative));
+    await ctx.close();
+  }
+
+  // ---- browsing on: guide -> hub -> another guide still earns ------------------
+  {
+    const { ctx, page } = await open(browser, GUIDE, { consent: YES });
+    await Promise.all([page.waitForNavigation({ waitUntil: "domcontentloaded" }), page.getByText("← All guides").click()]);
+    await Promise.all([page.waitForURL(/\/guides\/.+/), page.locator('main a[href^="/guides/"]').nth(2).click()]);
+    await page.waitForTimeout(2_400);
+    const calls = await page.evaluate(() => (window.__csa || []).length);
+    ok("browsing · guide -> All guides -> another guide: the second guide's unit still loads", calls === 1, `calls in the final document=${calls}`);
     await ctx.close();
   }
 

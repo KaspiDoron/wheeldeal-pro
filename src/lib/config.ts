@@ -330,6 +330,7 @@ const KEYS: {
   // back what is set. OFF unless TRAFFIC_MODE says otherwise.
   { name: "TRAFFIC_MODE", label: "Search traffic mode ('off' | 'test' | 'live'; blank = off. 'test' serves Google test ads that earn nothing)", scope: "billing", editable: true, secret: false },
   { name: "TRAFFIC_PARTNERS", label: "Search traffic partners, one per line: id|afs|label|on|pub-XXXXXXXXXXXXXXXX:styleId[:channel]|markets|share  or  id|link|label|on|https://...?q={q}&subid={subid}|markets|share", scope: "billing", editable: true, secret: false },
+  { name: "TRAFFIC_AD_CREATIVES", label: "Ad creatives you run to the guides, one per line, verbatim. A landing URL's ?rac= is only declared to Google when it IS one of these. Leave blank for organic traffic", scope: "billing", editable: true, secret: false },
   { name: "TRAFFIC_TCF_CMP", label: "Google-certified TCF consent platform installed ('none' | 'google'; blank = none. Until 'google', search ads are not requested in the EEA, UK or Switzerland)", scope: "billing", editable: true, secret: false },
   { name: "TWITTER_HANDLE", label: "X (Twitter) handle (@wheeldeal)", scope: "auth", editable: true, secret: false },
   // The legal entity the Terms, the Privacy Policy and every indemnity clause

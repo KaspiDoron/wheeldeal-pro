@@ -16,7 +16,7 @@
 
 import { NextResponse } from "next/server";
 import { rateLimit, clientIp } from "@/lib/rate-limit";
-import { marketingAllowed } from "@/lib/cookies/server";
+import { sponsoredSearchAllowed } from "@/lib/cookies/server";
 import { getTrafficConfig } from "@/lib/traffic/config";
 import { buildDestination, partnerFor } from "@/lib/traffic/partners";
 import { shapeTrafficEvent, writeTrafficEvent } from "@/lib/traffic/log";
@@ -45,7 +45,7 @@ function home(_req: Request, path: string) {
 export async function GET(req: Request) {
   const limit = await rateLimit("traffic-go", clientIp(req), 30, 60).catch(() => ({ ok: true, retryAfter: 0 }));
   if (!limit.ok) return home(req, "/guides");
-  if (!marketingAllowed()) return home(req, "/cookies");
+  if (!sponsoredSearchAllowed()) return home(req, "/cookies");
 
   const config = await getTrafficConfig();
   if (config.mode === "off") return home(req, "/guides");

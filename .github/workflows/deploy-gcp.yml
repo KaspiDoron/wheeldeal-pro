@@ -214,6 +214,17 @@ jobs:
       - name: Cookie gate (real Chromium, real network)
         timeout-minutes: 5
         run: npm run check:cookies
+      # THE OTHER HALF OF THE SAME PROMISE. The cookie gate proves nothing loads
+      # without consent; this proves that what loads WITH consent is what
+      # Google's search-ads policy allows - one request per document, Google's
+      # own terms, never more ads than results, a typed query never logged, an
+      # undeclared ad creative never forwarded. None of that can fail a unit
+      # test: it is what the page sends at runtime, and the penalty for getting
+      # it wrong is an AdSense strike weeks later, not a red build. Google's
+      # script is replaced with a recorder, so this never touches Google.
+      - name: Sponsored search (what is actually sent to Google)
+        timeout-minutes: 6
+        run: npm run check:traffic
       - name: Browser journeys (Playwright)
         run: npx playwright test
       - name: Upload Playwright report

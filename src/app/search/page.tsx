@@ -1,4 +1,3 @@
-import Link from "next/link";
 import { cleanQuery, searchGuides } from "@/lib/guides/search";
 import { categoryOf, marketOf } from "@/lib/traffic/subid";
 import { SearchAds, SearchRelatedSlot } from "@/components/traffic/SearchAds";
@@ -44,9 +43,12 @@ export default async function SearchPage({ searchParams }: { searchParams: Promi
 
   return (
     <main className="mx-auto max-w-2xl px-4 py-6 pb-safe">
-      <Link href="/guides" className="text-[13px] font-bold text-brandblue">
+      {/* Plain anchors throughout, never next/link: this document makes its one
+          search-ads request, so every way out of it is a real page load - see
+          the same note on the guide page. */}
+      <a href="/guides" className="text-[13px] font-bold text-brandblue">
         ← All guides
-      </Link>
+      </a>
 
       <h1 className="mt-4 text-[22px] font-extrabold leading-tight text-strong">
         {query ? <>Results for &ldquo;{query}&rdquo;</> : "Search the guides"}

@@ -14,6 +14,9 @@ export interface PublicTrafficConfig {
   cmp: TcfCmp;
   afs: { id: string; pubId: string; styleId: string; channel: string | null } | null;
   link: { id: string } | null;
+  /** The owner-declared ad creative the landing URL's `rac` matched, or null.
+   *  Never the caller's text - see lib/traffic/creatives.ts. */
+  rac: string | null;
 }
 
-export const PUBLIC_TRAFFIC_OFF: PublicTrafficConfig = { mode: "off", cmp: "none", afs: null, link: null };
+export const PUBLIC_TRAFFIC_OFF: PublicTrafficConfig = { mode: "off", cmp: "none", afs: null, link: null, rac: null };

@@ -11,7 +11,7 @@
 // stays server-side with the rest of the owner's commercial terms.
 
 import { NextResponse } from "next/server";
-import { marketingAllowed } from "@/lib/cookies/server";
+import { sponsoredSearchAllowed } from "@/lib/cookies/server";
 import { PUBLIC_TRAFFIC_OFF, getTrafficConfig, toPublicTraffic } from "@/lib/traffic/config";
 import { marketOf } from "@/lib/traffic/subid";
 
@@ -22,8 +22,11 @@ export async function GET(req: Request) {
   // No consent on this request, no configuration: the publisher and style ids
   // are not secrets, but there is no reason to hand them to a page that is not
   // allowed to use them.
-  if (!marketingAllowed()) return NextResponse.json(PUBLIC_TRAFFIC_OFF, { headers });
-  const market = marketOf(new URL(req.url).searchParams.get("m") ?? "");
+  if (!sponsoredSearchAllowed()) return NextResponse.json(PUBLIC_TRAFFIC_OFF, { headers });
+  const params = new URL(req.url).searchParams;
+  const market = marketOf(params.get("m") ?? "");
   const config = await getTrafficConfig().catch(() => null);
-  return NextResponse.json(config ? toPublicTraffic(config, market) : PUBLIC_TRAFFIC_OFF, { headers });
+  // The landing URL's `rac` is CHECKED here, not trusted there: the answer is
+  // the owner's own declared creative or null, never the text the caller sent.
+  return NextResponse.json(config ? toPublicTraffic(config, market, params.get("rac")) : PUBLIC_TRAFFIC_OFF, { headers });
 }

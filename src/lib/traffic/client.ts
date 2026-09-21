@@ -4,11 +4,11 @@
 // browser utilities, every access guarded, importable from either tree.
 //
 // NOTHING HERE RUNS WITHOUT ADVERTISING CONSENT. Every entry point asks
-// `clientAllows("marketing")` first - which also answers no under a Global
+// `clientAllowsSponsoredSearch()` first - which also answers no under a Global
 // Privacy Control signal - and returns the "nothing" value when the answer is
 // no: no config fetch, no script, no beacon, no storage.
 
-import { clientAllows, rememberSession } from "../cookies/client";
+import { clientAllowsSponsoredSearch, rememberSession } from "../cookies/client";
 import { newReceiptId } from "../cookies/consent";
 import { PUBLIC_TRAFFIC_OFF, type PublicTrafficConfig } from "./public";
 import { sessionHash, type Placement, type SubIdCategory, type SubIdMarket } from "./subid";
@@ -32,7 +32,7 @@ function utcDay(): string {
  * session": slightly worse de-duplication, and nothing worse than that.
  */
 export function trafficSession(): string | null {
-  if (typeof window === "undefined" || !clientAllows("marketing")) return null;
+  if (typeof window === "undefined" || !clientAllowsSponsoredSearch()) return null;
   let seed: string | null = null;
   try {
     seed = sessionStorage.getItem(SEED_KEY);
@@ -47,16 +47,25 @@ export function trafficSession(): string | null {
 
 const configByMarket = new Map<string, Promise<PublicTrafficConfig>>();
 
-/** Single-flight per market, cached for the life of the page. */
-export function loadTrafficConfig(market: SubIdMarket): Promise<PublicTrafficConfig> {
-  if (typeof window === "undefined" || !clientAllows("marketing")) return Promise.resolve(PUBLIC_TRAFFIC_OFF);
-  const hit = configByMarket.get(market);
+/**
+ * Single-flight per (market, rac), cached for the life of the page.
+ *
+ * `rac` is the landing URL's claimed ad creative. It is SENT to the server to
+ * be checked against the owner's declared list, and only the server's answer
+ * (`config.rac`) is ever passed to Google - never this value.
+ */
+export function loadTrafficConfig(market: SubIdMarket, rac?: string | null): Promise<PublicTrafficConfig> {
+  if (typeof window === "undefined" || !clientAllowsSponsoredSearch()) return Promise.resolve(PUBLIC_TRAFFIC_OFF);
+  const claimed = rac ? rac.slice(0, 300) : "";
+  const key = `${market}|${claimed}`;
+  const hit = configByMarket.get(key);
   if (hit) return hit;
-  const p = fetch(`/api/traffic/config?m=${encodeURIComponent(market)}`, { credentials: "same-origin" })
+  const query = `m=${encodeURIComponent(market)}${claimed ? `&rac=${encodeURIComponent(claimed)}` : ""}`;
+  const p = fetch(`/api/traffic/config?${query}`, { credentials: "same-origin" })
     .then((r) => (r.ok ? (r.json() as Promise<PublicTrafficConfig>) : PUBLIC_TRAFFIC_OFF))
-    .then((d) => (d && (d.mode === "test" || d.mode === "live") ? d : PUBLIC_TRAFFIC_OFF))
+    .then((d) => (d && (d.mode === "test" || d.mode === "live") ? { ...d, rac: typeof d.rac === "string" ? d.rac : null } : PUBLIC_TRAFFIC_OFF))
     .catch(() => PUBLIC_TRAFFIC_OFF);
-  configByMarket.set(market, p);
+  configByMarket.set(key, p);
   return p;
 }
 
@@ -114,7 +123,7 @@ type CsaFn = ((...args: unknown[]) => void) & { q?: unknown[]; t?: number };
  * the common path is a real load - this is the guard for every other path.
  */
 export function requestSearchAds(kind: "relatedsearch" | "ads", pageOptions: Record<string, unknown>, ...blocks: Record<string, unknown>[]): boolean {
-  if (typeof window === "undefined" || !clientAllows("marketing")) return false;
+  if (typeof window === "undefined" || !clientAllowsSponsoredSearch()) return false;
   const w = window as unknown as { _googCsa?: CsaFn; __wdCsaRequested?: boolean };
   if (w.__wdCsaRequested) return false;
   w.__wdCsaRequested = true;

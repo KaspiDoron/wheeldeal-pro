@@ -22,7 +22,7 @@
 
 import { useEffect, useId, useRef, useState } from "react";
 import { useI18n } from "@/lib/i18n";
-import { COOKIE_CONSENT_EVENT, clientAllows } from "@/lib/cookies/client";
+import { COOKIE_CONSENT_EVENT, clientAllowsSponsoredSearch } from "@/lib/cookies/client";
 import { loadTrafficConfig, requestSearchAds, trackTraffic, trafficSession } from "@/lib/traffic/client";
 import { PUBLIC_TRAFFIC_OFF, type PublicTrafficConfig } from "@/lib/traffic/public";
 import { browserTimeZone, consentRegion, searchAdsPermitted } from "@/lib/traffic/region";
@@ -52,7 +52,7 @@ export function TrafficPlacement({
   const containerId = `wd-rs-${useId().replace(/[^a-zA-Z0-9]/g, "")}`;
 
   useEffect(() => {
-    const read = () => setAllowed(clientAllows("marketing"));
+    const read = () => setAllowed(clientAllowsSponsoredSearch());
     read();
     window.addEventListener(COOKIE_CONSENT_EVENT, read);
     return () => window.removeEventListener(COOKIE_CONSENT_EVENT, read);
@@ -61,7 +61,10 @@ export function TrafficPlacement({
   useEffect(() => {
     if (allowed !== true) return;
     let alive = true;
-    void loadTrafficConfig(market).then((c) => {
+    // The URL's `rac` goes to the SERVER to be matched against the creatives the
+    // owner declared; what comes back in `config.rac` is what Google is told.
+    const claimed = new URLSearchParams(window.location.search).get("rac");
+    void loadTrafficConfig(market, claimed).then((c) => {
       if (!alive) return;
       setConfig(c);
       setSession(trafficSession());
@@ -80,10 +83,13 @@ export function TrafficPlacement({
     requested.current = true;
     const afs = config.afs;
     const lang = (document.documentElement.getAttribute("lang") || "en").slice(0, 2);
-    // If the visitor arrived from a paid source the owner controls, the ad's
-    // creative text must be passed verbatim (mandatory since 2025-11-01). The
-    // landing URL carries it as `rac`; organic arrivals simply have none.
-    const rac = new URLSearchParams(window.location.search).get("rac")?.slice(0, 300) || undefined;
+    // A PAID ARRIVAL'S AD TEXT, IF - AND ONLY IF - THE OWNER DECLARED IT. Google
+    // requires the creative verbatim for traffic the owner buys (mandatory since
+    // 2025-11-01) and punishes an inaccurate one. `config.rac` is the server's
+    // answer after matching the URL's claim against TRAFFIC_AD_CREATIVES: the
+    // owner's own string, or null. Reading `?rac=` here directly would let any
+    // stranger's link put words in this site's mouth.
+    const rac = config.rac ?? undefined;
 
     const made = requestSearchAds(
       "relatedsearch",

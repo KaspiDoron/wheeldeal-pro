@@ -186,6 +186,23 @@ describe("CI runs on the branch people actually work on", () => {
     expect(deployIf).not.toMatch(/startsWith\(github\.ref/);
   });
 
+  it("the gate also checks WHAT is sent to Google once consent exists", () => {
+    // check:cookies proves the negative (nothing loads without consent).
+    // check:traffic proves the positive is policy-correct: one search-ads
+    // request per document, no publisher-supplied terms, ads never outnumbering
+    // results, a typed query never logged, an undeclared creative never
+    // forwarded. Getting any of those wrong fails no unit test - it earns an
+    // AdSense strike weeks later - so it is a hard gate, pinned like its twin.
+    const s = wf();
+    const verify = s.slice(s.indexOf("  verify:"), s.indexOf("\n  deploy:"));
+    const at = verify.indexOf("run: npm run check:traffic");
+    expect(at, "the workflow no longer runs check:traffic").toBeGreaterThan(-1);
+    expect(at).toBeGreaterThan(verify.indexOf("- name: Build"));
+    expect(at).toBeGreaterThan(verify.indexOf("npx playwright install --with-deps chromium"));
+    const step = verify.slice(verify.lastIndexOf("- name:", at), at);
+    expect(step).not.toMatch(/continue-on-error/);
+  });
+
   it("the gate watches the NETWORK for the cookie promise, not only the source", () => {
     // "We do not load Google's ad script unless you allow it" is a negative
     // promise about a THIRD-PARTY REQUEST. cookies.test.ts can only grep

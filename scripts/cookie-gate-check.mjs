@@ -344,6 +344,16 @@ async function run() {
       ok("guide · accept-all, in a TCF region with no certified CMP: no search-ads request", guideBerlin.searchRequests === 0, `saw ${guideBerlin.searchRequests}`);
     }
 
+    // A YES TO DISPLAY ADS IS NOT A YES TO SPONSORED SEARCH. Case 4 above pins
+    // that a stale-version yes is still honoured for the display SDK while the
+    // re-prompt is up - their last word stands. Sponsored search arrived WITH
+    // the newer policy, so that same old yes was never a yes to it: the search
+    // script must NOT load until they have answered the banner describing it.
+    const guideStale = await visit(browser, COOKIES.staleYes, { path: GUIDE_PATH });
+    ok("guide · stale-version yes: NO search-ads request (never asked about it)", guideStale.searchRequests === 0, `saw ${guideStale.searchRequests}`);
+    ok("guide · stale-version yes: the display SDK is still honoured", guideStale.adRequests > 0, `saw ${guideStale.adRequests}`);
+    ok("guide · stale-version yes: and the banner re-asks", guideStale.banner === true);
+
     // A Global Privacy Control signal beats a stored yes - for BOTH products.
     const guideGpc = await visit(browser, COOKIES.allowAll, { path: GUIDE_PATH, gpc: true });
     ok("guide · accept-all + GPC: no search-ads request", guideGpc.searchRequests === 0, `saw ${guideGpc.searchRequests}`);

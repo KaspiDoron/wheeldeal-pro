@@ -15,7 +15,7 @@
 
 import { NextResponse } from "next/server";
 import { rateLimit, clientIp } from "@/lib/rate-limit";
-import { marketingAllowed } from "@/lib/cookies/server";
+import { sponsoredSearchAllowed } from "@/lib/cookies/server";
 import { getTrafficConfig } from "@/lib/traffic/config";
 import { shapeTrafficEvent, writeTrafficEvent } from "@/lib/traffic/log";
 
@@ -31,7 +31,7 @@ export async function POST(req: Request) {
   // browser never gets here without it - but this is a public route, and the
   // cookie plus the Sec-GPC header on THIS request are the authority, not the
   // fact that somebody called it.
-  if (!marketingAllowed()) return skipped("no-consent");
+  if (!sponsoredSearchAllowed()) return skipped("no-consent");
 
   const config = await getTrafficConfig();
   // `test` serves Google's no-revenue test ads to an owner checking a layout.

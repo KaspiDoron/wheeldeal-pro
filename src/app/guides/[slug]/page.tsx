@@ -1,4 +1,3 @@
-import Link from "next/link";
 import { notFound } from "next/navigation";
 import { GUIDES, guideBySlug, GUIDE_CATEGORY_LABELS, type GuideBlock } from "@/lib/guides";
 import { resolveSiteOrigin } from "@/lib/site";
@@ -127,9 +126,15 @@ export default async function GuidePage({ params }: { params: Promise<{ slug: st
         type="application/ld+json"
         dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
       />
-      <Link href="/guides" className="text-[13px] font-bold text-brandblue">
+      {/* EVERY INTERNAL LINK ON THIS PAGE IS A PLAIN ANCHOR. This document makes
+          one search-ads request, and Google allows one per document. A next/link
+          hop keeps the document alive, so the NEXT guide the reader opened would
+          find the flag already set and its unit would silently never load -
+          compliant, and a quiet loss of revenue on exactly the readers who are
+          browsing most. A real page load costs little here: these are static. */}
+      <a href="/guides" className="text-[13px] font-bold text-brandblue">
         ← All guides
-      </Link>
+      </a>
       <p className="mt-4 text-[11px] font-extrabold uppercase tracking-wide text-faint">
         {GUIDE_CATEGORY_LABELS[guide.category]}
       </p>
@@ -162,9 +167,9 @@ export default async function GuidePage({ params }: { params: Promise<{ slug: st
         WheelDeal&rsquo;s agents message rental shops near your hotel and haggle
         on your behalf, so you see the real local price instead of the tourist
         one.{" "}
-        <Link href="/welcome" className="underline">
+        <a href="/welcome" className="underline">
           See how it works
-        </Link>
+        </a>
         .
       </p>
 

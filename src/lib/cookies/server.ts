@@ -31,6 +31,7 @@ import {
   CONSENT_COOKIE,
   CONSENT_MAX_AGE,
   allows,
+  allowsSponsoredSearch,
   decodeCookieConsent,
   type CookieConsent,
   type CookieGrants,
@@ -89,10 +90,17 @@ function serverAllows(category: CookieCategory): boolean {
   return allows(readCookieConsent(), category);
 }
 
-/** May advertising - and the search-traffic monetisation that rides on the same
- *  consent - run for this request? The cookie AND no GPC signal. */
-export function marketingAllowed(): boolean {
-  return serverAllows("marketing");
+/**
+ * May the sponsored-search module act for THIS request? The cookie's marketing
+ * grant, no `Sec-GPC` signal, and a consent made against a policy that
+ * described sponsored search (`allowsSponsoredSearch`). The three traffic
+ * routes ask this. It is deliberately NOT a general "marketing allowed": a
+ * stale-version yes still stands for display ads, and must not stand for a
+ * purpose the person was never asked about.
+ */
+export function sponsoredSearchAllowed(): boolean {
+  if (requestHasGpc()) return false;
+  return allowsSponsoredSearch(readCookieConsent());
 }
 
 /**

@@ -21,6 +21,7 @@
 import {
   COOKIE_POLICY_VERSION,
   OPTIONAL_CATEGORIES,
+  SPONSORED_SEARCH_SINCE,
   type CookieCategory,
 } from "./manifest";
 
@@ -193,6 +194,22 @@ export function allows(
   if (category === "necessary") return true;
   if (!consent) return false;
   return consent.grants[category] === true;
+}
+
+/**
+ * May SPONSORED SEARCH run under this record? Stricter than `allows(_,
+ * "marketing")` in exactly one way: the yes must have been given against a
+ * policy that described sponsored search (see SPONSORED_SEARCH_SINCE).
+ *
+ * Versions are ISO dates, so string order is date order - but ONLY for strings
+ * that are dates. "zzzz" sorts after every date, and an unvalidated compare
+ * would make a garbage version the strongest consent there is, so the shape is
+ * checked first and anything else fails closed.
+ */
+export function allowsSponsoredSearch(consent: CookieConsent | null | undefined): boolean {
+  if (!consent || !allows(consent, "marketing")) return false;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(consent.version)) return false;
+  return consent.version >= SPONSORED_SEARCH_SINCE;
 }
 
 /** Build a complete record for a choice being made now. */
