@@ -139,6 +139,11 @@ const KEYS: {
    */
   owner?: boolean;
 }[] = [
+  // THE LADDER'S MEMORY (lib/ai-breaker). Blank = on. A provider that answers
+  // "payment required", a bad key, a delisted model or a rate limit is skipped
+  // for as long as that kind of refusal lasts, instead of being retried - and
+  // waited on - by every single AI call. `off` disables it.
+  { name: "AI_BREAKER", label: "AI ladder circuit breaker (blank = on, 'off' = disabled, or JSON: deadHours, modelMinutes, busySeconds, busyMaxMinutes, timeoutSeconds, timeoutMaxMinutes)", scope: "ai", editable: true, secret: false },
   { name: "GROQ_TOKEN", label: "Groq Gateway", scope: "ai", editable: true },
   { name: "GEMINI_TOKEN", label: "Gemini Gateway", scope: "ai", editable: true },
   { name: "OPENROUTER_TOKEN", label: "OpenRouter Gateway", scope: "ai", editable: true },

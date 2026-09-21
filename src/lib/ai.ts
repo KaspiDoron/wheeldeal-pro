@@ -13,6 +13,7 @@ import { getConfig, pgTimestamp } from "./runtime-config";
 // per provider per minute, not per call.
 const rpmOverrideCache = new Map<string, { v: number | null; at: number }>();
 import { reserveAiCall } from "./ai-budget";
+import { breakerPlan, noteProviderFailure, noteProviderSuccess, parseBreakerSettings, type BreakerSettings } from "./ai-breaker";
 
 export type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
 
@@ -1143,6 +1144,20 @@ export async function chat(
  * a readable reason (the last provider error) so callers can show something
  * useful instead of a generic "did not respond".
  */
+let breakerCache: { v: BreakerSettings; at: number } | null = null;
+/** `AI_BREAKER` from the Key Vault, cached 60s. Unreadable = the defaults (on). */
+async function breakerSettings(): Promise<BreakerSettings> {
+  if (breakerCache && Date.now() - breakerCache.at < 60_000) return breakerCache.v;
+  let raw: string | null = null;
+  try {
+    raw = (await getConfig("AI_BREAKER")) ?? null;
+  } catch {
+    /* unreadable -> defaults */
+  }
+  breakerCache = { v: parseBreakerSettings(raw), at: Date.now() };
+  return breakerCache.v;
+}
+
 export async function chatDetailed(
   messages: ChatMessage[],
   opts?: {
@@ -1286,6 +1301,18 @@ export async function chatDetailed(
     }
     return tryConsumeDay(name, Date.now(), capacity);
   };
+  // WHAT A PROVIDER ACTUALLY SAID, REMEMBERED (lib/ai-breaker). The budgets above
+  // PREDICT a spent quota; nothing remembered a REAL refusal, so a rung that
+  // answered 402 "payment required" was tried again on the very next call.
+  // Production, 30 days to 2026-09-21: cerebras failed 274/274, sambanova
+  // 32/32, openrouter 74%, mistral 68% - and reply turns took 45-56s to compose
+  // for thinking that took under five. Benched rungs are dropped here; the plan
+  // never comes back empty, so this can only make the ladder faster.
+  const breaker = await breakerSettings();
+  const plan = breakerPlan(list.map((p) => p.name), Date.now(), breaker);
+  errors.push(...plan.skipped);
+  list = plan.order.map((name) => list.find((p) => p.name === name)).filter((p): p is ProviderConfig => Boolean(p));
+
   for (let idx = 0; idx < list.length; idx++) {
     const cfg = list[idx];
     if (Date.now() > deadline) {
@@ -1314,6 +1341,8 @@ export async function chatDetailed(
       const remaining = Math.max(2_000, Math.min(CALL_TIMEOUT_MS, deadline - Date.now()));
       const { text, tokens, model } = await callProvider(cfg, messages, maxTokens, remaining);
       await recordUsage(cfg.name, tokens, false, model);
+      // An answer closes the breaker and forgets the streak.
+      noteProviderSuccess(cfg.name);
       if (text) return { text, provider: cfg.name };
       errors.push(`${cfg.name}: empty reply`);
     } catch (e) {
@@ -1321,6 +1350,8 @@ export async function chatDetailed(
       // PERSIST the reason, which used to live only in this local array.
       const reason = e instanceof Error ? e.message : String(e);
       await recordUsage(cfg.name, 0, true, cfg.model, reason);
+      // ...and REMEMBER it, so the next call does not pay for the same answer.
+      noteProviderFailure(cfg.name, reason, Date.now(), breaker);
       errors.push(reason);
     }
   }
