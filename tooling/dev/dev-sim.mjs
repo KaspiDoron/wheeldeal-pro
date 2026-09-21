@@ -12,6 +12,7 @@
 //   SIM_PORT    default 8788
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -86,7 +87,6 @@ const tickToken = (() => {
   const secret = env.SESSION_SECRET;
   const salt = env.WEBHOOK_TOKEN_SALT;
   if (!secret || secret.length < 16) return null;
-  const { createHash } = await import("node:crypto");
   return createHash("sha256")
     .update(salt ? `wd-webhook:${secret}:${salt}` : `wd-webhook:${secret}`)
     .digest("hex")
@@ -96,12 +96,16 @@ const tickToken = (() => {
 if (tickToken) {
   const appUrl = (env.SIM_APP_URL || "http://127.0.0.1:3000").replace(/\/$/, "");
   const tick = async () => {
-    for (const path of ["/api/wa/ping", "/api/wa/reply-tick"]) {
-      try {
-        await fetch(`${appUrl}${path}?token=${tickToken}`, { cache: "no-store" });
-      } catch {
-        /* the app may still be compiling - the next tick will do */
-      }
+    // ONLY /api/wa/ping - which is also all the production cron calls. This
+    // used to hit /api/wa/reply-tick as well, with no `sender`, and that route
+    // answers 400 "sender required": a per-sender dispatcher the webhook kicks
+    // itself, not a sweep. So the ticker logged a 400 every 15 seconds for
+    // nothing, and the noise hid real errors. ping already drains the outbox,
+    // the graph wakeups and the missed-reply sweep.
+    try {
+      await fetch(`${appUrl}/api/wa/ping?token=${tickToken}`, { cache: "no-store" });
+    } catch {
+      /* the app may still be compiling - the next tick will do */
     }
   };
   setInterval(tick, 15_000).unref?.();
