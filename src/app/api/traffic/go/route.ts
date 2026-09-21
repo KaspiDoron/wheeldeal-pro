@@ -54,7 +54,7 @@ export async function GET(req: Request) {
   const market = marketOf(url.searchParams.get("m") ?? "");
   const category = categoryOf(url.searchParams.get("c") ?? "");
   const partner = partnerFor(config.partners, market, "link");
-  const terms = linkTermsFor(market, category);
+  const terms = linkTermsFor(market, category, config.settings);
   const index = Number(url.searchParams.get("i") ?? "0");
   const term = Number.isInteger(index) && index >= 0 && index < terms.length ? terms[index] : null;
   if (!partner || !term) return home(req, "/guides");

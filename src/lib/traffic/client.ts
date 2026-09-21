@@ -48,22 +48,48 @@ export function trafficSession(): string | null {
 const configByMarket = new Map<string, Promise<PublicTrafficConfig>>();
 
 /**
- * Single-flight per (market, rac), cached for the life of the page.
+ * Single-flight per (market, category, rac), cached for the life of the page.
  *
  * `rac` is the landing URL's claimed ad creative. It is SENT to the server to
  * be checked against the owner's declared list, and only the server's answer
  * (`config.rac`) is ever passed to Google - never this value.
+ *
+ * MONETISING callers leave `evenWithoutConsent` off: with no consent this
+ * resolves to OFF without touching the network at all. The funnel card sets it,
+ * because it is a link to this site's own article - it needs no consent, but it
+ * must still obey the owner's placement switch, which only the server knows. The
+ * server returns nothing that monetises unless the REQUEST carries consent, so
+ * asking early cannot widen what a visitor is shown.
  */
-export function loadTrafficConfig(market: SubIdMarket, rac?: string | null): Promise<PublicTrafficConfig> {
-  if (typeof window === "undefined" || !clientAllowsSponsoredSearch()) return Promise.resolve(PUBLIC_TRAFFIC_OFF);
-  const claimed = rac ? rac.slice(0, 300) : "";
-  const key = `${market}|${claimed}`;
+export function loadTrafficConfig(
+  market: SubIdMarket,
+  options: { rac?: string | null; category?: SubIdCategory; evenWithoutConsent?: boolean } = {}
+): Promise<PublicTrafficConfig> {
+  if (typeof window === "undefined") return Promise.resolve(PUBLIC_TRAFFIC_OFF);
+  const consented = clientAllowsSponsoredSearch();
+  if (!consented && !options.evenWithoutConsent) return Promise.resolve(PUBLIC_TRAFFIC_OFF);
+  const claimed = options.rac ? options.rac.slice(0, 300) : "";
+  const category = options.category ?? "other";
+  // Consent is part of the key: an answer fetched before a yes must not be
+  // served from cache after it.
+  const key = `${market}|${category}|${claimed}|${consented ? 1 : 0}`;
   const hit = configByMarket.get(key);
   if (hit) return hit;
-  const query = `m=${encodeURIComponent(market)}${claimed ? `&rac=${encodeURIComponent(claimed)}` : ""}`;
+  const query = `m=${encodeURIComponent(market)}&c=${encodeURIComponent(category)}${claimed ? `&rac=${encodeURIComponent(claimed)}` : ""}`;
   const p = fetch(`/api/traffic/config?${query}`, { credentials: "same-origin" })
-    .then((r) => (r.ok ? (r.json() as Promise<PublicTrafficConfig>) : PUBLIC_TRAFFIC_OFF))
-    .then((d) => (d && (d.mode === "test" || d.mode === "live") ? { ...d, rac: typeof d.rac === "string" ? d.rac : null } : PUBLIC_TRAFFIC_OFF))
+    .then((r) => (r.ok ? (r.json() as Promise<Partial<PublicTrafficConfig>>) : PUBLIC_TRAFFIC_OFF))
+    .then((d): PublicTrafficConfig => {
+      const merged = { ...PUBLIC_TRAFFIC_OFF, ...d, settings: { ...PUBLIC_TRAFFIC_OFF.settings, ...(d?.settings ?? {}) } };
+      const live = merged.mode === "test" || merged.mode === "live";
+      return {
+        ...merged,
+        mode: live ? merged.mode : "off",
+        afs: live ? merged.afs : null,
+        link: live ? merged.link : null,
+        rac: live && typeof merged.rac === "string" ? merged.rac : null,
+        linkTerms: live && Array.isArray(merged.linkTerms) ? merged.linkTerms : [],
+      };
+    })
     .catch(() => PUBLIC_TRAFFIC_OFF);
   configByMarket.set(key, p);
   return p;

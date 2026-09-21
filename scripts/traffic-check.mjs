@@ -35,6 +35,14 @@ const AFS_ENV = {
   TRAFFIC_PARTNERS: "gcheck|afs|Check AFS|on|partner-pub-0000000000000000:1234567890:4455667788||1",
   TRAFFIC_AD_CREATIVES: DECLARED_CREATIVE,
 };
+// Deliberately WRONG settings: numbers past what a non-RAF account is allowed,
+// and the results-page placement switched off. The module must clamp the first
+// and obey the second - in the browser, not just in a unit test.
+const SETTINGS_ENV = {
+  TRAFFIC_MODE: "live",
+  TRAFFIC_PARTNERS: "gcheck|afs|Check AFS|on|pub-0000000000000000:1234567890||1",
+  TRAFFIC_SETTINGS: JSON.stringify({ relatedSearches: 12, maxAds: 9, placements: { "search-results": false } }),
+};
 const LINK_ENV = {
   TRAFFIC_MODE: "live",
   TRAFFIC_PARTNERS: "lcheck|link|Check Link|on|https://feed.example.test/s?q={q}&subid={subid}&src=wd||0.8",
@@ -298,6 +306,36 @@ async function afsSuite(browser, YES, NO) {
   }
 }
 
+async function settingsSuite(browser, YES) {
+  {
+    const { ctx, page } = await open(browser, GUIDE, { consent: YES });
+    const c = (await page.evaluate(() => window.__csa || []))[0] ?? { blocks: [] };
+    // 12 was asked for. A non-RAF account is served at most 5, and asking for
+    // more is not a preference - it is a request the account is not allowed.
+    ok("settings · relatedSearches 12 is CLAMPED to the non-RAF ceiling of 5", c.blocks[0]?.relatedSearches === 5, String(c.blocks[0]?.relatedSearches));
+    await ctx.close();
+  }
+  {
+    const { ctx, page, state } = await open(browser, `/search?q=${encodeURIComponent("scooter rental deposit")}`, { consent: YES });
+    const csa = await page.evaluate(() => window.__csa || []);
+    ok("settings · a placement the owner switched OFF makes no request", csa.length === 0 && state.adsJs === 0, `calls=${csa.length}`);
+    ok("settings · and the page still works without it", (await page.locator('main ol a[href^="/guides/"]').count()) > 0);
+    await ctx.close();
+  }
+  {
+    // The site's own search box: what a reader TYPES goes to /search.
+    const { ctx, page } = await open(browser, "/guides", {});
+    const box = page.locator('form[action="/search"] input[name="q"]');
+    ok("hub · the search box starts empty", (await box.inputValue()) === "");
+    await box.fill("cash deposit scooter");
+    await Promise.all([page.waitForURL(/\/search\?/), box.press("Enter")]);
+    ok("hub · a typed query lands on /search with real results", (await page.locator('main ol a[href^="/guides/"]').count()) > 0, page.url());
+    const o = await overflow(page);
+    ok("hub · no horizontal overflow", o.doc <= o.win);
+    await ctx.close();
+  }
+}
+
 async function linkSuite(browser, YES) {
   const { ctx, page, state } = await open(browser, GUIDE, { consent: YES });
   const links = page.locator('[data-traffic-placement] a[href^="/api/traffic/go"]');
@@ -348,6 +386,11 @@ async function run() {
     console.log("Booting with a Google in-page partner ...");
     server = await boot(AFS_ENV);
     await afsSuite(browser, YES, NO);
+    stop(server);
+    await new Promise((r) => setTimeout(r, 1_500));
+    console.log("Booting with out-of-range settings ...");
+    server = await boot(SETTINGS_ENV);
+    await settingsSuite(browser, YES);
     stop(server);
     await new Promise((r) => setTimeout(r, 1_500));
     console.log("Booting with a link partner ...");

@@ -128,6 +128,7 @@ const Onboarding = dynamic(
   { ssr: false }
 );
 import { AdBanner } from "@/components/AdBanner";
+import { FunnelCard } from "@/components/traffic/FunnelCard";
 import { track } from "@/lib/client/analytics";
 import { LoadingDots } from "@/components/LoadingDots";
 import { AgentKillSwitch } from "@/components/AgentKillSwitch";
@@ -4703,6 +4704,9 @@ export default function Home() {
             >
               {t("Widen radius +5 km")}
             </button>
+            {/* The dead end becomes a way in: the guide for where they are, and
+                a search of all of them. Never a redirect - see FunnelCard. */}
+            <FunnelCard placement="no-coverage" region={origin?.label ?? ""} plan={session?.plan} />
           </div>
         )}
 

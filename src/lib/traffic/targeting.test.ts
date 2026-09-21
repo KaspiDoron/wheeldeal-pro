@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { GUIDES } from "../guides";
-import { guideTargeting, linkTermsFor } from "./targeting";
+import { FALLBACK_FUNNEL_GUIDE, funnelGuideFor, guideTargeting, linkTermsFor, marketFromText } from "./targeting";
 import { SUBID_CATEGORIES, SUBID_MARKETS } from "./subid";
 
 describe("guide targeting", () => {
@@ -44,5 +44,46 @@ describe("terms for a link partner", () => {
       "travel insurance for riders",
       "international driving permit online",
     ]);
+  });
+});
+
+describe("the funnel: from a place label to the guide worth reading", () => {
+  const exists = (slug: string) => GUIDES.some((g) => g.slug === slug);
+
+  it("reads a market out of the free-text place a traveller searched from", () => {
+    expect(marketFromText("Chiang Mai, Thailand")).toBe("th");
+    expect(marketFromText("Canggu, Bali")).toBe("id");
+    expect(marketFromText("Da Nang")).toBe("vn");
+    expect(marketFromText("Cebu City, Philippines")).toBe("ph");
+    expect(marketFromText("Lisbon, Portugal")).toBe("xx");
+    expect(marketFromText("")).toBe("xx");
+  });
+
+  it("agrees with the slug reader - a guide and a search about one country are one market", () => {
+    expect(marketFromText("Phuket, Thailand")).toBe(guideTargeting("thailand-scooter-rental-prices").market);
+  });
+
+  it("points each market at its own price guide, and everywhere else at the overview", () => {
+    expect(funnelGuideFor("th", { funnelGuides: {} }, exists)).toBe("thailand-scooter-rental-prices");
+    expect(funnelGuideFor("vn", { funnelGuides: {} }, exists)).toBe("vietnam-motorbike-rental-prices");
+    expect(funnelGuideFor("xx", { funnelGuides: {} }, exists)).toBe(FALLBACK_FUNNEL_GUIDE);
+    expect(funnelGuideFor("gr", { funnelGuides: {} }, exists)).toBe(FALLBACK_FUNNEL_GUIDE);
+  });
+
+  it("every default it can return is a guide that really exists", () => {
+    expect(exists(FALLBACK_FUNNEL_GUIDE)).toBe(true);
+    for (const m of ["th", "vn", "id", "ph"] as const) expect(exists(funnelGuideFor(m, { funnelGuides: {} }, exists)), m).toBe(true);
+  });
+
+  // A typo in the vault must degrade to a real page, never to a 404.
+  it("honours the owner's choice only when it names a real guide", () => {
+    expect(funnelGuideFor("th", { funnelGuides: { th: "rental-scam-warning-signs" } }, exists)).toBe("rental-scam-warning-signs");
+    expect(funnelGuideFor("th", { funnelGuides: { th: "no-such-guide" } }, exists)).toBe("thailand-scooter-rental-prices");
+  });
+
+  it("uses the owner's link terms for a market and category when there are any", () => {
+    const settings = { linkTerms: { "th|scooter": ["moped hire Phuket"] } };
+    expect(linkTermsFor("th", "scooter", settings)).toEqual(["moped hire Phuket"]);
+    expect(linkTermsFor("vn", "scooter", settings)[0]).toBe("scooter rental Vietnam");
   });
 });

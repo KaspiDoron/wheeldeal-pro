@@ -34,6 +34,9 @@ interface Payload {
     mode: "off" | "test" | "live";
     cmp: "none" | "google";
     errors: string[];
+    settingsErrors: string[];
+    settings: { raf: boolean; relatedSearches: number; maxAds: number; placements: Record<string, boolean> };
+    creatives: number;
     partners: { id: string; label: string; kind: "afs" | "link"; enabled: boolean; markets: string[]; revenueShare: number; target: string }[];
   };
   report: {
@@ -153,6 +156,19 @@ export function TrafficConsole() {
         </div>
       )}
 
+      {config.settingsErrors.length > 0 && (
+        <div className="rounded-blob border-2 border-warn/40 bg-warn-soft p-3">
+          <div className="text-[12px] font-extrabold text-warn">
+            TRAFFIC_SETTINGS was adjusted - what is in force is NOT exactly what you typed:
+          </div>
+          <ul className="mt-1 list-disc pl-5 text-[11.5px] font-bold leading-snug text-warn">
+            {config.settingsErrors.map((e) => (
+              <li key={e}>{e}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <section className="surface rounded-blob p-3">
         <h3 className="text-[13px] font-extrabold text-strong">Status</h3>
         <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
@@ -177,6 +193,15 @@ export function TrafficConsole() {
             hint="Of the related-search units that asked Google for suggestions, the share that received any. Low fill on a new page is normal for the first hour - Google crawls the article before it writes terms for it."
           />
         </div>
+        <p className="mt-2 text-[11px] font-bold leading-snug text-faint">
+          In force: {config.settings.relatedSearches} suggestions per unit, up to {config.settings.maxAds} ads per results page,{" "}
+          {config.settings.raf ? "Restricted Access Features ON" : "standard (non-RAF) limits"}, {config.creatives} declared ad creative
+          {config.creatives === 1 ? "" : "s"}. Placements:{" "}
+          {Object.entries(config.settings.placements)
+            .map(([name, on]) => `${name} ${on ? "on" : "OFF"}`)
+            .join(", ")}
+          .
+        </p>
         {config.mode === "off" && (
           <p className="mt-2 rounded-2xl bg-card2 p-2.5 text-[11px] font-bold leading-snug text-soft">
             Sponsored search is switched off, so no visitor sees a placement and nothing is logged. To turn it on: Admin -&gt; Keys -&gt;

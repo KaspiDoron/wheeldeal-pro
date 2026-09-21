@@ -6,6 +6,7 @@
 // is honest, and shows up in the admin table as a row worth fixing.
 
 import type { SubIdCategory, SubIdMarket } from "./subid";
+import type { TrafficSettings } from "./settings";
 
 const MARKET_WORDS: [RegExp, SubIdMarket][] = [
   [/thailand|thai\b|bangkok|phuket|chiang/, "th"],
@@ -22,6 +23,39 @@ const MARKET_NAMES: Partial<Record<SubIdMarket, string>> = {
   th: "Thailand", vn: "Vietnam", id: "Bali", ph: "Philippines", my: "Malaysia",
   kh: "Cambodia", lk: "Sri Lanka", gr: "Greece",
 };
+
+/**
+ * A market out of free text - the place label a traveller searched from
+ * ("Chiang Mai, Thailand"), which is what the app holds at its non-converting
+ * moments. Same word list as the slugs, so a guide and a search about the same
+ * country can never disagree about which market they are.
+ */
+export function marketFromText(text: string): SubIdMarket {
+  const s = String(text ?? "").toLowerCase().replace(/[^a-z]+/g, "-");
+  return MARKET_WORDS.find(([re]) => re.test(s))?.[1] ?? "xx";
+}
+
+/** The guide a market's funnel card points at when the owner has not chosen one. */
+const DEFAULT_FUNNEL_GUIDES: Partial<Record<SubIdMarket, string>> = {
+  th: "thailand-scooter-rental-prices",
+  vn: "vietnam-motorbike-rental-prices",
+  id: "bali-scooter-rental-prices",
+  ph: "philippines-scooter-rental-prices",
+};
+export const FALLBACK_FUNNEL_GUIDE = "scooter-rental-prices-southeast-asia";
+
+/**
+ * Where the funnel card sends a traveller: the owner's override if it names a
+ * guide that EXISTS, else the market's own price guide, else the regional
+ * overview. `exists` is passed in so this stays pure and a typo in the vault
+ * degrades to a real page rather than a 404.
+ */
+export function funnelGuideFor(market: SubIdMarket, settings: Pick<TrafficSettings, "funnelGuides">, exists: (slug: string) => boolean): string {
+  const chosen = settings.funnelGuides[market];
+  if (chosen && exists(chosen)) return chosen;
+  const own = DEFAULT_FUNNEL_GUIDES[market];
+  return own && exists(own) ? own : FALLBACK_FUNNEL_GUIDE;
+}
 
 export function guideTargeting(slug: string): { market: SubIdMarket; category: SubIdCategory } {
   const s = String(slug ?? "").toLowerCase();
@@ -45,7 +79,11 @@ export function guideTargeting(slug: string): { market: SubIdMarket; category: S
  * the keywords - built by rule from what the guide is about, so a term can
  * never promise something the article is not about.
  */
-export function linkTermsFor(market: SubIdMarket, category: SubIdCategory): string[] {
+export function linkTermsFor(market: SubIdMarket, category: SubIdCategory, settings?: Pick<TrafficSettings, "linkTerms">): string[] {
+  // The owner's own terms win when there are any for this market and category.
+  // They were validated to plain short queries when the settings were parsed.
+  const override = settings?.linkTerms[`${market}|${category}`];
+  if (override && override.length > 0) return override;
   const place = MARKET_NAMES[market];
   const where = place ? ` ${place}` : " abroad";
   const vehicle = category === "car" ? "car" : category === "motorbike" ? "motorbike" : "scooter";

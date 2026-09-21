@@ -24,6 +24,12 @@ export async function GET(req: Request) {
       mode: config.mode,
       cmp: config.cmp,
       errors: config.errors,
+      // Out-of-range or unreadable TRAFFIC_SETTINGS values. They were clamped
+      // or defaulted, and the owner must be able to SEE that - a setting that
+      // was silently ignored looks exactly like a setting that works.
+      settingsErrors: config.settingsErrors,
+      settings: config.settings,
+      creatives: config.creatives.length,
       partners: config.partners.map((p) => ({
         id: p.id,
         label: p.label,

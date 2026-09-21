@@ -97,7 +97,7 @@ src/
                      that builds a partner URL), region.ts (the TCF gate),
                      log.ts (the anonymous first-party log), revenue.ts
                      (import + reconciliation), client.ts (the one-request-per-
-                     document guard). docs/SPONSORED-SEARCH.md is the runbook
+                     document guard). docs/RSOC_FUNNEL_GUIDE.md is the runbook
     admin/audit.ts   THE ADMIN AUDIT TRAIL - who looked at whose data
     admin/subject.ts the subject file: registry-driven row counts + consent
     privacy/dsar.ts  buildDsarExport - the ONE assembly both export paths use
@@ -378,7 +378,11 @@ Google AdSense, Web Push/VAPID.
   look at a live unit. `TRAFFIC_PARTNERS` is the registry (one partner per
   line; a rejected line is shown in red on Admin -> Traffic) and
   `TRAFFIC_TCF_CMP` (`none` | `google`) opens the EEA/UK/CH once a certified
-  consent platform is installed. Runbook: `docs/SPONSORED-SEARCH.md`.
+  consent platform is installed. `TRAFFIC_SETTINGS` is one JSON object holding
+  every other knob (unit sizes, per-placement on/off, link terms, funnel
+  guides) - validated and CLAMPED to what the AdSense account is allowed, with
+  any adjustment shown on Admin -> Traffic. `TRAFFIC_AD_CREATIVES` is the
+  allowlist of ad texts that may be declared to Google as referrerAdCreative. Runbook: `docs/RSOC_FUNNEL_GUIDE.md`.
 - `APP_DOMAIN` - the public domain; drives SEO/share metadata, geocoder
   identity and push sender identity with no redeploy.
 - `HUMAN_TAKEOVER` - "off" disables user-typed-message takeover detection.

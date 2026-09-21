@@ -52,14 +52,17 @@ export function SearchAds({
   useEffect(() => {
     if (allowed !== true) return;
     let alive = true;
-    void loadTrafficConfig(market).then((c) => alive && setConfig(c));
+    void loadTrafficConfig(market, { category }).then((c) => alive && setConfig(c));
     return () => {
       alive = false;
     };
-  }, [allowed, market]);
+  }, [allowed, market, category]);
 
   const region = consentRegion({ timeZone: browserTimeZone() });
-  const afs = allowed === true && config.mode !== "off" && searchAdsPermitted(region, config.cmp) ? config.afs : null;
+  const afs =
+    allowed === true && config.mode !== "off" && config.settings.placements["search-results"] === true && searchAdsPermitted(region, config.cmp)
+      ? config.afs
+      : null;
 
   // The first-party record that a search happened here. The TERM is sent only
   // when Google issued it; the server drops a typed query regardless.
@@ -81,7 +84,9 @@ export function SearchAds({
     if (!afs || requested.current || !query || resultCount < 1) return;
     requested.current = true;
     const lang = (document.documentElement.getAttribute("lang") || "en").slice(0, 2);
-    const ads = Math.min(3, resultCount);
+    // Never more ads than results (Google's rule), and never more than the
+    // owner's `maxAds`, which the server already clamped to 1-3.
+    const ads = Math.min(config.settings.maxAds, resultCount);
     const made = requestSearchAds(
       "ads",
       {
@@ -104,10 +109,10 @@ export function SearchAds({
         maxTop: ads,
         adLoadedCallback: (_name: string, loaded: boolean) => setAdsFilled(loaded === true),
       },
-      { container: RS_CONTAINER, relatedSearches: 5 }
+      { container: RS_CONTAINER, relatedSearches: config.settings.relatedSearches }
     );
     if (!made) requested.current = false;
-  }, [afs, query, resultCount, market, category, config.mode]);
+  }, [afs, query, resultCount, market, category, config.mode, config.settings]);
 
   if (!afs || resultCount < 1) return null;
 

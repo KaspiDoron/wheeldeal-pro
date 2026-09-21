@@ -13,20 +13,20 @@
 import { NextResponse } from "next/server";
 import { sponsoredSearchAllowed } from "@/lib/cookies/server";
 import { PUBLIC_TRAFFIC_OFF, getTrafficConfig, toPublicTraffic } from "@/lib/traffic/config";
-import { marketOf } from "@/lib/traffic/subid";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
   const headers = { "Cache-Control": "private, max-age=60" };
-  // No consent on this request, no configuration: the publisher and style ids
-  // are not secrets, but there is no reason to hand them to a page that is not
-  // allowed to use them.
-  if (!sponsoredSearchAllowed()) return NextResponse.json(PUBLIC_TRAFFIC_OFF, { headers });
   const params = new URL(req.url).searchParams;
-  const market = marketOf(params.get("m") ?? "");
   const config = await getTrafficConfig().catch(() => null);
-  // The landing URL's `rac` is CHECKED here, not trusted there: the answer is
-  // the owner's own declared creative or null, never the text the caller sent.
-  return NextResponse.json(config ? toPublicTraffic(config, market, params.get("rac")) : PUBLIC_TRAFFIC_OFF, { headers });
+  if (!config) return NextResponse.json(PUBLIC_TRAFFIC_OFF, { headers });
+  // Consent decides what MONETISES (publisher ids, partners, the ad creative).
+  // The owner's placement switches and the funnel guide are returned either
+  // way - see toPublicTraffic. The landing URL's `rac` is CHECKED here, not
+  // trusted there: the answer is the owner's declared creative or null.
+  return NextResponse.json(
+    toPublicTraffic(config, { market: params.get("m") ?? "", category: params.get("c") ?? "", rac: params.get("rac"), consented: sponsoredSearchAllowed() }),
+    { headers }
+  );
 }

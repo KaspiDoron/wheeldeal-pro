@@ -26,21 +26,26 @@ import { COOKIE_CONSENT_EVENT, clientAllowsSponsoredSearch } from "@/lib/cookies
 import { loadTrafficConfig, requestSearchAds, trackTraffic, trafficSession } from "@/lib/traffic/client";
 import { PUBLIC_TRAFFIC_OFF, type PublicTrafficConfig } from "@/lib/traffic/public";
 import { browserTimeZone, consentRegion, searchAdsPermitted } from "@/lib/traffic/region";
-import { linkTermsFor } from "@/lib/traffic/targeting";
 import type { Placement, SubIdCategory, SubIdMarket } from "@/lib/traffic/subid";
-
-/** Tracking parameters that may ride on a content URL. Google is told to
- *  ignore them so the same article is one page to its crawler, not many. */
-const IGNORED_PARAMS = "utm_source,utm_medium,utm_campaign,utm_content,utm_term,gclid,fbclid,msclkid,ref,rac";
 
 export function TrafficPlacement({
   placement,
   market,
   category,
+  linkOnly = false,
 }: {
   placement: Placement;
   market: SubIdMarket;
   category: SubIdCategory;
+  /**
+   * Never render Google's unit here, only a link partner's labelled links.
+   *
+   * For placements INSIDE THE APP. Google allows its related-search unit only
+   * on pages with real content, "complementary, not the focus" - and a search
+   * tool's empty state is not an article. A feed partner's sponsored links are
+   * a different contract and are fine there.
+   */
+  linkOnly?: boolean;
 }) {
   const { t } = useI18n();
   const [allowed, setAllowed] = useState<boolean | null>(null);
@@ -64,7 +69,7 @@ export function TrafficPlacement({
     // The URL's `rac` goes to the SERVER to be matched against the creatives the
     // owner declared; what comes back in `config.rac` is what Google is told.
     const claimed = new URLSearchParams(window.location.search).get("rac");
-    void loadTrafficConfig(market, claimed).then((c) => {
+    void loadTrafficConfig(market, { rac: claimed, category }).then((c) => {
       if (!alive) return;
       setConfig(c);
       setSession(trafficSession());
@@ -72,11 +77,14 @@ export function TrafficPlacement({
     return () => {
       alive = false;
     };
-  }, [allowed, market]);
+  }, [allowed, market, category]);
 
   const region = consentRegion({ timeZone: browserTimeZone() });
-  const useAfs = allowed === true && config.mode !== "off" && config.afs !== null && searchAdsPermitted(region, config.cmp);
-  const useLink = allowed === true && config.mode !== "off" && !useAfs && config.link !== null;
+  // The owner's per-placement switch (TRAFFIC_SETTINGS.placements) comes first:
+  // a placement that is off renders nothing, whatever else is true.
+  const on = allowed === true && config.mode !== "off" && placement !== "unknown" && config.settings.placements[placement] === true;
+  const useAfs = on && !linkOnly && config.afs !== null && searchAdsPermitted(region, config.cmp);
+  const useLink = on && !useAfs && config.link !== null && config.linkTerms.length > 0;
 
   useEffect(() => {
     if (!useAfs || !config.afs || requested.current) return;
@@ -101,15 +109,18 @@ export function TrafficPlacement({
         resultsPageQueryParam: "q",
         hl: lang,
         channel: afs.channel ?? undefined,
-        ignoredPageParams: IGNORED_PARAMS,
+        // Tracking parameters that may ride on a content URL; Google is told to
+        // ignore them so one article is one page to its crawler, not many.
+        ignoredPageParams: config.settings.ignoredPageParams.join(","),
         referrerAdCreative: rac,
         adtest: config.mode === "test" ? "on" : undefined,
       },
       {
         container: containerId,
-        // Five is the most a non-RAF account is served; fewer than three and
-        // Google shows none at all.
-        relatedSearches: 5,
+        // From TRAFFIC_SETTINGS, already clamped server-side to what the account
+        // is allowed: 3-5 without Restricted Access Features. Under three Google
+        // shows none at all.
+        relatedSearches: config.settings.relatedSearches,
         adLoadedCallback: (_name: string, loaded: boolean) => {
           setFilled(loaded === true);
           trackTraffic({ kind: loaded ? "unit_loaded" : "unit_empty", placement, market, category, partner: afs.id });
@@ -147,7 +158,10 @@ export function TrafficPlacement({
   }
 
   if (useLink && session) {
-    const terms = linkTermsFor(market, category);
+    // The server's list - the generated terms, or the owner's overrides. The
+    // link carries only an INDEX into it, and /api/traffic/go resolves the same
+    // list, so the words never travel in a URL a visitor could edit.
+    const terms = config.linkTerms;
     return (
       <aside className="mt-8 overflow-hidden rounded-blob border-2 border-line" data-traffic-placement={placement}>
         <div className="bg-card2 px-3 py-1 text-[9px] font-bold uppercase tracking-wide text-faint">{t("Sponsored")}</div>

@@ -13,6 +13,10 @@ import "server-only";
 //                     landing URL whose `rac` IS one of these is declared to
 //                     Google as referrerAdCreative (lib/traffic/creatives.ts).
 //                     Empty - the organic case - means `rac` is ignored.
+//   TRAFFIC_SETTINGS  every other knob, as one JSON object (unit sizes, which
+//                     placements are on, link terms, funnel guides). Validated
+//                     and CLAMPED to what the account is allowed - see
+//                     lib/traffic/settings.ts. Empty = all defaults.
 //   TRAFFIC_TCF_CMP   none (default) | google - whether a Google-certified TCF
 //                     CMP is installed. Decides whether search ads may be
 //                     requested in the EEA, the UK and Switzerland at all
@@ -24,6 +28,10 @@ import "server-only";
 import { getConfig } from "@/lib/runtime-config";
 import { parsePartners, partnerFor, type TrafficPartner } from "./partners";
 import { matchCreative, parseCreatives } from "./creatives";
+import { parseTrafficSettings, type TrafficSettings } from "./settings";
+import { funnelGuideFor, linkTermsFor } from "./targeting";
+import { categoryOf, marketOf } from "./subid";
+import { guideBySlug } from "../guides";
 import type { TcfCmp } from "./region";
 import { PUBLIC_TRAFFIC_OFF, type PublicTrafficConfig, type TrafficMode } from "./public";
 
@@ -36,27 +44,54 @@ export interface TrafficConfig {
   partners: TrafficPartner[];
   errors: string[];
   creatives: string[];
+  settings: TrafficSettings;
+  /** Problems found in TRAFFIC_SETTINGS - shown on Admin -> Traffic. */
+  settingsErrors: string[];
 }
 
 export async function getTrafficConfig(): Promise<TrafficConfig> {
-  const [modeRaw, partnersRaw, cmpRaw, creativesRaw] = await Promise.all([
+  const [modeRaw, partnersRaw, cmpRaw, creativesRaw, settingsRaw] = await Promise.all([
     getConfig("TRAFFIC_MODE").catch(() => null),
     getConfig("TRAFFIC_PARTNERS").catch(() => null),
     getConfig("TRAFFIC_TCF_CMP").catch(() => null),
     getConfig("TRAFFIC_AD_CREATIVES").catch(() => null),
+    getConfig("TRAFFIC_SETTINGS").catch(() => null),
   ]);
   const m = String(modeRaw ?? "").trim().toLowerCase();
   const mode: TrafficMode = m === "live" || m === "test" ? m : "off";
   const cmp: TcfCmp = String(cmpRaw ?? "").trim().toLowerCase() === "google" ? "google" : "none";
   const { partners, errors } = parsePartners(partnersRaw);
-  return { mode, cmp, partners, errors, creatives: parseCreatives(creativesRaw) };
+  const { settings, errors: settingsErrors } = parseTrafficSettings(settingsRaw);
+  return { mode, cmp, partners, errors, creatives: parseCreatives(creativesRaw), settings, settingsErrors };
 }
 
 /** What the browser is allowed to know (the shape lives in ./public). A link
  *  partner's template stays on the server - the visitor reaches it through
  *  /api/traffic/go, so the browser only needs to know that one exists. */
-export function toPublicTraffic(config: TrafficConfig, market = "xx", rac: string | null = null): PublicTrafficConfig {
-  if (config.mode === "off") return PUBLIC_TRAFFIC_OFF;
+export function toPublicTraffic(
+  config: TrafficConfig,
+  input: { market?: string; category?: string; rac?: string | null; consented: boolean }
+): PublicTrafficConfig {
+  const market = marketOf(input.market ?? "");
+  const category = categoryOf(input.category ?? "");
+  // NOT SECRET, NOT PERSONAL, so present with or without consent: the owner's
+  // knobs and which guide this market's funnel card points at. The card is a
+  // link to this site's own article - it needs no consent and must still obey
+  // the owner's on/off switch.
+  const open = {
+    settings: {
+      relatedSearches: config.settings.relatedSearches,
+      maxAds: config.settings.maxAds,
+      placements: config.settings.placements,
+      ignoredPageParams: config.settings.ignoredPageParams,
+    },
+    funnelGuide: (() => {
+      const slug = funnelGuideFor(market, config.settings, (s) => Boolean(guideBySlug(s)));
+      return { slug, title: guideBySlug(slug)?.title ?? PUBLIC_TRAFFIC_OFF.funnelGuide.title };
+    })(),
+  };
+  // Everything that MONETISES needs the module on AND this request's consent.
+  if (config.mode === "off" || !input.consented) return { ...PUBLIC_TRAFFIC_OFF, ...open };
   const afs = partnerFor(config.partners, market, "afs");
   const link = partnerFor(config.partners, market, "link");
   return {
@@ -64,6 +99,8 @@ export function toPublicTraffic(config: TrafficConfig, market = "xx", rac: strin
     cmp: config.cmp,
     afs: afs && afs.kind === "afs" ? { id: afs.id, pubId: afs.pubId, styleId: afs.styleId, channel: afs.channel } : null,
     link: link ? { id: link.id } : null,
-    rac: matchCreative(config.creatives, rac),
+    rac: matchCreative(config.creatives, input.rac ?? null),
+    linkTerms: link ? linkTermsFor(market, category, config.settings) : [],
+    ...open,
   };
 }
