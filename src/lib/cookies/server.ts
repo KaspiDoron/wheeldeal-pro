@@ -24,13 +24,14 @@ import "server-only";
 // the durable record did not land. That is the house rule for writes here:
 // report what PERSISTED, never optimistic success.
 
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { recordConsent, resetConsentCache, type ConsentKind } from "../consent";
 import {
   ANALYTICS_COOKIE,
   CONSENT_COOKIE,
   CONSENT_MAX_AGE,
   allows,
+  allowsSponsoredSearch,
   decodeCookieConsent,
   type CookieConsent,
   type CookieGrants,
@@ -65,9 +66,41 @@ export function readCookieConsent(): CookieConsent | null {
   }
 }
 
+/**
+ * Is this request carrying a Global Privacy Control signal (`Sec-GPC: 1`)?
+ *
+ * The header is the server-visible half of `navigator.globalPrivacyControl`.
+ * Unreadable headers answer false - GPC only ever REMOVES a permission, so a
+ * request we cannot inspect is simply governed by the cookie, which already
+ * defaults to no.
+ */
+export function requestHasGpc(): boolean {
+  try {
+    return headers().get("sec-gpc") === "1";
+  } catch {
+    return false;
+  }
+}
+
 /** Is this category granted on this request? Defaults to no. */
 function serverAllows(category: CookieCategory): boolean {
+  // The same rule as the pre-paint gate and `clientAllows`: a GPC signal beats
+  // a stored yes for advertising, and touches nothing else.
+  if (category === "marketing" && requestHasGpc()) return false;
   return allows(readCookieConsent(), category);
+}
+
+/**
+ * May the sponsored-search module act for THIS request? The cookie's marketing
+ * grant, no `Sec-GPC` signal, and a consent made against a policy that
+ * described sponsored search (`allowsSponsoredSearch`). The three traffic
+ * routes ask this. It is deliberately NOT a general "marketing allowed": a
+ * stale-version yes still stands for display ads, and must not stand for a
+ * purpose the person was never asked about.
+ */
+export function sponsoredSearchAllowed(): boolean {
+  if (requestHasGpc()) return false;
+  return allowsSponsoredSearch(readCookieConsent());
 }
 
 /**

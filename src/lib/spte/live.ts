@@ -1538,9 +1538,22 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
       // blowing the serverless budget), then guardAndSend directly - the guard
       // still paces per-recipient, and on a guard block or transient send
       // failure guardAndSend itself queues/re-queues, so nothing is lost.
+      // THE PAUSE LOOKS AT THE CLOCK IT IS PADDING (wa/reply-sla).
+      //
+      // This was `min(10_000, remaining - 20_000)`: with a 45s turn budget,
+      // a flat ten seconds on every reply, whatever the chain had already
+      // spent. Measured on a live hunt that produced composeMs of 17-20s with
+      // no pacing delay at all - half of it was this line. The pause still
+      // exists, because an instant answer is a bot tell and a real ban vector;
+      // it is now measured from the SHOP'S message, tops the wait up to a human
+      // floor, and never pushes the answer past the ten-second promise.
       if (input.humanDelay) {
-        const remaining = input.deadlineAt - io.now();
-        const pauseMs = Math.max(0, Math.min(10_000, remaining - 20_000));
+        const { humanPauseMs } = await import("../wa/reply-sla");
+        const pauseMs = humanPauseMs({
+          inboundAt: input.inboundAt,
+          now: io.now(),
+          remainingMs: input.deadlineAt - io.now(),
+        });
         if (pauseMs > 0) await new Promise((r) => setTimeout(r, pauseMs));
       }
       const res = await io.guardAndSend({ senderKey, toNumber, text: send, meta, shopOpenNow: input.shopOpenNow });
@@ -1967,7 +1980,22 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
   // has refused twice, never a dead one, and staggered so wa-guard is not
   // handed a burst. This is the difference between a negotiation swarm and a
   // broadcast engine, and it is why none of it is decided here.
-  if (outcome.materialDrop && input.ctx.sender) {
+  // AND THE TRIGGER IS COMPUTED HERE, AGAINST THE OTHER SHOPS ONLY.
+  //
+  // This used to read `outcome.materialDrop`, which compares the arriving quote
+  // against `session.lowest` - a figure that deliberately INCLUDES this shop's
+  // own row, because it is what the ask is clamped against. The offers row for
+  // the arriving quote is written before the engine runs, so the new price was
+  // already inside the number it was being compared with, and
+  // `new < lowest * 0.95` could not be true. The result was the exact failure
+  // the owner reported: a shop that came in cheapest told nobody, and only a
+  // shop RE-quoting below its own earlier price ever woke the siblings.
+  //
+  // The rows are read here anyway, so the honest comparison costs nothing: the
+  // cheapest OTHER shop, by the same `sessionFloor` predicate that decides
+  // which quotes are still live. `materialDrop` stays on the outcome as
+  // telemetry, where its all-shops reading is the right one.
+  if (input.ctx.sender) {
     try {
       const newLow = tc.inbound.verified.pricePerDay;
       if (typeof newLow === "number" && newLow > 0) {
@@ -1977,43 +2005,51 @@ export async function runSpteLiveTurn(input: GraphTurnInput, io: GraphIO): Promi
             durationDays: input.rfq.durationDays,
           })
           .catch(() => []);
-        const { planSiblingRebargain } = await import("../negotiation/rebargain");
-        const { threadKeyFor } = await import("../graph/state");
-        const targets = planSiblingRebargain({
-          rows,
-          excludeVendorId: input.ctx.vendorId ?? "",
-          newLowPerDay: newLow,
-          currency: input.currency,
-        });
-        for (const t of targets) {
-          await io
-            .insertWakeup({
-              kind: "tick",
-              threadKey: threadKeyFor(input.ctx.sender, t.toNumber),
-              notBefore: new Date(io.now() + t.delayMinutes * 60_000).toISOString(),
-              payload: {
-                userEmail: input.ctx.sender,
-                vendorId: t.vendorId,
-                vendorName: t.vendorName,
-                engine: "v3",
-                reason: `another shop just came in cheaper - going back to ${t.vendorName} with it`,
-              },
-            })
-            .catch(() => {});
-        }
-        if (targets.length) {
-          await io
-            .recordEvent?.({
-              kind: "swarm-rebargain",
-              vendorId: input.ctx.vendorId,
-              vendorName: input.ctx.vendorName,
-              detail: JSON.stringify({
-                newLow,
-                currency: input.currency,
-                targets: targets.map((t) => ({ shop: t.vendorName, at: t.pricePerDay, inMin: t.delayMinutes })),
-              }).slice(0, 500),
-            })
-            .catch(() => {});
+        const { sessionFloor } = await import("../negotiation/session-rivals");
+        const { isNewSessionLow } = await import("../negotiation/rival-gate");
+        const cheapestOther = sessionFloor(
+          rows.filter((r) => !r.isThisShop),
+          input.currency
+        );
+        if (isNewSessionLow({ quotePerDay: newLow, cheapestOtherPerDay: cheapestOther?.pricePerDay })) {
+          const { planSiblingRebargain } = await import("../negotiation/rebargain");
+          const { threadKeyFor } = await import("../graph/state");
+          const targets = planSiblingRebargain({
+            rows,
+            excludeVendorId: input.ctx.vendorId ?? "",
+            newLowPerDay: newLow,
+            currency: input.currency,
+          });
+          for (const t of targets) {
+            await io
+              .insertWakeup({
+                kind: "tick",
+                threadKey: threadKeyFor(input.ctx.sender, t.toNumber),
+                notBefore: new Date(io.now() + t.delayMinutes * 60_000).toISOString(),
+                payload: {
+                  userEmail: input.ctx.sender,
+                  vendorId: t.vendorId,
+                  vendorName: t.vendorName,
+                  engine: "v3",
+                  reason: `another shop just came in cheaper - going back to ${t.vendorName} with it`,
+                },
+              })
+              .catch(() => {});
+          }
+          if (targets.length) {
+            await io
+              .recordEvent?.({
+                kind: "swarm-rebargain",
+                vendorId: input.ctx.vendorId,
+                vendorName: input.ctx.vendorName,
+                detail: JSON.stringify({
+                  newLow,
+                  currency: input.currency,
+                  targets: targets.map((t) => ({ shop: t.vendorName, at: t.pricePerDay, inMin: t.delayMinutes })),
+                }).slice(0, 500),
+              })
+              .catch(() => {});
+          }
         }
       }
     } catch {

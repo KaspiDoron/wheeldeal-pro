@@ -31,9 +31,30 @@ export default function GuidesPage() {
       <p className="mt-2 text-[14px] leading-relaxed text-soft">
         Everything below is the same ground our agents negotiate on every day -
         real price bands, the deposits that are normal, and the handful of things
-        genuinely worth checking before you ride away. No affiliate links, no
-        &ldquo;top 10 shops&rdquo;.
+        genuinely worth checking before you ride away. No paid rankings and no
+        &ldquo;top 10 shops&rdquo; - nobody pays to be mentioned here. Some pages
+        end with sponsored search suggestions; they are labelled, and they only
+        appear if you allowed advertising cookies.
       </p>
+      {/* THE SITE'S SEARCH BOX. A plain GET form, no script: it submits exactly
+          what the reader types to /search, which answers with real results from
+          these guides. It starts empty on purpose - a pre-filled search box is a
+          pattern the ads policy names, because it manufactures intent. */}
+      <form action="/search" method="get" role="search" className="mt-5 flex gap-2">
+        <input
+          type="search"
+          name="q"
+          required
+          maxLength={120}
+          autoComplete="off"
+          aria-label="Search the guides"
+          placeholder="Deposits, prices, licences..."
+          className="min-w-0 flex-1 rounded-2xl border-2 border-line bg-card px-4 py-3 text-[16px] text-strong"
+        />
+        <button type="submit" className="rounded-2xl bg-brandblue px-4 py-3 text-[14px] font-extrabold text-white">
+          Search
+        </button>
+      </form>
       {CATEGORY_ORDER.map((cat) => {
         const inCat = GUIDES.filter((g) => g.category === cat);
         if (inCat.length === 0) return null;

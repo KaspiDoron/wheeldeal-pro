@@ -13,6 +13,7 @@ import { WillAvatar } from "@/components/will/WillAvatar";
 import { LanguageButton } from "@/components/LanguageButton";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { SiteFooter } from "@/components/SiteFooter";
+import { FunnelCard } from "@/components/traffic/FunnelCard";
 import { SkeletonCard } from "@/components/Skeleton";
 import { useReadiness } from "@/lib/client/readiness";
 
@@ -1393,6 +1394,11 @@ export default function DealsPage() {
             );
           })()}
 
+        {/* A hunt that went quiet is the other dead end. One card for the page,
+            not one per row - and only when such a hunt is actually on screen. */}
+        {!loading && sessions.some((s) => huntClosure(s) === "expired") && (
+          <FunnelCard placement="hunt-ended" region="" plan={plan} />
+        )}
         {!loading && <SiteFooter />}
       </div>
 

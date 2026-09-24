@@ -8,6 +8,7 @@ import {
   type ConsentKind,
 } from "@/lib/consent";
 import { encodeCookieConsent } from "@/lib/cookies/consent";
+import { COOKIE_POLICY_VERSION } from "@/lib/cookies/manifest";
 import {
   CATEGORY_CONSENT_KIND,
   readAnalyticsId,
@@ -44,11 +45,29 @@ export async function POST(req: Request) {
   }
   const wantGranted = granted === true;
 
+  // Which cookie category, if any, this purpose ALSO is. Resolved before the
+  // write because it decides the version stamp below, and again after it for
+  // the cookie sync.
+  const category = (
+    Object.keys(CATEGORY_CONSENT_KIND) as (keyof typeof CATEGORY_CONSENT_KIND)[]
+  ).find((c) => CATEGORY_CONSENT_KIND[c] === kind);
+
   // The ledger row IS the consent - an unrecorded withdrawal in particular
   // must not be reported as done (the person believes collection stopped).
+  //
+  // THE VERSION NAMES THE DOCUMENT THE PERSON ANSWERED. A cookie-category
+  // purpose is governed by the cookie policy, and the banner stamps
+  // COOKIE_POLICY_VERSION on exactly these kinds (recordCookieConsent). This
+  // door passed no version, so recordConsent fell back to TERMS_VERSION - and
+  // nobody saw it, because both constants happened to read the same date. The
+  // first cookie-policy bump would have split ONE purpose's ledger across two
+  // version vocabularies depending on which screen the person used. Same kind,
+  // same stamp, whichever door. `commercial_insights` is not a cookie category
+  // and keeps the default on purpose.
   const landed = await recordConsent({
     email: session.email,
     kind: kind as ConsentKind,
+    ...(category ? { version: COOKIE_POLICY_VERSION } : {}),
     granted: wantGranted,
     context: { source: "profile-toggle" },
   });
@@ -84,9 +103,6 @@ export async function POST(req: Request) {
   // explaining why. A person with no cookie yet still has the banner due; the
   // ledger row written above already governs collection, because
   // analyticsAllowed requires the ledger AND the cookie.
-  const category = (
-    Object.keys(CATEGORY_CONSENT_KIND) as (keyof typeof CATEGORY_CONSENT_KIND)[]
-  ).find((c) => CATEGORY_CONSENT_KIND[c] === kind);
   const current = category ? readCookieConsent() : null;
   if (category && current) {
     try {

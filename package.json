@@ -23,7 +23,12 @@
     "check:mobile": "node scripts/mobile-check.mjs",
     "test:browser": "playwright test",
     "knip": "knip",
-    "check:cookies": "node scripts/cookie-gate-check.mjs"
+    "check:cookies": "node scripts/cookie-gate-check.mjs",
+    "check:traffic": "node scripts/traffic-check.mjs",
+    "db:local": "./tooling/dev/local-db.sh",
+    "sim": "node tooling/sim/evolution-sim.mjs",
+    "dev:sim": "node tooling/dev/dev-sim.mjs",
+    "drive": "node tooling/dev/live-drive.mjs"
   },
   "dependencies": {
     "@paypal/react-paypal-js": "^10.1.2",

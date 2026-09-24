@@ -153,10 +153,12 @@ export async function POST(req: Request) {
       await sbInsert("agent_events", [
         {
           kind: "localize-fallback",
+          // Keyed by the column, never the payload - see the same row in
+          // ../route.ts and agent-events-keyed.test.ts.
+          user_email: session.email,
           vendor_id: "",
           vendor_name: "(mass bargain)",
           detail: JSON.stringify({
-            email: session.email,
             region: String(body.region ?? ""),
             reason: localized.reason ?? "ai-unavailable",
           }).slice(0, 800),

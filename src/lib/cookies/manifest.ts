@@ -52,8 +52,32 @@ export const OPTIONAL_CATEGORIES: readonly CookieCategory[] = [
  *
  * 2026-09-16: first version. Consent gating for the AdSense SDK, the
  * preference-storage gate, and the first-party analytics id.
+ *
+ * 2026-09-20: the advertising category now also covers SPONSORED SEARCH - a
+ * new purpose (search suggestions that lead to a results page with ads, and a
+ * count of their use), a new Google script (AdSense for Search) with its own
+ * cookies, a new first-party key (wd_tsid), and a receipt number inside
+ * wd_cookie_prefs. That is squarely "a new third party, a new purpose", so
+ * everyone is asked again: a yes given to display ads last week was not a yes
+ * to this, and treating it as one is exactly the consent-by-inertia this
+ * version number exists to prevent.
  */
-export const COOKIE_POLICY_VERSION = "2026-09-16";
+export const COOKIE_POLICY_VERSION = "2026-09-20";
+
+/**
+ * The policy version that FIRST told a visitor about sponsored search.
+ *
+ * A stale-version choice is normally honoured until the person re-answers -
+ * their last word stands. That rule assumes the purpose has not changed. This
+ * one did: sponsored search did not exist before this version, so a yes made
+ * against an earlier one was never a yes to it. `allowsSponsoredSearch` compares
+ * against this, so the new unit stays off for a returning visitor until they
+ * have answered the banner that actually describes it.
+ *
+ * It does NOT move when COOKIE_POLICY_VERSION is bumped for some other reason:
+ * it records when THIS purpose was disclosed, not what today's version is.
+ */
+export const SPONSORED_SEARCH_SINCE = "2026-09-20";
 
 /** Where a stored value actually lives. Said plainly, because "cookies" in the
  *  legal sense covers all three and travellers reasonably read it as none. */
@@ -70,6 +94,18 @@ export interface CookieEntry {
   purpose: string;
   /** Human duration, rendered verbatim. "Session" = gone when the tab closes. */
   duration: string;
+  /**
+   * For a THIRD party's entry: the literal cookie names its script writes onto
+   * THIS site's own domain, which is where the purge can reach them.
+   *
+   * "Third party" describes who sets a cookie, not where it is stored, and the
+   * purge used to conflate the two - it skipped all of Google's cookies as
+   * being "on another domain", which is true of IDE (doubleclick.net) and
+   * false of the rest. A name listed here is expired when its category is
+   * withdrawn; a name left out is one this site genuinely cannot delete, and
+   * the policy page says so rather than claiming otherwise.
+   */
+  siteCookies?: string[];
 }
 
 /**
@@ -97,7 +133,7 @@ export const COOKIE_MANIFEST: CookieEntry[] = [
     category: "necessary",
     party: "first",
     purpose:
-      "Remembers the choice you make in this panel, so you are not asked again on every screen. Without it there is nowhere to record that you said no.",
+      "Remembers the choice you make in this panel, so you are not asked again on every screen. Without it there is nowhere to record that you said no. It also holds a random receipt number, used for one thing only: so that the choice you made can be proven later. It is never used to recognise you for advertising or analytics.",
     duration: "180 days",
   },
 
@@ -256,6 +292,15 @@ export const COOKIE_MANIFEST: CookieEntry[] = [
   // them, which is why the script is not loaded at all until this category is
   // granted - see AdSenseScript in the root layout.
   {
+    name: "wd_tsid",
+    medium: "sessionStorage",
+    category: "marketing",
+    party: "first",
+    purpose:
+      "A random number kept for this visit only, so that one visit's use of the sponsored search suggestions is counted once rather than many times. It never leaves your browser: what is recorded is a short code worked out from it that changes every day and cannot be traced back to it.",
+    duration: "Session - cleared when you close the tab",
+  },
+  {
     name: "__gads, __gpi, _gcl_au, IDE",
     medium: "cookie",
     category: "marketing",
@@ -263,6 +308,25 @@ export const COOKIE_MANIFEST: CookieEntry[] = [
     purpose:
       "Set by Google AdSense to choose and cap the ads shown on the free plan, and to detect ad fraud. WheelDeal does not load Google's ad script at all unless you turn this on, and paid plans never show ads.",
     duration: "Up to 13 months, set and controlled by Google",
+    // Written by Google's script onto this site's own domain, so withdrawing
+    // advertising deletes them. IDE is absent on purpose: it lives on
+    // doubleclick.net, out of this site's reach.
+    siteCookies: ["__gads", "__gpi", "__eoi", "_gcl_au"],
+  },
+  // AdSense for Search - a DIFFERENT Google script (google.com/adsense/search)
+  // from the display SDK above, loaded by the sponsored-search placements in
+  // lib/traffic. Same category, same gate, its own line: a person reading the
+  // list should be able to see that two Google products are involved.
+  {
+    name: "__gsas, NID",
+    medium: "cookie",
+    category: "marketing",
+    party: "Google",
+    purpose:
+      "Set by Google when the sponsored search suggestions or the search ads load, to choose the ads, cap how often you see them and detect ad fraud. WheelDeal does not load Google's search script at all unless you turn this on.",
+    duration: "Up to 13 months, set and controlled by Google",
+    // __gsas is written onto this site's domain; NID belongs to google.com.
+    siteCookies: ["__gsas"],
   },
 ];
 
@@ -292,10 +356,17 @@ export const CATEGORY_COPY: Record<
       "Off: nothing about how you use the app is recorded, on this device or on our servers.",
   },
   marketing: {
-    title: "Advertising",
+    title: "Advertising and sponsored search",
+    // THIS IS THE SENTENCE A VISITOR CONSENTS TO, so it says the three things
+    // that are true and that a person would want to know: the guides may end
+    // with sponsored search suggestions, WheelDeal is paid when the ads behind
+    // them are used, and their use is counted without identifying anyone. A
+    // blurb that said only "advertising" would collect a yes to display ads and
+    // spend it on something the person was never told about.
     blurb:
-      "Google AdSense, which pays for the free plan. Turning this on loads Google's script, which sets its own cookies under Google's rules.",
-    consequence: "Off: Google's ad script is never loaded, and you see no ads.",
+      "Pays for the free plan and the free guides. Turning this on lets Google show ads, and lets the guides end with sponsored search suggestions that lead to a results page carrying ads. WheelDeal earns money when those ads are used. Google's scripts set Google's own cookies under Google's rules, and we count - with no name, email or phone number - that a suggestion was shown or followed.",
+    consequence:
+      "Off: Google's scripts are never loaded, you see no ads and no sponsored suggestions, and nothing about them is counted.",
   },
 };
 

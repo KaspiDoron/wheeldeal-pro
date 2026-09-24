@@ -70,6 +70,70 @@ function sourceFiles(dir = "src"): string[] {
   return out;
 }
 
+// ---- 0: COOKIES, not only storage keys ---------------------------------------
+//
+// The storage grep below catches `localStorage.setItem` and the gated helpers.
+// It never looked at COOKIES - so a `document.cookie = "wd_first_touch=..."` or
+// a `cookies().set("wd_attr", ...)` dropped into any route would have shipped
+// undeclared, with the policy page and the banner none the wiser. That is the
+// exact shape a marketing-attribution cookie arrives in, which makes it the
+// write most worth catching.
+//
+// Cookie writes are rarer and more dangerous than storage writes, so the rule
+// is stricter: they may exist ONLY in the files listed here, and every name
+// those files write must be a declared cookie.
+
+describe("every COOKIE write in the app is in a known file and declared", () => {
+  const COOKIE_WRITE_FILES = new Set([
+    "src/lib/cookies/client.ts", // the consent cookie, and the purge
+    "src/lib/cookies/server.ts", // the consent cookie and the analytics id
+    "src/lib/session.ts", // the signed session cookie
+  ]);
+
+  const WRITE_PATTERNS: RegExp[] = [
+    /document\.cookie\s*=(?!=)/, // assignment, not a comparison
+    /cookies\(\)\s*\.set\(/,
+    /\.cookies\s*\.set\(/,
+    /["'`]set-cookie["'`]/i,
+  ];
+
+  const writers = new Set<string>();
+  for (const file of sourceFiles()) {
+    const src = stripComments(read(file));
+    if (WRITE_PATTERNS.some((re) => re.test(src))) writers.add(file);
+  }
+
+  it("finds the known cookie writers at all (the grep itself still works)", () => {
+    for (const f of COOKIE_WRITE_FILES) expect(writers.has(f), `${f} no longer matches - fix the pattern`).toBe(true);
+  });
+
+  it("no file outside the allowlist writes a cookie", () => {
+    const strays = [...writers].filter((f) => !COOKIE_WRITE_FILES.has(f));
+    expect(
+      strays,
+      "a cookie is being set outside the cookie layer - declare it in manifest.ts, write it from lib/cookies, " +
+        "and only then add the file here"
+    ).toEqual([]);
+  });
+
+  it("every cookie name those files write is declared, as a cookie, in the manifest", () => {
+    const session = /const COOKIE = "([^"]+)"/.exec(read("src/lib/session.ts"))?.[1] ?? "";
+    for (const name of [session, CONSENT_COOKIE, ANALYTICS_COOKIE]) {
+      const entry = COOKIE_MANIFEST.find((e) => e.name === name);
+      expect(entry, `"${name}" is written but not declared`).toBeDefined();
+      expect(entry?.medium).toBe("cookie");
+    }
+  });
+
+  it("the names the purge deletes on withdrawal are all attached to a declared third-party entry", () => {
+    for (const e of COOKIE_MANIFEST) {
+      if (!e.siteCookies) continue;
+      expect(e.party, `${e.name}: only a third party's entry lists siteCookies`).not.toBe("first");
+      for (const n of e.siteCookies) expect(n).toMatch(/^[A-Za-z0-9_]+$/);
+    }
+  });
+});
+
 // ---- 1 + 2: the manifest is complete, and the gate is the only door ---------
 
 describe("every browser-storage write in the app is declared and gated", () => {
@@ -299,14 +363,23 @@ describe("the ad SDK is not loaded without advertising consent", () => {
     expect(layout).not.toMatch(/<script\s+async\s+src=\{`https:\/\/pagead2/);
   });
 
+  // The gate moved out of the layout into lib/cookies/prepaint.ts so it can be
+  // EXECUTED (prepaint.test.ts does). These pins follow it: the layout must
+  // still inline it, and the module must still hold the decision.
+  const prepaint = read("src/lib/cookies/prepaint.ts");
+
   it("the SDK is injected by the pre-paint gate, keyed on the marketing grant", () => {
     expect(layout).toMatch(/adConsentScript/);
-    expect(layout).toMatch(/d\.g\.marketing !== true\) return;/);
-    expect(layout).toMatch(/pagead2\.googlesyndication\.com/);
+    expect(layout).toMatch(/buildAdConsentScript\(ADSENSE_PUBLISHER\)/);
+    expect(layout).toMatch(/dangerouslySetInnerHTML=\{\{ __html: adConsentScript \}\}/);
+    expect(prepaint).toMatch(/d\.g\.marketing !== true\) return;/);
+    expect(prepaint).toMatch(/pagead2\.googlesyndication\.com/);
+    // The SDK host appears NOWHERE in the layout any more - one place decides.
+    expect(stripComments(layout)).not.toMatch(/googlesyndication/);
   });
 
   it("the gate reads the same cookie name the rest of the layer writes", () => {
-    expect(layout).toContain("wd_cookie_prefs");
+    expect(prepaint).toContain("wd_cookie_prefs");
     expect(CONSENT_COOKIE).toBe("wd_cookie_prefs");
   });
 
@@ -329,7 +402,7 @@ describe("the ad SDK is not loaded without advertising consent", () => {
     const parsed = JSON.parse(Buffer.from(b, "base64").toString("utf8"));
     expect(parsed.g.marketing).toBe(true);
     // ...and the padding expression the gate uses is the one tested here.
-    expect(stripComments(layout)).toContain('b += "====".slice((b.length % 4) || 4);');
+    expect(stripComments(prepaint)).toContain('b += "====".slice((b.length % 4) || 4);');
   });
 
   it("the ad slot itself also refuses without consent", () => {
@@ -639,7 +712,7 @@ describe("the published policy is generated, not written", () => {
     expect(legal).toMatch(/title: "Cookies and what is stored in your browser"/);
     expect(legal).toMatch(/\/cookies/);
     // The version bump is what puts every existing user through the new text.
-    expect(legal).toMatch(/TERMS_VERSION = "2026-09-16"/);
+    expect(legal).toMatch(/TERMS_VERSION = "2026-09-20"/);
   });
 
   it("the policy version is a date, so 'which text did they see' is answerable", () => {

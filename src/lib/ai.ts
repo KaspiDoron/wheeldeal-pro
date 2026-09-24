@@ -13,6 +13,7 @@ import { getConfig, pgTimestamp } from "./runtime-config";
 // per provider per minute, not per call.
 const rpmOverrideCache = new Map<string, { v: number | null; at: number }>();
 import { reserveAiCall } from "./ai-budget";
+import { breakerPlan, noteProviderFailure, noteProviderSuccess, parseBreakerSettings, type BreakerSettings } from "./ai-breaker";
 
 export type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
 
@@ -32,7 +33,17 @@ export type ProviderName =
   // opts.tier) - high-stakes turns get the strongest brains.
   | "openai"
   | "anthropic"
-  | "kimi";
+  | "kimi"
+  /**
+   * A model running on the machine itself (Ollama's OpenAI-compatible API).
+   *
+   * There is no key to configure, so OLLAMA_URL IS the key: unset, this rung
+   * does not exist, which is every deployment. It earns its place because
+   * without it a local dev run has no model at all - every call returns
+   * text:null, the engine falls through to its deterministic templates, and
+   * the AI half of the product cannot be exercised or tested before it ships.
+   */
+  | "ollama";
 
 /** How a provider speaks on the wire. Everything OpenAI-shaped shares one code
  *  path; Gemini and Anthropic have their own request/response grammar. This
@@ -72,6 +83,9 @@ const CALL_TIMEOUT_MS = 14000;
  *  LAST by default - a free rung that answers means no bill - and is hoisted
  *  to the FRONT for premium-tier callers (see chatDetailed opts.tier). */
 export const PROVIDER_NAMES: ProviderName[] = [
+  // A LOCAL MODEL LEADS WHEN THERE IS ONE. It costs nothing, leaves the
+  // machine nowhere, and is unset everywhere but a developer's laptop.
+  "ollama",
   // FREE RUNGS FIRST, cheapest-failure first. sambanova sits at the back of
   // the free block (its free tier answered 429 on both pools in the owner's
   // live probe) and deepseek left the free block entirely - it spends the
@@ -93,7 +107,7 @@ export const PROVIDER_NAMES: ProviderName[] = [
 ];
 
 async function allProviders(): Promise<ProviderConfig[]> {
-  const [groq, openrouter, cerebras, gemini, mistral, huggingface, deepseek, together, sambanova, openai, anthropic, kimi] =
+  const [groq, openrouter, cerebras, gemini, mistral, huggingface, deepseek, together, sambanova, openai, anthropic, kimi, ollamaUrl] =
     await Promise.all([
       getConfig("GROQ_TOKEN"),
       getConfig("OPENROUTER_TOKEN"),
@@ -107,13 +121,15 @@ async function allProviders(): Promise<ProviderConfig[]> {
       getConfig("OPENAI_TOKEN"),
       getConfig("ANTHROPIC_TOKEN"),
       getConfig("KIMI_TOKEN"),
+      // Not a secret - the address of a model on this machine.
+      getConfig("OLLAMA_URL"),
     ]);
   // Optional per-provider MODEL override (vault/env `<PROVIDER>_MODEL`). Free-tier
   // model ids drift constantly - a rename 404s the whole provider. This lets the
   // owner pin or upgrade any provider's model LIVE from Admin -> Keys with no
   // redeploy (paste e.g. `CEREBRAS_MODEL = qwen-3-235b-a22b-instruct-2507`).
   // Blank -> the strong default below. The fallbackModel still covers a bad id.
-  const [groqM, orM, cerM, gemM, misM, hfM, dsM, togM, sambaM, oaiM, antM, kimiM] = await Promise.all([
+  const [groqM, orM, cerM, gemM, misM, hfM, dsM, togM, sambaM, oaiM, antM, kimiM, ollamaM] = await Promise.all([
     getConfig("GROQ_MODEL"),
     getConfig("OPENROUTER_MODEL"),
     getConfig("CEREBRAS_MODEL"),
@@ -126,6 +142,7 @@ async function allProviders(): Promise<ProviderConfig[]> {
     getConfig("OPENAI_MODEL"),
     getConfig("ANTHROPIC_MODEL"),
     getConfig("KIMI_MODEL"),
+    getConfig("OLLAMA_MODEL"),
   ]);
   const pick = (override: string | undefined, def: string) =>
     (override && override.trim()) || def;
@@ -312,6 +329,20 @@ async function allProviders(): Promise<ProviderConfig[]> {
       dialect: "openai",
       paid: true,
     },
+    // ---- a model on this machine (dev, or a self-hosted deployment) --------
+    // Ollama speaks the OpenAI dialect at /v1, so it needs no new call path.
+    // THE URL IS THE KEY: `providers()` keeps only rungs with a token, so an
+    // unset OLLAMA_URL removes this rung entirely - which is every deployment
+    // that has not deliberately pointed at one. A 4B model answers a JSON
+    // extraction in under three seconds on a laptop, which is what makes the
+    // AI half of the funnel testable before it reaches a real shop.
+    {
+      name: "ollama",
+      token: ollamaUrl ? "local" : undefined,
+      endpoint: `${String(ollamaUrl ?? "").replace(/\/$/, "")}/v1/chat/completions`,
+      model: pick(ollamaM, "qwen3:4b"),
+      dialect: "openai",
+    },
   ];
 }
 
@@ -338,6 +369,7 @@ const PROVIDER_META: Record<ProviderName, { cadence: Cadence; note: string }> = 
     note: "PAID per token (no free reset) - Sonnet intro pricing ends 2026-08-31.",
   },
   kimi: { cadence: "none", note: "PAID per token (no free reset) - runs first on premium-tier turns." },
+  ollama: { cadence: "none", note: "A model on this machine - no key, no bill, no reset." },
 };
 
 /** Start of the current cadence window as an ISO instant (UTC). */
@@ -1112,6 +1144,20 @@ export async function chat(
  * a readable reason (the last provider error) so callers can show something
  * useful instead of a generic "did not respond".
  */
+let breakerCache: { v: BreakerSettings; at: number } | null = null;
+/** `AI_BREAKER` from the Key Vault, cached 60s. Unreadable = the defaults (on). */
+async function breakerSettings(): Promise<BreakerSettings> {
+  if (breakerCache && Date.now() - breakerCache.at < 60_000) return breakerCache.v;
+  let raw: string | null = null;
+  try {
+    raw = (await getConfig("AI_BREAKER")) ?? null;
+  } catch {
+    /* unreadable -> defaults */
+  }
+  breakerCache = { v: parseBreakerSettings(raw), at: Date.now() };
+  return breakerCache.v;
+}
+
 export async function chatDetailed(
   messages: ChatMessage[],
   opts?: {
@@ -1255,6 +1301,18 @@ export async function chatDetailed(
     }
     return tryConsumeDay(name, Date.now(), capacity);
   };
+  // WHAT A PROVIDER ACTUALLY SAID, REMEMBERED (lib/ai-breaker). The budgets above
+  // PREDICT a spent quota; nothing remembered a REAL refusal, so a rung that
+  // answered 402 "payment required" was tried again on the very next call.
+  // Production, 30 days to 2026-09-21: cerebras failed 274/274, sambanova
+  // 32/32, openrouter 74%, mistral 68% - and reply turns took 45-56s to compose
+  // for thinking that took under five. Benched rungs are dropped here; the plan
+  // never comes back empty, so this can only make the ladder faster.
+  const breaker = await breakerSettings();
+  const plan = breakerPlan(list.map((p) => p.name), Date.now(), breaker);
+  errors.push(...plan.skipped);
+  list = plan.order.map((name) => list.find((p) => p.name === name)).filter((p): p is ProviderConfig => Boolean(p));
+
   for (let idx = 0; idx < list.length; idx++) {
     const cfg = list[idx];
     if (Date.now() > deadline) {
@@ -1283,6 +1341,8 @@ export async function chatDetailed(
       const remaining = Math.max(2_000, Math.min(CALL_TIMEOUT_MS, deadline - Date.now()));
       const { text, tokens, model } = await callProvider(cfg, messages, maxTokens, remaining);
       await recordUsage(cfg.name, tokens, false, model);
+      // An answer closes the breaker and forgets the streak.
+      noteProviderSuccess(cfg.name);
       if (text) return { text, provider: cfg.name };
       errors.push(`${cfg.name}: empty reply`);
     } catch (e) {
@@ -1290,6 +1350,8 @@ export async function chatDetailed(
       // PERSIST the reason, which used to live only in this local array.
       const reason = e instanceof Error ? e.message : String(e);
       await recordUsage(cfg.name, 0, true, cfg.model, reason);
+      // ...and REMEMBER it, so the next call does not pay for the same answer.
+      noteProviderFailure(cfg.name, reason, Date.now(), breaker);
       errors.push(reason);
     }
   }

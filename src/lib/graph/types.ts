@@ -465,6 +465,16 @@ export interface GraphTurnInput {
   // Legacy message-scan counters (dual-read backstop during migration).
   legacyCounts: { clarify: number; bargain: number; answer: number; close: number };
   humanDelay: boolean;
+  /**
+   * When the shop's message actually arrived (epoch ms), from the provider's
+   * own timestamp where there is one.
+   *
+   * The reply promise is measured from HERE, not from the end of our
+   * processing: a pause that pads a turn without looking at how long the turn
+   * already took cannot keep a ten-second promise (see wa/reply-sla).
+   * Absent on ticks, which answer nobody's message.
+   */
+  inboundAt?: number;
   // Transcription result when the event carried audio (task: voice agent).
   transcript?: { text: string; language?: string; source: string } | null;
   deadlineAt: number; // Date.now() + remaining serverless budget

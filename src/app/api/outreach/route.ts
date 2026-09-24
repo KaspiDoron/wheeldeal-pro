@@ -379,10 +379,14 @@ async function handlePost(req: Request) {
       await sbInsert("agent_events", [
         {
           kind: "localize-fallback",
+          // KEYED BY THE COLUMN. This row used to carry the address inside
+          // `detail` and leave `user_email` empty - and the erasure registry
+          // finds agent_events rows by `user_email` alone, so it outlived the
+          // account it named. agent-events-keyed.test.ts guards the class.
+          user_email: session.email,
           vendor_id: vendorId,
           vendor_name: vendorName,
           detail: JSON.stringify({
-            email: session.email,
             region: String(body.region ?? ""),
             reason: localized.reason ?? "ai-unavailable",
           }).slice(0, 800),
@@ -853,7 +857,6 @@ async function handlePost(req: Request) {
           vendor_id: vendorId,
           vendor_name: vendorName,
           detail: JSON.stringify({
-            email: session.email,
             channel: result.channel,
           }).slice(0, 800),
         },
@@ -881,7 +884,6 @@ async function handlePost(req: Request) {
         vendor_id: vendorId,
         vendor_name: vendorName,
         detail: JSON.stringify({
-          email: session.email,
           channel: result.channel,
           error: result.error ?? "unknown",
         }).slice(0, 800),

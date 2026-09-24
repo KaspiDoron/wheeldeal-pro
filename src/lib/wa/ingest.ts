@@ -1588,6 +1588,16 @@ export async function processEvolutionWebhook(
       const gatePatienceMs = msLeft() - TURN_ENTRY_FLOOR_MS;
       await withInboundSlot(async () => processVendorReply({
         fromDigits: from,
+        // WHEN THE SHOP PRESSED SEND - the provider's own stamp where it is
+        // sane, so the reply promise is measured against their clock and not
+        // against ours. Seconds or milliseconds, both are seen in the wild.
+        inboundAt: (() => {
+          const raw = Number((data as { messageTimestamp?: unknown }).messageTimestamp);
+          if (!Number.isFinite(raw) || raw <= 0) return Date.now();
+          const ms = raw < 1e12 ? raw * 1000 : raw;
+          // Never trust a stamp from the future or from last week.
+          return ms > Date.now() - 300_000 && ms <= Date.now() + 5_000 ? ms : Date.now();
+        })(),
         // The RESOLVED origin chat - asserted against `from` before attributing.
         // For a privacy @lid chat this is the line the alias resolved to, which
         // is the only identity we are willing to attribute a reply to.

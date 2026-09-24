@@ -21,6 +21,7 @@
 import {
   COOKIE_POLICY_VERSION,
   OPTIONAL_CATEGORIES,
+  SPONSORED_SEARCH_SINCE,
   type CookieCategory,
 } from "./manifest";
 
@@ -46,6 +47,44 @@ export interface CookieConsent {
   grants: CookieGrants;
   /** How the choice was made - proof of what the UI offered at the time. */
   source: "accept-all" | "reject-all" | "custom";
+  /**
+   * THE RECEIPT NUMBER. A random value with nothing about the person in it,
+   * kept across saves on this browser.
+   *
+   * It exists for one purpose: a signed-out visitor's choice can be PROVEN
+   * later. The server files sha256(id) next to the choice, so a visitor who
+   * presents their cookie can be shown their own consent history, and nobody
+   * holding the database can turn a row back into a cookie. It is never used
+   * to recognise a visitor for analytics, advertising or anything else - that
+   * is what makes it defensible inside a strictly-necessary cookie, and the
+   * manifest says so in plain words.
+   *
+   * Optional: a cookie written before this existed decodes without one and
+   * gets one on its next save.
+   */
+  id?: string;
+}
+
+const RECEIPT_PATTERN = /^[A-Za-z0-9_-]{16,32}$/;
+
+/** 128 random bits, base64url. Nothing derived from the person or the device. */
+export function newReceiptId(): string {
+  const bytes = new Uint8Array(16);
+  if (typeof globalThis.crypto?.getRandomValues === "function") {
+    globalThis.crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+  }
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  const b64 = typeof Buffer !== "undefined" ? Buffer.from(bytes).toString("base64") : btoa(bin);
+  return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/** A receipt id only if it looks like one - the value arrives from a cookie a
+ *  client can write anything into, and it reaches a hash and a database. */
+export function validReceiptId(value: unknown): string | undefined {
+  return typeof value === "string" && RECEIPT_PATTERN.test(value) ? value : undefined;
 }
 
 /** Everything off. The answer to every question this module cannot answer. */
@@ -67,11 +106,13 @@ export function normalizeGrants(input: unknown): CookieGrants {
 /** The cookie value: base64url JSON. Short keys because it rides on every
  *  request and a cookie budget is real. */
 export function encodeCookieConsent(consent: CookieConsent): string {
+  const id = validReceiptId(consent.id);
   const payload = JSON.stringify({
     v: consent.version,
     t: Math.round(consent.at),
     s: consent.source,
     g: consent.grants,
+    ...(id ? { i: id } : {}),
   });
   // Buffer is not in the browser and btoa is not guaranteed in every server
   // runtime, so both are tried. TextEncoder (everywhere since Node 11) keeps a
@@ -111,6 +152,7 @@ export function decodeCookieConsent(value: string | null | undefined): CookieCon
       t?: unknown;
       s?: unknown;
       g?: unknown;
+      i?: unknown;
     };
     const version = String(parsed.v ?? "");
     const at = Number(parsed.t);
@@ -119,7 +161,8 @@ export function decodeCookieConsent(value: string | null | undefined): CookieCon
       parsed.s === "accept-all" || parsed.s === "reject-all" || parsed.s === "custom"
         ? parsed.s
         : "custom";
-    return { version, at: at, source, grants: normalizeGrants(parsed.g) };
+    const id = validReceiptId(parsed.i);
+    return { version, at: at, source, grants: normalizeGrants(parsed.g), ...(id ? { id } : {}) };
   } catch {
     return null;
   }
@@ -153,13 +196,38 @@ export function allows(
   return consent.grants[category] === true;
 }
 
+/**
+ * May SPONSORED SEARCH run under this record? Stricter than `allows(_,
+ * "marketing")` in exactly one way: the yes must have been given against a
+ * policy that described sponsored search (see SPONSORED_SEARCH_SINCE).
+ *
+ * Versions are ISO dates, so string order is date order - but ONLY for strings
+ * that are dates. "zzzz" sorts after every date, and an unvalidated compare
+ * would make a garbage version the strongest consent there is, so the shape is
+ * checked first and anything else fails closed.
+ */
+export function allowsSponsoredSearch(consent: CookieConsent | null | undefined): boolean {
+  if (!consent || !allows(consent, "marketing")) return false;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(consent.version)) return false;
+  return consent.version >= SPONSORED_SEARCH_SINCE;
+}
+
 /** Build a complete record for a choice being made now. */
 export function makeConsent(
   grants: CookieGrants,
   source: CookieConsent["source"],
-  now: number = Date.now()
+  now: number = Date.now(),
+  /** The receipt id already on this browser, so its history stays one chain. */
+  receiptId?: string
 ): CookieConsent {
-  return { version: COOKIE_POLICY_VERSION, at: now, source, grants: normalizeGrants(grants) };
+  const id = validReceiptId(receiptId);
+  return {
+    version: COOKIE_POLICY_VERSION,
+    at: now,
+    source,
+    grants: normalizeGrants(grants),
+    ...(id ? { id } : {}),
+  };
 }
 
 /**

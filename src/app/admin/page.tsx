@@ -78,6 +78,7 @@ import type { AnalyticsSnapshot } from "@/lib/types";
 import { providerFailureKind, providerNeedsOwner, providerFailureCopy } from "@/lib/provider-health";
 import { StatTile, DegradedBanner, type StatHelp } from "@/components/admin/primitives";
 import { GovernanceConsole } from "@/components/admin/GovernanceConsole";
+import { TrafficConsole } from "@/components/admin/TrafficConsole";
 import { InfoTipProvider } from "@/components/InfoTip";
 
 // Every Command KPI carries an "i" that explains it - enforced by StatTile's
@@ -279,6 +280,7 @@ export default function AdminPage() {
     | "engine"
     | "ops"
     | "money"
+    | "traffic"
     | "waba"
     | "risk"
     | "i18n"
@@ -1092,6 +1094,7 @@ export default function AdminPage() {
           "command",
           "analytics",
           "money",
+          "traffic",
           "waba",
           "risk",
           "engine",
@@ -1119,6 +1122,8 @@ export default function AdminPage() {
                   ? "🧭 ops"
                   : t === "money"
                     ? "💸 money"
+                    : t === "traffic"
+                      ? "🔎 traffic"
                     : t === "waba"
                       ? "📲 wa business"
                       : t === "risk"
@@ -2826,6 +2831,11 @@ export default function AdminPage() {
           )}
         </div>
       )}
+
+      {/* SPONSORED SEARCH: what the placements did, what the partners say they
+          paid for, and whether the two agree. Reads are management; the revenue
+          import inside it is owner-only and audited. */}
+      {loaded && tab === "traffic" && <TrafficConsole />}
 
       {loaded && tab === "data" && (
         <div className="space-y-3">

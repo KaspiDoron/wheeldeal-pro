@@ -185,6 +185,46 @@ jobs:
           key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
+      # THE ONE PROMISE NOTHING ABOVE CAN SEE.
+      #
+      # "We do not load Google's ad script unless you allow it" is a negative
+      # promise about a THIRD-PARTY REQUEST. The unit suite can only grep
+      # layout.tsx and assert the source text looks right, and every way the
+      # gate really fails slips past that: the inline script throwing on a
+      # real document.cookie, Next inlining it somewhere the browser never
+      # runs, a refactor that moves the cookie name in both copies at once.
+      # scripts/cookie-gate-check.mjs boots the production build from the step
+      # above, drives real Chromium, COUNTS requests to googlesyndication.com
+      # under every consent state, and asks the real middleware what it does
+      # with each one.
+      #
+      # CLAUDE.md has listed it in the validate line since the cookie layer
+      # shipped, and CI never ran it - so the only promise made to a regulator
+      # rather than to a user's eyes was the only one guarded by somebody
+      # remembering to type a command. deploy-workflow.test.ts now fails if
+      # this step is removed or softened.
+      #
+      # It needs exactly two things and both are already here: the .next build
+      # (it exits 2 without one) and Chromium (it falls back to Playwright's
+      # default browser path, which the install step above fills; it boots its
+      # own `next start` on :3401, clear of the journey suite's :3399, with its
+      # own throwaway SESSION_SECRET - no repository secret reaches it). Before
+      # the journeys because it is the cheaper of the two by minutes, and a
+      # hard gate: no continue-on-error, `deploy` needs this whole job.
+      - name: Cookie gate (real Chromium, real network)
+        timeout-minutes: 5
+        run: npm run check:cookies
+      # THE OTHER HALF OF THE SAME PROMISE. The cookie gate proves nothing loads
+      # without consent; this proves that what loads WITH consent is what
+      # Google's search-ads policy allows - one request per document, Google's
+      # own terms, never more ads than results, a typed query never logged, an
+      # undeclared ad creative never forwarded. None of that can fail a unit
+      # test: it is what the page sends at runtime, and the penalty for getting
+      # it wrong is an AdSense strike weeks later, not a red build. Google's
+      # script is replaced with a recorder, so this never touches Google.
+      - name: Sponsored search (what is actually sent to Google)
+        timeout-minutes: 6
+        run: npm run check:traffic
       - name: Browser journeys (Playwright)
         run: npx playwright test
       - name: Upload Playwright report

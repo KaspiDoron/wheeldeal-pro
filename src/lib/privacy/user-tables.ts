@@ -103,6 +103,13 @@ export const USER_TABLES: UserTableKey[] = [
     match: "exact",
     exportSelect: "id,source_table,source_id,embed_model,snippet,dim,created_at",
   },
+  // The fee's evidence trail: what the agent recorded at the close, what the
+  // traveller answered when asked once, and what the shop marked. It holds the
+  // thread key, the agreed price and the pickup, so it is the person's data by
+  // any reading - registered, not excused. The MONEY row (commission_ledger)
+  // deliberately carries no traveller key, so a shop's billing history survives
+  // this erasure while the person's own record does not.
+  { table: "rental_claims", column: "user_email", match: "exact" },
   { table: "feedback", column: "reporter_email", match: "exact" },
   { table: "feedback_replies", column: "author_email", match: "exact" },
   // ---- sender_key IS the email (one WhatsApp number per account) -----------
@@ -251,7 +258,22 @@ export const EXCLUDED_TABLES: Record<string, string> = {
   response_times: "shop-latency samples keyed by SHOP phone (hashed), no traveller key",
   vendors: "shop-side directory",
   sponsored_shops: "shop-side directory",
+  partner_shops: "shop-side partner record, keyed by the shop's phone - terms, credit and confirmation rate, no traveller key",
+  // The invoice. It points AT a claim and holds no address, which is the same
+  // reasoning admin_audit records: a billing history a counterparty's erasure
+  // can delete is not a billing history. The traveller's own row (the claim,
+  // with the thread and the evidence) IS erased, leaving the fee attached to a
+  // shop, a period and a state - which is all a bill is made of.
+  commission_ledger: "the shop's billing record - carries no traveller key by design; the pointer lives on rental_claims and is erased with it",
+  shop_statements: "shop-side monthly statement, keyed by the shop and opened by its own token",
   market_floor_prices: "market aggregates, no user key",
+  // THE THREE ANONYMOUS-VISITOR TABLES. None can be walked by an email because
+  // none holds one - by construction, not by omission (see the schema block).
+  // An account erasure therefore has nothing to find in them, and saying so
+  // here is the registry decision the completeness test demands.
+  visitor_consent_events: "signed-OUT visitors only, keyed by sha256 of the random receipt id in their own cookie - no email, phone, IP or user agent; pruned at 730 days",
+  traffic_events: "anonymous search-traffic log - closed-vocabulary columns and an 8-hex session hash that rotates daily; no user key; pruned on the long window",
+  traffic_revenue: "the partner's payment report by day and sub-id - money history with no visitor in it; imported_by is an OPERATOR, not a data subject",
   waba_agencies: "shop-side WABA partners",
   wa_suppressions: "shop-side opt-outs - deleting them on user erasure would RE-CONTACT the shop",
   agent_tactics: "owner-authored playbook content",

@@ -37,7 +37,20 @@
 // wd_* keys sitting in every traveller's browser, which is the half of "what do
 // you store about me" a person can actually go and look at. The full, generated
 // inventory lives at /cookies; this is the summary that links to it.
-export const TERMS_VERSION = "2026-09-16";
+//
+// Bumped 2026-09-20: section 9(d) now covers SPONSORED SEARCH. Until this
+// version the policy described advertising as "Google AdSense" and nothing
+// else, which stopped being the whole truth the day a guide could end with
+// search suggestions that earn money. The new text says what a person would
+// want to know before saying yes: what the placement is and that WheelDeal is
+// paid through it; that its use is counted with no name, email, number, IP or
+// account, for about a year; that a TYPED search is never stored; exactly what
+// a search partner receives and why nothing identifying can ride in it; that a
+// Global Privacy Control signal is honoured as a refusal; that Google's search
+// ads are not requested in the EEA, UK or Switzerland without a certified
+// consent platform; and that a signed-out visitor's choice is now provable via
+// a hashed receipt number kept for two years and used for nothing else.
+export const TERMS_VERSION = "2026-09-20";
 export const OPERATOR_NAME = "the Operator"; // TODO: replace with the legal entity name
 export const GOVERNING_LAW = "the State of Israel";
 export const JURISDICTION = "the competent courts of Tel Aviv, Israel";
@@ -335,7 +348,10 @@ export const PRIVACY_SECTIONS: LegalSection[] = [
       "(a) STRICTLY NECESSARY - the signed cookie that keeps you logged in, and the cookie that records your answer to this very question. These cannot be switched off: without them there is no session and nowhere to record a refusal. " +
       "(b) PREFERENCES - your theme, language, currency, sort order and similar, remembered on this device. " +
       "(c) ANALYTICS - a first-party random identifier with nothing personal in it, plus a record of which screens you reached, so we can find the parts of the app that quietly fail. It is never sold and never used to advertise to you. " +
-      "(d) ADVERTISING - Google AdSense, which funds the free plan. Google's script sets Google's own cookies under Google's terms; WheelDeal does not load that script at all unless you allow this category, and paid plans never show ads. " +
+      "(d) ADVERTISING AND SPONSORED SEARCH - this funds the free plan and the free guides, and it has two parts. First, Google AdSense display ads on the free plan; paid plans never show ads. Second, SPONSORED SEARCH: a guide may end with search suggestions supplied by Google (or links to a search partner), which lead to a results page that carries ads, and WheelDeal is paid when those ads are used. Google's scripts set Google's own cookies under Google's terms; WheelDeal loads none of them unless you allow this category. " +
+      "When you have allowed it, we also keep a count of the sponsored placements themselves: that one was shown, or that a suggestion was followed, together with the page's topic and country and a short code that changes every day. That record holds no name, email, phone number, IP address or account, it is kept for about a year, and a search you type yourself is never stored - only a suggestion Google itself generated from a public article. A search partner is sent that same short code so that its payment can be matched to a placement; it is built only from fixed category codes, so nothing identifying you can be placed in it. " +
+      "If your browser sends a Global Privacy Control signal we treat advertising as refused, whatever was chosen earlier on that device. In the European Economic Area, the United Kingdom and Switzerland, Google's search ads are not requested at all unless a Google-certified consent platform is in use on this site. " +
+      "So that a choice can be proven later even for someone who never signs in, the cookie recording your choice carries a random receipt number, and we keep the choice against a one-way hash of that number for up to two years. The receipt number is used for nothing else - it is never used to recognise you for advertising or analytics. " +
       "THE ESSENTIAL GROUP IS A CONDITION OF USING THE APP. There is no version of a signed-in account without a sign-in cookie, and no way to honour a refusal without somewhere to record it, so you are asked to accept those two before the app will open - and until you answer, it does not. This is not a condition on the other three: 'Essential only' is a single tap that gets you the complete product, and choosing it is as quick as accepting everything. " +
       "Categories (b), (c) and (d) are OFF until you turn them on, a refusal is honoured immediately, and switching a category off deletes what is already stored in it on this device. You can change your answer at any time from the Cookies link in the app's footer or from Profile -> Your data, and withdrawing is exactly as easy as consenting. " +
       "The complete, per-cookie list - every name, its purpose and how long it lasts - is published at /cookies and is generated from the application's own code, so it is always what the app actually does rather than a description of it.",

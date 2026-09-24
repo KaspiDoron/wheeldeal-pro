@@ -1119,6 +1119,38 @@ create index if not exists agent_events_to_number_idx
 create index if not exists agent_events_user_idx
   on public.agent_events (user_email, kind, created_at desc);
 
+-- BACKFILL: agent_events rows that NAMED A PERSON IN THE PAYLOAD, NOT THE KEY.
+--
+-- Four writers (consent-unrecorded, localize-fallback, outbound-log-failed,
+-- send-failed) put the traveller's address inside the JSON `detail` text. Two
+-- of them left `user_email` NULL as well - and the erasure registry finds this
+-- table's rows by `user_email` alone, so those rows outlived the account they
+-- named. The writers are fixed (agent-events-keyed.test.ts guards the class);
+-- this repairs the rows written before the fix, so they become erasable and
+-- exportable like every other row about a person.
+--
+-- REGEX, NOT A ::jsonb CAST, AND THAT IS NOT A STYLE CHOICE. Every one of these
+-- writers truncates `detail` at 800 characters, so some rows hold JSON cut off
+-- mid-string. A cast raises on the first such row and takes the whole schema
+-- run down with it. A regex cannot fail: it moves what it finds and leaves the
+-- rest alone.
+--
+-- Idempotent: once a row is repaired its detail no longer matches, so re-running
+-- this file is a no-op. Both key positions are handled so the JSON that remains
+-- stays valid - `{"email":"x","a":1}` and `{"a":1,"email":"x"}` both end as
+-- `{"a":1}`.
+update public.agent_events
+   set user_email = coalesce(
+         nullif(user_email, ''),
+         lower(substring(detail from '"email"\s*:\s*"([^"]+)"'))
+       ),
+       detail = regexp_replace(
+                  regexp_replace(detail, '"email"\s*:\s*"[^"]*"\s*,\s*', ''),
+                  ',?\s*"email"\s*:\s*"[^"]*"', ''
+                )
+ where kind in ('consent-unrecorded', 'localize-fallback', 'outbound-log-failed', 'send-failed')
+   and detail ~ '"email"\s*:\s*"';
+
 -- Session attribution on offers (exact rival grouping per search session).
 alter table public.offers add column if not exists search_id bigint;
 create index if not exists offers_search_idx on public.offers (search_id);
@@ -1993,3 +2025,246 @@ create index if not exists admin_audit_actor_idx
 create index if not exists admin_audit_subject_idx
   on public.admin_audit (subject_email, created_at desc);
 alter table public.admin_audit enable row level security;
+
+-- ---------------------------------------------------------------------------
+-- THE SHOP FEE (partner_shops, rental_claims, commission_ledger,
+-- shop_statements) - the first way this product charges anybody
+-- ---------------------------------------------------------------------------
+--
+-- The business plan fixes the commercial rules and they are unusual enough to
+-- restate here, because the schema only makes sense against them:
+--
+--   The SHOP pays, and only for a rental that actually happened - a flat fee
+--   per completed rental, not a share of the price. The traveller pays nothing
+--   per rental. WheelDeal is not in the payment: the money changes hands on the
+--   ground, so a fee can only ever rest on EVIDENCE, and the evidence is three
+--   answers that must agree - what the agent recorded at the close, what the
+--   traveller said when asked once, and what the shop marked on its monthly
+--   list. Silence is not a charge. "No" is not a charge, and is not argued
+--   with. Anything unmarked is not billed.
+--
+-- THE RULE THAT SHAPES EVERY TABLE HERE: the AI never moves money. It reads,
+-- it proposes, and it decides when to ask a person - a wrong guess must cost a
+-- badly-timed question, never a wrong charge. That is why the confirmations are
+-- columns holding a human's answer rather than a model's confidence.
+--
+-- SHADOW FIRST. `commission_ledger.mode` ships as 'shadow': every claim, every
+-- confirmation and every fee is computed and recorded, and nothing is charged.
+-- That log is the evidence any saving or fee claim has to rest on before it is
+-- made to a shop, a traveller or an investor, and it answers the one question
+-- the whole model turns on - what share of negotiated offers become rentals.
+
+-- The durable shop record. Keyed by the same canonical phone key the rest of
+-- the app threads on (wa/phone-key), so a shop is one row however its number
+-- was spelled. A shop that has not accepted terms can never be billed: that is
+-- what `terms_accepted_at` is for, and the billing path reads it rather than
+-- assuming a fee was ever agreed.
+create table if not exists public.partner_shops (
+  shop_key          text primary key,        -- canonical phone key (outboxKey)
+  phone_digits      text,
+  name              text,
+  market            text,                    -- bali | thailand | ... (pricing + language)
+  status            text not null default 'prospect', -- prospect | partner | paused | blocked
+  terms_version     text,
+  terms_accepted_at timestamptz,
+  terms_accepted_by text,                    -- how it was accepted (page | whatsapp)
+  -- Prepaid credit comes first: a new shop buys a small block of introductions,
+  -- so there is no invoice and no risk to it. Minor units of `currency`.
+  credit_minor      bigint not null default 0,
+  currency          text not null default 'USD',
+  -- The plan's flat fees, per vehicle class, overridable per shop.
+  fee_scooter_minor integer,
+  fee_car_minor     integer,
+  -- What the shop's behaviour has earned: answered rate, honoured rate, and how
+  -- often it marks its monthly list. A shop that stops confirming stops being
+  -- sent travellers, which is the only enforcement that matters.
+  confirm_rate      numeric,
+  created_at        timestamptz not null default now(),
+  updated_at        timestamptz not null default now()
+);
+create index if not exists partner_shops_status_idx on public.partner_shops (status, updated_at desc);
+alter table public.partner_shops enable row level security;
+
+-- One row per deal the agent closed. The three-answer evidence trail lives
+-- here: what was agreed, what the traveller said, what the shop said.
+create table if not exists public.rental_claims (
+  id                bigint generated always as identity primary key,
+  user_email        text not null,
+  shop_key          text not null,
+  vendor_id         text,
+  vendor_name       text,
+  thread_key        text,
+  vehicle_class     text,                    -- scooter | car | motorbike
+  agreed_price      numeric,                 -- per day, as agreed in the thread
+  currency          text,
+  duration_days     integer,
+  pickup_at         timestamptz,
+  pickup_place      text,
+  -- recorded -> traveller_confirmed | traveller_denied | unanswered
+  --          -> shop_confirmed | shop_denied | expired
+  state             text not null default 'recorded',
+  asked_traveller_at    timestamptz,
+  traveller_answer      text,                -- yes | no  (a person's answer, never a model's)
+  traveller_answered_at timestamptz,
+  shop_answer           text,                -- rented | not_rented
+  shop_answered_at      timestamptz,
+  statement_id      bigint,
+  -- What the agent read this from: message ids, the recap it sent, the quote it
+  -- closed on. A fee is only ever as good as this.
+  evidence          jsonb,
+  created_at        timestamptz not null default now(),
+  updated_at        timestamptz not null default now()
+);
+create index if not exists rental_claims_user_idx on public.rental_claims (user_email, created_at desc);
+create index if not exists rental_claims_shop_idx on public.rental_claims (shop_key, created_at desc);
+create index if not exists rental_claims_state_idx on public.rental_claims (state, pickup_at);
+alter table public.rental_claims enable row level security;
+
+-- The money view of a claim. DELIBERATELY CARRIES NO TRAVELLER KEY: a shop's
+-- billing history must survive a traveller's erasure (the same reasoning that
+-- keeps admin_audit and de-identifies it rather than deleting it), while the
+-- person's own row - the claim, with the thread and the evidence - is deleted
+-- with them. `claim_id` is then a dangling reference by design, and the ledger
+-- keeps only what a bill is made of: a shop, a period, a fee and a state.
+create table if not exists public.commission_ledger (
+  id            bigint generated always as identity primary key,
+  claim_id      bigint,
+  shop_key      text not null,
+  fee_minor     integer not null,
+  currency      text not null default 'USD',
+  vehicle_class text,
+  -- shadow = computed and recorded, never charged. The default, on purpose.
+  mode          text not null default 'shadow',
+  -- accrued -> invoiced -> collected | waived | disputed
+  state         text not null default 'accrued',
+  statement_id  bigint,
+  note          text,
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now()
+);
+create index if not exists commission_ledger_shop_idx on public.commission_ledger (shop_key, created_at desc);
+create index if not exists commission_ledger_state_idx on public.commission_ledger (state, mode);
+alter table public.commission_ledger enable row level security;
+
+-- A month of claims for one shop, and the token that opens its own page. The
+-- token is the whole authentication story on purpose: a shop owner will not
+-- make an account to answer four questions, and the page shows only that
+-- shop's own rows.
+create table if not exists public.shop_statements (
+  id            bigint generated always as identity primary key,
+  shop_key      text not null,
+  period_start  date not null,
+  period_end    date not null,
+  claim_count   integer not null default 0,
+  total_minor   bigint not null default 0,
+  currency      text not null default 'USD',
+  -- draft -> sent -> answered -> paid | void
+  state         text not null default 'draft',
+  token         text unique,
+  sent_at       timestamptz,
+  answered_at   timestamptz,
+  paid_at       timestamptz,
+  paid_method   text,                       -- card | transfer | credit
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now()
+);
+create index if not exists shop_statements_shop_idx on public.shop_statements (shop_key, period_start desc);
+create unique index if not exists shop_statements_period_idx
+  on public.shop_statements (shop_key, period_start, period_end);
+alter table public.shop_statements enable row level security;
+
+-- ---------------------------------------------------------------------------
+-- SEARCH-TRAFFIC MONETISATION (visitor_consent_events, traffic_events,
+-- traffic_revenue) - the first tables in this schema about people who have
+-- NOT signed in
+-- ---------------------------------------------------------------------------
+--
+-- Every other user-keyed table here hangs off an email. The visitors these
+-- describe have none: they arrive on a guide from a search engine, answer the
+-- cookie banner, maybe follow a search suggestion, and leave. So nothing below
+-- can hold an email, a phone number, an IP address or a user agent string, and
+-- none of it does - the columns are closed vocabularies, booleans, hashes and
+-- dates.
+
+-- PROOF OF AN ANONYMOUS VISITOR'S COOKIE CHOICE.
+--
+-- consent_events.email is NOT NULL, so until this table existed a signed-out
+-- visitor's choice lived only in their own cookie - and signed-out visitors are
+-- exactly the population search advertising is shown to. Google's EU user
+-- consent policy requires RECORDS of consent; "it was in their browser" is not
+-- one.
+--
+-- visitor_key is sha256 of the random receipt id carried inside the (strictly
+-- necessary) wd_cookie_prefs cookie. The raw id never reaches the database, so
+-- a row can be FOUND by a visitor presenting their own cookie and cannot be
+-- turned back into one. One row per save, never an update: the same
+-- append-only shape as consent_events, for the same reason.
+create table if not exists public.visitor_consent_events (
+  id              bigint generated always as identity primary key,
+  visitor_key     text not null,              -- sha256(receipt id), hex
+  policy_version  text not null,              -- COOKIE_POLICY_VERSION they saw
+  source          text not null,              -- accept-all | reject-all | custom
+  preferences     boolean not null,
+  analytics       boolean not null,
+  marketing       boolean not null,
+  gpc             boolean not null default false, -- the request carried Sec-GPC: 1
+  region          text not null default 'unknown', -- tcf | other | unknown
+  lang            text,                        -- interface language shown, 2-8 chars
+  copy_hash       text,                        -- sha256 of the category copy shown
+  created_at      timestamptz not null default now()
+);
+create index if not exists visitor_consent_events_key_idx
+  on public.visitor_consent_events (visitor_key, created_at desc);
+create index if not exists visitor_consent_events_created_idx
+  on public.visitor_consent_events (created_at desc);
+alter table public.visitor_consent_events enable row level security;
+
+-- THE FIRST-PARTY TRAFFIC LOG. What this site can see for itself: a search
+-- unit loaded, a visitor arrived on /search from one, a partner link was
+-- followed. Written only while advertising consent is in force.
+--
+-- It cannot see clicks INSIDE Google's unit - that is a cross-origin iframe,
+-- and tracking clicks in it is a Restricted Access Feature this account does
+-- not hold. `session` is the 8-hex hash from lib/traffic/subid.ts: it rotates
+-- every UTC day, so a row cannot be joined to the same visitor tomorrow.
+create table if not exists public.traffic_events (
+  id          bigint generated always as identity primary key,
+  day         date not null,
+  kind        text not null,                  -- unit_loaded | unit_empty | serp_view | link_click
+  placement   text not null,                  -- a key of PLACEMENTS
+  market      text not null default 'xx',     -- ISO alpha-2, or xx
+  category    text not null default 'other',
+  partner     text not null,                  -- a TRAFFIC_PARTNERS id
+  sub_id      text not null,
+  session     text not null,                  -- 8 hex, rotates daily
+  -- ONLY ever a term Google issued (a serp_view carrying Google's own click
+  -- token). A query a person typed is never stored: that is free text from a
+  -- human and can be anything, including somebody's name.
+  term        text,
+  created_at  timestamptz not null default now()
+);
+create index if not exists traffic_events_day_idx
+  on public.traffic_events (day desc, placement, market);
+create index if not exists traffic_events_created_idx
+  on public.traffic_events (created_at);
+alter table public.traffic_events enable row level security;
+
+-- WHAT THE PARTNER SAYS IT PAID FOR. Imported from the partner's report by an
+-- owner; reconciled against traffic_events by lib/traffic/revenue.ts. The
+-- unique index makes a re-import of the same report a no-op instead of
+-- doubling a month's revenue.
+create table if not exists public.traffic_revenue (
+  id           bigint generated always as identity primary key,
+  partner      text not null,
+  day          date not null,
+  sub_id       text not null,
+  clicks       integer not null default 0,
+  revenue      numeric(12,4) not null default 0,
+  currency     text not null default 'USD',
+  imported_by  text not null,                 -- the OPERATOR who imported it
+  created_at   timestamptz not null default now()
+);
+create unique index if not exists traffic_revenue_row_idx
+  on public.traffic_revenue (partner, day, sub_id);
+create index if not exists traffic_revenue_day_idx on public.traffic_revenue (day desc);
+alter table public.traffic_revenue enable row level security;

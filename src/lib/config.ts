@@ -112,6 +112,8 @@ const DOC_URLS: Record<string, string> = {
   PAYPAL_ENV: "https://developer.paypal.com/dashboard/applications/live",
   ADSENSE_CLIENT: "https://www.google.com/adsense/",
   ADSENSE_SLOT: "https://www.google.com/adsense/new/u/0/pub/ads/myads/units",
+  TRAFFIC_PARTNERS: "https://www.google.com/adsense/new/u/0/pub/afs",
+  TRAFFIC_TCF_CMP: "https://support.google.com/adsense/answer/14325056",
   TWITTER_HANDLE: "https://x.com/settings/profile",
 };
 
@@ -137,6 +139,11 @@ const KEYS: {
    */
   owner?: boolean;
 }[] = [
+  // THE LADDER'S MEMORY (lib/ai-breaker). Blank = on. A provider that answers
+  // "payment required", a bad key, a delisted model or a rate limit is skipped
+  // for as long as that kind of refusal lasts, instead of being retried - and
+  // waited on - by every single AI call. `off` disables it.
+  { name: "AI_BREAKER", label: "AI ladder circuit breaker (blank = on, 'off' = disabled, or JSON: deadHours, modelMinutes, busySeconds, busyMaxMinutes, timeoutSeconds, timeoutMaxMinutes)", scope: "ai", editable: true, secret: false },
   { name: "GROQ_TOKEN", label: "Groq Gateway", scope: "ai", editable: true },
   { name: "GEMINI_TOKEN", label: "Gemini Gateway", scope: "ai", editable: true },
   { name: "OPENROUTER_TOKEN", label: "OpenRouter Gateway", scope: "ai", editable: true },
@@ -322,6 +329,15 @@ const KEYS: {
   // data-ad-slot only when a caller passed one and none ever did, so the free
   // tier reserved its ad space, showed its placeholder, and earned nothing.
   { name: "ADSENSE_SLOT", label: "Google AdSense Ad Unit ID (numeric, from a Display unit)", scope: "billing", editable: true, secret: false },
+  // SEARCH-TRAFFIC MONETISATION (lib/traffic). Three values, all public by
+  // construction - a publisher id and a style id ship in the page source the
+  // moment a unit renders - so they are secret:false and an owner can read
+  // back what is set. OFF unless TRAFFIC_MODE says otherwise.
+  { name: "TRAFFIC_MODE", label: "Search traffic mode ('off' | 'test' | 'live'; blank = off. 'test' serves Google test ads that earn nothing)", scope: "billing", editable: true, secret: false },
+  { name: "TRAFFIC_PARTNERS", label: "Search traffic partners, one per line: id|afs|label|on|pub-XXXXXXXXXXXXXXXX:styleId[:channel]|markets|share  or  id|link|label|on|https://...?q={q}&subid={subid}|markets|share", scope: "billing", editable: true, secret: false },
+  { name: "TRAFFIC_SETTINGS", label: "Search traffic settings, one JSON object. Blank = all defaults. Keys: raf, relatedSearches (3-5), maxAds (1-3), placements {guide-inline, guide-hub, search-results, no-coverage, hunt-ended}, ignoredPageParams [], linkTerms {\"th|scooter\": []}, funnelGuides {\"th\": \"slug\"}. Out-of-range values are clamped and reported on Admin -> Traffic", scope: "billing", editable: true, secret: false },
+  { name: "TRAFFIC_AD_CREATIVES", label: "Ad creatives you run to the guides, one per line, verbatim. A landing URL's ?rac= is only declared to Google when it IS one of these. Leave blank for organic traffic", scope: "billing", editable: true, secret: false },
+  { name: "TRAFFIC_TCF_CMP", label: "Google-certified TCF consent platform installed ('none' | 'google'; blank = none. Until 'google', search ads are not requested in the EEA, UK or Switzerland)", scope: "billing", editable: true, secret: false },
   { name: "TWITTER_HANDLE", label: "X (Twitter) handle (@wheeldeal)", scope: "auth", editable: true, secret: false },
   // The legal entity the Terms, the Privacy Policy and every indemnity clause
   // protect. It was a placeholder constant with a TODO on it, so registering a

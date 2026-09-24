@@ -26,6 +26,7 @@ import { ADSENSE_PUBLISHER, resolveSiteOrigin } from "@/lib/site";
 import { TestModeBanner } from "@/components/TestModeBanner";
 import { FirstTouchTerms } from "@/components/FirstTouchTerms";
 import { CookieConsent } from "@/components/CookieConsent";
+import { buildAdConsentScript } from "@/lib/cookies/prepaint";
 import { ScreenTracker } from "@/components/ScreenTracker";
 import "./globals.css";
 
@@ -337,55 +338,13 @@ try {
 } catch (e) {}
 `;
 
-// THE ADVERTISING GATE, AND WHY IT RUNS BEFORE PAINT.
-//
-// Google's ad SDK sets Google's cookies the moment it loads - before any ad is
-// requested and whether or not a slot ever renders. So consent cannot be
-// checked in a React effect: by the time a component mounts, the script tag in
-// this <head> has already been fetched and the cookies are already set. The
-// only place the decision can be made is here, in a synchronous script that
-// runs before the browser reaches anything else.
-//
-// The <script src> that used to sit in <head> unconditionally is therefore
-// gone, and this injects it instead - only when `wd_cookie_prefs` grants
-// `marketing`.
-//
-// THIS DOES NOT BREAK ADSENSE REVIEW, AND THE OLD COMMENT'S WORRY WAS ABOUT
-// THE WRONG TAG. Site ownership is verified by <meta name="google-adsense-
-// account">, which generateMetadata emits on every page, unconditionally, and
-// still does. That is the mechanism Google's own docs prescribe, and it is
-// untouched. Loading the SDK for a visitor who has not consented is, in the
-// EEA and the UK, a breach of Google's own EU user consent policy - so the
-// gate is not a trade against monetisation, it is the condition of it.
-//
-// The parse is a hand-rolled copy of decodeCookieConsent because this string
-// runs before any module loads and cannot import one. It is deliberately
-// minimal and fails closed: any throw, any missing field, anything other than
-// marketing === true, and no script is added. cookies.test.ts pins it against
-// the real decoder so the two cannot drift.
-//
-// A STALE POLICY VERSION STILL COUNTS. The version is not checked here, on
-// purpose: a bump re-asks (the banner appears on this very load), and until the
-// person answers, their last word stands in BOTH directions. Silently revoking
-// a yes misrepresents their choice exactly as much as silently honouring a no
-// would - and the re-prompt is already on screen.
-const adConsentScript = `
-(function () {
-  try {
-    var m = document.cookie.match(/(?:^|;\\s*)wd_cookie_prefs=([^;]*)/);
-    if (!m) return;
-    var b = m[1].replace(/-/g, "+").replace(/_/g, "/");
-    b += "====".slice((b.length % 4) || 4);
-    var d = JSON.parse(atob(b));
-    if (!d || !d.g || d.g.marketing !== true) return;
-    var s = document.createElement("script");
-    s.async = true;
-    s.crossOrigin = "anonymous";
-    s.src = "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=${ADSENSE_PUBLISHER}";
-    document.head.appendChild(s);
-  } catch (e) {}
-})();
-`;
+// THE ADVERTISING GATE. Built, documented and executed-under-test in
+// lib/cookies/prepaint.ts - it sets Consent Mode v2 to denied, applies the
+// stored choice, honours Global Privacy Control, and only then injects
+// Google's SDK. It has to be an inline script because the decision must be
+// made before paint; it lives in its own module because a string inside this
+// file could only ever be grepped, never run.
+const adConsentScript = buildAdConsentScript(ADSENSE_PUBLISHER);
 
 export default function RootLayout({
   children,

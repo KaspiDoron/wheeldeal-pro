@@ -186,6 +186,52 @@ describe("CI runs on the branch people actually work on", () => {
     expect(deployIf).not.toMatch(/startsWith\(github\.ref/);
   });
 
+  it("the gate also checks WHAT is sent to Google once consent exists", () => {
+    // check:cookies proves the negative (nothing loads without consent).
+    // check:traffic proves the positive is policy-correct: one search-ads
+    // request per document, no publisher-supplied terms, ads never outnumbering
+    // results, a typed query never logged, an undeclared creative never
+    // forwarded. Getting any of those wrong fails no unit test - it earns an
+    // AdSense strike weeks later - so it is a hard gate, pinned like its twin.
+    const s = wf();
+    const verify = s.slice(s.indexOf("  verify:"), s.indexOf("\n  deploy:"));
+    const at = verify.indexOf("run: npm run check:traffic");
+    expect(at, "the workflow no longer runs check:traffic").toBeGreaterThan(-1);
+    expect(at).toBeGreaterThan(verify.indexOf("- name: Build"));
+    expect(at).toBeGreaterThan(verify.indexOf("npx playwright install --with-deps chromium"));
+    const step = verify.slice(verify.lastIndexOf("- name:", at), at);
+    expect(step).not.toMatch(/continue-on-error/);
+  });
+
+  it("the gate watches the NETWORK for the cookie promise, not only the source", () => {
+    // "We do not load Google's ad script unless you allow it" is a negative
+    // promise about a THIRD-PARTY REQUEST. cookies.test.ts can only grep
+    // layout.tsx and assert the text looks right; `npm run check:cookies`
+    // boots the real build, drives real Chromium and counts requests to
+    // googlesyndication.com. It was the one check in CLAUDE.md's validate list
+    // that CI never ran - so the promise made to a regulator was the only one
+    // guarded by somebody remembering to type a command. Pinned here so the
+    // step cannot be quietly dropped again.
+    const s = wf();
+    const verify = s.slice(s.indexOf("  verify:"), s.indexOf("\n  deploy:"));
+    expect(verify).toContain("run: npm run check:cookies");
+
+    // Inside `verify`, which `deploy` needs - so a red cookie check blocks the
+    // ship rather than decorating it.
+    const at = verify.indexOf("run: npm run check:cookies");
+    // AFTER the build: the script refuses to run without a .next to boot.
+    expect(at).toBeGreaterThan(verify.indexOf("- name: Build"));
+    // AFTER Chromium is installed: it launches a real browser.
+    expect(at).toBeGreaterThan(verify.indexOf("npx playwright install --with-deps chromium"));
+
+    // ...and it is a HARD gate. An advisory step that may fail is not a gate.
+    const stepStart = verify.lastIndexOf("- name:", at);
+    const nextStep = verify.indexOf("- name:", at);
+    const step = verify.slice(stepStart, nextStep === -1 ? undefined : nextStep);
+    expect(step).not.toMatch(/continue-on-error:\s*true/);
+    expect(step).not.toMatch(/^\s+if:/m);
+  });
+
   it("the quality gate itself still runs all four checks", () => {
     // If the trigger is fixed but the gate is hollow, nothing was gained.
     const s = wf();

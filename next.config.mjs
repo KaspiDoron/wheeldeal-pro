@@ -41,11 +41,14 @@ const nextConfig = {
             key: "Content-Security-Policy-Report-Only",
             value: [
               "default-src 'self'",
-              "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://accounts.google.com https://pagead2.googlesyndication.com https://www.paypal.com",
+              // www.google.com + the two search-ads hosts: AdSense for Search
+              // (lib/traffic). Google's own CSP guidance for it names
+              // adsensecustomsearchads.com and syndicatedsearch.goog.
+              "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://accounts.google.com https://pagead2.googlesyndication.com https://www.google.com https://www.adsensecustomsearchads.com https://syndicatedsearch.goog https://www.paypal.com",
               "style-src 'self' 'unsafe-inline' https://accounts.google.com",
               "img-src 'self' data: blob: https:",
-              "connect-src 'self' https://accounts.google.com https://pagead2.googlesyndication.com https://www.paypal.com https://api.paypal.com",
-              "frame-src https://accounts.google.com https://googleads.g.doubleclick.net https://www.paypal.com",
+              "connect-src 'self' https://accounts.google.com https://pagead2.googlesyndication.com https://www.google.com https://syndicatedsearch.goog https://www.paypal.com https://api.paypal.com",
+              "frame-src https://accounts.google.com https://googleads.g.doubleclick.net https://www.google.com https://www.adsensecustomsearchads.com https://syndicatedsearch.goog https://www.paypal.com",
               "frame-ancestors 'none'",
               "base-uri 'self'",
               "form-action 'self'",

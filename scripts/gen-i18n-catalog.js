@@ -1,16 +1,32 @@
 #!/usr/bin/env node
 // Regenerate src/lib/i18n-catalog.ts: every literal string passed to t("...")
 // anywhere in src/. Run after adding UI copy: node scripts/gen-i18n-catalog.js
-const { execSync } = require("child_process");
 const fs = require("fs");
+const path = require("path");
 // A negative lookbehind excludes the `t` at the TAIL of an identifier
 // (impor`t(`, .ge`t(`, `await impor`t(`...), which the old bare `t\(` regex
 // wrongly captured - polluting the catalog with module paths, HTTP headers and
 // query-param keys and wasting the daily translate budget translating them.
-const out = execSync(
-  `grep -rhoP '(?<![A-Za-z0-9_$])t\\("(?:[^"\\\\]|\\\\.)*"\\)' src --include='*.tsx' --include='*.ts'`,
-  { encoding: "utf8" }
-);
+//
+// A NODE WALK, NOT `grep -P`. This used to shell out to `grep -rhoP`, and -P
+// (Perl regex, needed for the lookbehind) exists only in GNU grep. On macOS the
+// script died with "invalid option -- P", so the catalogue could be regenerated
+// in Linux CI and nowhere else - and every rule in this repo that says "run
+// gen-i18n-catalog.js after adding copy" was unfollowable on the machine the
+// copy is written on. Same pattern, same files, no dependency on whose grep is
+// on the PATH. The output is a sorted set, so walk order cannot change it.
+const CALL = /(?<![A-Za-z0-9_$])t\("(?:[^"\\]|\\.)*"\)/g;
+function walk(dir, found) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) walk(full, found);
+    else if (/\.tsx?$/.test(entry.name)) {
+      for (const m of fs.readFileSync(full, "utf8").match(CALL) ?? []) found.push(m);
+    }
+  }
+  return found;
+}
+const out = walk("src", []).join("\n");
 // COMPUTED COPY TOO. Some user-facing sentences are chosen in a helper and
 // only then passed to `t()` - `t(transportMessage(r))` - so there is no literal
 // for the grep to find and those lines shipped untranslated. src/lib/i18n-extras

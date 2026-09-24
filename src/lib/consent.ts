@@ -212,11 +212,27 @@ export async function recordConsent(input: {
   // lost acceptance goes. A breadcrumb is a worse record than a ledger row - it
   // has no schema and no index - but it is a RECORD, and `consentLedger` reads
   // it back so the fallback is not write-only.
+  //
+  // KEYED BY THE COLUMN, NEVER BY THE PAYLOAD. This row used to carry the
+  // address inside `detail` and leave `user_email` NULL - and the erasure
+  // registry matches agent_events on `user_email`, exactly. So the one row
+  // that names a person AND what they consented to was the one row the erase
+  // walker and the DSAR export could not find: it outlived the account. The
+  // address goes where every other agent_events writer about a person puts it
+  // (bookings, replies, wa-guard, the inbound-risk feed), and it stays OUT of
+  // the free text - a copy in there is a second key nothing walks.
+  //
+  // No retry-without-the-column rung, on purpose. The only shape such a retry
+  // could write is the address-in-detail row this comment is about - a record
+  // no erasure reaches. `user_email` entered schema.sql before `consent_events`
+  // did, and the erase walker's own DELETE on this table already depends on
+  // it, so a database that would need the rung is one whose erasure is broken
+  // regardless.
   await sbInsert("agent_events", [
     {
       kind: UNRECORDED_KIND,
+      user_email: email,
       detail: JSON.stringify({
-        email,
         consentKind: input.kind,
         version,
         context: input.context ?? null,
@@ -332,7 +348,8 @@ export async function consentLedger(email: string, limit = 50): Promise<ConsentE
     accepted_at: string;
     granted?: boolean | null;
   };
-  const [rows, crumbs] = await Promise.all([
+  type CrumbRow = { detail: string; created_at: string; user_email?: string | null };
+  const [rows, keyedCrumbs, legacyCrumbs] = await Promise.all([
     // Two-tier read: a pre-migration database 400s a select naming `granted`,
     // and sbSelect collapses that to [] - which would blank the whole proof
     // view. The legacy retry costs one extra read only when the first is empty.
@@ -351,10 +368,24 @@ export async function consentLedger(email: string, limit = 50): Promise<ConsentE
         )}&order=accepted_at.desc&limit=${cap}`
       ).catch(() => [] as LedgerRow[]);
     })(),
-    sbSelect<{ detail: string; created_at: string }>(
+    // The person's OWN breadcrumbs, by the keyed column. This used to read the
+    // newest 200 breadcrumbs of EVERYBODY and pick this person's out of the
+    // payload in memory - other people's consent rows pulled into a request
+    // that was not about them, and a busy fallback would have pushed this
+    // person's rows past the cap and out of their own proof view.
+    sbSelect<CrumbRow>(
       "agent_events",
-      `select=detail,created_at&kind=eq.${UNRECORDED_KIND}&order=created_at.desc&limit=200`
-    ).catch(() => []),
+      `select=detail,created_at,user_email&kind=eq.${UNRECORDED_KIND}&user_email=eq.${encodeURIComponent(
+        who
+      )}&order=created_at.desc&limit=200`
+    ).catch(() => [] as CrumbRow[]),
+    // LEGACY rows: written before the column was stamped, so the address is
+    // only in `detail`. Still read, because a fix to the writer must not make
+    // an acceptance that really happened disappear from the proof view.
+    sbSelect<CrumbRow>(
+      "agent_events",
+      `select=detail,created_at,user_email&kind=eq.${UNRECORDED_KIND}&user_email=is.null&order=created_at.desc&limit=200`
+    ).catch(() => [] as CrumbRow[]),
   ]);
 
   const fromLedger: ConsentEvent[] = rows
@@ -367,8 +398,18 @@ export async function consentLedger(email: string, limit = 50): Promise<ConsentE
       ...(r.granted === false ? { granted: false } : {}),
     }));
 
+  // WHO A BREADCRUMB IS ABOUT: the column when it has one, the payload only
+  // when it does not. Re-checked here rather than trusted to the filter above,
+  // and never mixed - a keyed row whose payload names somebody else belongs to
+  // the person in the column, which is also the person an erasure removes it
+  // for. Each read accepts ONLY its own shape, so a row can never count twice
+  // however the store answered the two filters.
   const fromCrumbs: ConsentEvent[] = [];
-  for (const c of crumbs) {
+  const tagged = [
+    ...keyedCrumbs.map((c) => ({ c, legacy: false })),
+    ...legacyCrumbs.map((c) => ({ c, legacy: true })),
+  ];
+  for (const { c, legacy } of tagged) {
     try {
       const d = JSON.parse(c.detail) as {
         email?: string;
@@ -378,7 +419,10 @@ export async function consentLedger(email: string, limit = 50): Promise<ConsentE
         granted?: boolean;
         at?: string;
       };
-      if (String(d.email ?? "").toLowerCase() !== who) continue;
+      const keyed = String(c.user_email ?? "").trim().toLowerCase();
+      if (legacy ? Boolean(keyed) : !keyed) continue;
+      const owner = legacy ? String(d.email ?? "").trim().toLowerCase() : keyed;
+      if (owner !== who) continue;
       if (!(CONSENT_KINDS as readonly string[]).includes(String(d.consentKind))) continue;
       fromCrumbs.push({
         kind: d.consentKind as ConsentKind,
