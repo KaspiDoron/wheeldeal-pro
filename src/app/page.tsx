@@ -547,7 +547,7 @@ export default function Home() {
     // if the layout has pushed it out of the viewport, it is centred again.
     // The moment the person scrolls themselves (wheel, touch, keys) the pin
     // stands down - a jump must never fight a hand.
-    const PIN_MS = 1_500;
+    const PIN_MS = 3_000;
     const until = performance.now() + PIN_MS;
     let stopped = false;
     const stop = () => {
@@ -557,7 +557,8 @@ export default function Home() {
     for (const ev of ["wheel", "touchstart", "keydown"] as const) window.addEventListener(ev, stop, { passive: true });
     // Every frame, not on `scroll` events: the adjustment can move the page in
     // the same frame the row is re-laid out, and an event-driven check was
-    // still missing 2 runs in 40. Ninety rect reads over 1.5s cost nothing.
+    // still missing 2 runs in 40. A few hundred rect reads over 3s cost nothing; the
+    // late arrivals under load were landing after 1.5s.
     const pin = () => {
       if (stopped) return;
       const el = document.getElementById(`vendor-${id}`);
