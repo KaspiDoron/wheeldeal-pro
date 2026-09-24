@@ -109,6 +109,20 @@ export function VirtualVendorList({
   useEffect(() => {
     const index = scrollRequest?.index;
     if (typeof index !== "number" || index < 0) return;
+    // AIM WITH A NUMBER MEASURED NOW, NOT ONE A RESIZEOBSERVER WILL DELIVER
+    // LATER. The observer above keeps `offset` honest between jumps, but it
+    // fires asynchronously - and the surface that triggers most jumps (the
+    // Live Status panel) changes its own height in the same tap. So the render
+    // this effect belongs to can carry the margin from BEFORE that change, the
+    // virtualizer aims with it, its dynamic-mode retry loop then re-asserts the
+    // same wrong target for a few frames, and the page settles a constant
+    // ~165px short of the card at 320px. jump-to-vendor.spec.ts caught it 3-5
+    // runs in 20; CI never did, because journeys retry twice there.
+    const top = (parentRef.current?.getBoundingClientRect().top ?? 0) + window.scrollY;
+    if (Math.abs(top - virtualizer.options.scrollMargin) >= 1) {
+      virtualizer.setOptions({ ...virtualizer.options, scrollMargin: top });
+      setOffset(top);
+    }
     virtualizer.scrollToIndex(index, { align: "center" });
     // Keyed on the NONCE, so a repeat jump to the same row re-runs. `virtualizer`
     // is recreated every render by design; depending on it here would scroll on

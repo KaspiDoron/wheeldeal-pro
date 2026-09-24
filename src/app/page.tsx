@@ -528,12 +528,47 @@ export default function Home() {
       const idx = filtered.findIndex((v) => v.id === id);
       if (idx >= 0) setScrollRequest({ index: idx, nonce: ++scrollNonceRef.current });
     }
-    // Two frames: let React commit the larger window before scrolling.
-    requestAnimationFrame(() =>
-      requestAnimationFrame(() => {
-        document.getElementById(`vendor-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
-      })
-    );
+    // THE VIRTUALIZER LANDS THE JUMP; THIS KEEPS THE CARD THERE WHILE THE
+    // ROWS ABOVE IT SETTLE.
+    //
+    // Measured with a probe (jump-to-vendor at 320px, six identical runs): the
+    // virtualizer puts the card on screen within 60ms - and at about +300ms the
+    // page moves another ~870px by itself and the card is gone, 165-207px past
+    // the viewport. That second move is the virtualizer's own viewport-
+    // stabilising adjustment: cards mount compact and grow when their offer
+    // data lands, and when a row ABOVE the scroll position grows the list
+    // shifts the page by the growth so what is on screen stays put. Right
+    // after a jump into unmeasured rows that "stability" pushes the very card
+    // that was just centred out of view. It is timing-dependent (whenever the
+    // data arrives), which is why the journey failed 3-6 runs in 20 and never
+    // in CI, where journeys retry twice.
+    //
+    // So for a bounded moment after the jump the card is PINNED: each frame,
+    // if the layout has pushed it out of the viewport, it is centred again.
+    // The moment the person scrolls themselves (wheel, touch, keys) the pin
+    // stands down - a jump must never fight a hand.
+    const PIN_MS = 1_500;
+    const until = performance.now() + PIN_MS;
+    let stopped = false;
+    const stop = () => {
+      stopped = true;
+      for (const ev of ["wheel", "touchstart", "keydown"] as const) window.removeEventListener(ev, stop);
+    };
+    for (const ev of ["wheel", "touchstart", "keydown"] as const) window.addEventListener(ev, stop, { passive: true });
+    // Every frame, not on `scroll` events: the adjustment can move the page in
+    // the same frame the row is re-laid out, and an event-driven check was
+    // still missing 2 runs in 40. Ninety rect reads over 1.5s cost nothing.
+    const pin = () => {
+      if (stopped) return;
+      const el = document.getElementById(`vendor-${id}`);
+      if (el) {
+        const r = el.getBoundingClientRect();
+        if (r.bottom <= 0 || r.top >= window.innerHeight) el.scrollIntoView({ behavior: "auto", block: "center" });
+      }
+      if (performance.now() < until) requestAnimationFrame(pin);
+      else stop();
+    };
+    requestAnimationFrame(pin);
   }
 
   /**

@@ -50,6 +50,13 @@ import { chromium } from "playwright";
 const PORT = Number(process.env.COOKIE_CHECK_PORT || 3401);
 const SESSION_SECRET = "cookie-gate-check-secret-not-a-real-one";
 const BASE = process.env.COOKIE_CHECK_URL || `http://127.0.0.1:${PORT}`;
+// The host the fixture cookies are planted for. This was the literal
+// "127.0.0.1", which made every cookie case against a REMOTE target (the live
+// site, via COOKIE_CHECK_URL) silently run with no cookie at all - the browser
+// never sends a 127.0.0.1 cookie to wheeldeal.pro - and the report read as
+// "nine failures" that were all the script's own.
+const COOKIE_HOST = new URL(BASE).hostname;
+const REMOTE = Boolean(process.env.COOKIE_CHECK_URL);
 const AD_HOST = "googlesyndication.com";
 
 // THE SECOND GOOGLE PRODUCT. Sponsored search (lib/traffic) loads a DIFFERENT
@@ -81,12 +88,21 @@ function encode(payload) {
     .replace(/=+$/, "");
 }
 
-// Kept in step with COOKIE_POLICY_VERSION. Read from the source so a bump does
-// not silently turn every case here into a stale-version case.
+// THE POLICY VERSION THE TARGET ENFORCES. Asked of the server itself
+// (/api/cookies/consent returns it), because that is the only version that
+// matters: a fixture built from the LOCAL manifest against a remote target that
+// runs an older policy is a stale-version fixture, and every "accept" case
+// then measures the re-prompt instead of the grant. The manifest is the
+// fallback for a server that cannot answer.
 async function currentVersion() {
-  const src = await import("node:fs/promises").then((fs) =>
-    fs.readFile("src/lib/cookies/manifest.ts", "utf8")
-  );
+  try {
+    const res = await fetch(`${BASE}/api/cookies/consent`, { cache: "no-store" });
+    const d = await res.json();
+    if (typeof d?.version === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d.version)) return d.version;
+  } catch {
+    /* fall through to the source */
+  }
+  const src = await import("node:fs/promises").then((fs) => fs.readFile("src/lib/cookies/manifest.ts", "utf8"));
   const m = src.match(/COOKIE_POLICY_VERSION\s*=\s*"([^"]+)"/);
   if (!m) throw new Error("COOKIE_POLICY_VERSION not found in manifest.ts");
   return m[1];
@@ -165,7 +181,7 @@ async function visit(browser, cookie, opts = {}) {
   }
   if (cookie) {
     await ctx.addCookies([
-      { name: "wd_cookie_prefs", value: cookie, domain: "127.0.0.1", path: "/" },
+      { name: "wd_cookie_prefs", value: cookie, domain: COOKIE_HOST, path: "/" },
     ]);
   }
   const page = await ctx.newPage();
@@ -184,7 +200,9 @@ async function visit(browser, cookie, opts = {}) {
   await page.goto(`${BASE}${path}`, { waitUntil: "domcontentloaded" });
   // The banner mounts on a 400ms timer; give the injected script time too. A
   // guide also has a config round trip before its unit may request anything.
-  await page.waitForTimeout(path === "/welcome" ? 1_600 : 2_600);
+  // A remote target adds a real network round trip to /api/cookies/consent
+  // before the banner can know whether to show, so it gets longer.
+  await page.waitForTimeout(REMOTE ? 5_000 : path === "/welcome" ? 1_600 : 2_600);
 
   const banner = await page
     .getByRole("region", { name: /cookie choices/i })
